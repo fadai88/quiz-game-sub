@@ -64,6 +64,39 @@ const UserSchema = new mongoose.Schema({
         type: Number,
         default: 0
     },
+    accountTier: {
+        type: String,
+        enum: ['free', 'premium'],
+        default: 'free',
+        index: true
+    },
+    subscriptionStatus: {
+        type: String,
+        enum: ['none', 'active', 'expired', 'cancelled'],
+        default: 'none',
+        index: true
+    },
+    subscriptionId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Subscription',
+        sparse: true
+    },
+    practiceGamesPlayed: {
+        type: Number,
+        default: 0
+    },
+    tournamentsPlayed: {
+        type: Number,
+        default: 0
+    },
+    tournamentWins: {
+        type: Number,
+        default: 0
+    },
+    totalTournamentPrizes: {
+        type: Number,
+        default: 0
+    },
 }, {
     timestamps: true
 });
@@ -80,6 +113,21 @@ UserSchema.pre('save', async function(next) {
 UserSchema.methods.matchPassword = async function(enteredPassword) {
     if (!this.password) return false;
     return await bcrypt.compare(enteredPassword, this.password);
+};
+
+// Check if user has active premium subscription
+UserSchema.methods.hasPremiumAccess = function() {
+    return this.accountTier === 'premium' && this.subscriptionStatus === 'active';
+};
+
+// Check if user can access tournaments
+UserSchema.methods.canAccessTournaments = function() {
+    return this.hasPremiumAccess();
+};
+
+// Check if user is on free tier
+UserSchema.methods.isFreeUser = function() {
+    return this.accountTier === 'free';
 };
 
 const User = mongoose.model('User', UserSchema);

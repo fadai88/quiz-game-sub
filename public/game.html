@@ -454,6 +454,9 @@
         <nav>
             <ul>
                 <li><a href="index.html">Home</a></li>
+                <li><a href="game.html">Practice</a></li>
+                <li><a href="tournaments.html">🏆 Tournaments</a></li>
+                <li><a href="subscription.html">💳 Subscription</a></li>
                 <li><a href="leaderboard.html">Leaderboard</a></li>
             </ul>
         </nav>
@@ -464,13 +467,7 @@
         <div id="balanceDisplay"></div>
         <div id="countdownTimer"></div>
         <div id="gameArea">
-            <select id="betAmount">
-                <option value="3000000">3 USDC Game</option>
-                <option value="10000000">10 USDC Game</option>
-                <option value="15000000">15 USDC Game</option>
-                <option value="20000000">20 USDC Game</option>
-                <option value="30000000">30 USDC Game</option>
-            </select>
+            <div id="gameModeInfo" style="margin-bottom:12px;"></div>
             <button id="joinGameBtn" type="button">Join Game</button>
             <div id="waitingMessage"></div>
             <div id="players"></div>
@@ -486,15 +483,15 @@
                 <div class="game-choice-buttons">
                     <button id="waitForPlayerBtn" class="choice-btn">
                         <span class="choice-icon">👥</span>
-                        <span class="choice-title">Playing against human</span>
-                        <span class="choice-desc">May take some time</span>
-                        <span class="reward-info">Win 1.8x your bet!</span>
+                        <span class="choice-title">Play vs Human</span>
+                        <span class="choice-desc">Match with another player</span>
+                        <span class="reward-info" id="humanRewardInfo"></span>
                     </button>
                     <button id="playAgainstBotBtn" class="choice-btn">
                         <span class="choice-icon">🤖</span>
                         <span class="choice-title">Play Against Bot</span>
                         <span class="choice-desc">Start immediately against an AI opponent</span>
-                        <span class="reward-info">Win 1.5x your bet!</span>
+                        <span class="reward-info" id="botRewardInfo"></span>
                     </button>
                 </div>
             </div>
@@ -661,7 +658,45 @@
 
         let connectedWallet = null;
         let currentRoomId = null;
-        let currentBetAmount = null;
+        let currentBetAmount = null; // kept for compatibility, not used for betting
+
+        // ── Subscription / Game Mode ─────────────────────────────────────────────
+        const urlParams = new URLSearchParams(window.location.search);
+        const currentTournamentId = urlParams.get('tournament') || null;
+        const currentGameMode = currentTournamentId ? 'tournament' : 'practice';
+
+        // Populate game mode info banner and modal labels on load
+        (async function initGameMode() {
+            const modeEl = document.getElementById('gameModeInfo');
+            const humanReward = document.getElementById('humanRewardInfo');
+            const botReward   = document.getElementById('botRewardInfo');
+
+            if (currentGameMode === 'tournament') {
+                // Verify premium access before allowing tournament play
+                try {
+                    const res = await fetch('/api/subscription/status', { credentials: 'include' });
+                    const subData = await res.json();
+                    if (!subData.success || subData.tier !== 'premium' || subData.status !== 'active') {
+                        modeEl.innerHTML = '⚠️ <strong>Premium required for tournaments.</strong> ' +
+                            '<a href="/subscription.html">Upgrade now</a>';
+                        document.getElementById('joinGameBtn').disabled = true;
+                        return;
+                    }
+                } catch(e) {
+                    console.error('Subscription check failed:', e);
+                }
+                modeEl.innerHTML = '🏆 <strong>Tournament Mode</strong> — Win real USDC prizes!';
+                if (humanReward) humanReward.textContent = 'Compete for USDC prize';
+                if (botReward)   botReward.textContent   = 'Practice before your match';
+            } else {
+                modeEl.innerHTML = '🎮 <strong>Practice Mode</strong> — Play for fun, no prizes. ' +
+                    '<a href="/subscription.html">Upgrade to Premium</a> for tournament prizes.';
+                if (humanReward) humanReward.textContent = 'Practice match';
+                if (botReward)   botReward.textContent   = 'Practice vs AI';
+            }
+        })();
+        // ────────────────────────────────────────────────────────────────────────
+
         let currentQuestionId = null;
         let questionTimer;
         let correctAnswer;
@@ -1287,16 +1322,10 @@
                     alert('Please connect your wallet first');
                     return;
                 }
-                const betAmount = parseInt(document.getElementById('betAmount').value);
-                if (isNaN(betAmount) || betAmount <= 0) {
-                    alert('Please enter a valid bet amount');
-                    return;
-                }
-                console.log('Selected bet amount:', fromAtomicUnits(betAmount), 'USDC (atomic:', betAmount, ')');
-                currentBetAmount = betAmount; // Store bet amount
+                // No bet needed - just show game mode modal
                 updateUIForJoining();
                 waitingMessage.textContent = 'Waiting for game mode selection...';
-                showGameChoiceModal(); // Show modal directly
+                showGameChoiceModal();
             } catch (error) {
                 logError('join-game', error);
                 resetUIAfterError();
@@ -1518,7 +1547,7 @@
 
         socket.on('gameOver', (data) => {
             console.log('Received game over data:', data);
-            const { players, winner, betAmount, singlePlayerMode, payoutSignature, botOpponent, error } = data;
+            const { players, winner, singlePlayerMode, botOpponent, error, gameMode, tournamentId, prizeAmount } = data;
 
             // Clear timers
             if (questionTimer) clearTimeout(questionTimer);
@@ -1535,10 +1564,7 @@
 
             if (error) {
                 waitingMessage.textContent = `Game Over! Error: ${error}`;
-                setTimeout(() => {
-                    resetGame();
-                    updateBalance();
-                }, 5000);
+                setTimeout(() => { resetGame(); }, 5000);
                 return;
             }
 
@@ -1548,54 +1574,46 @@
             ).join('');
             playersDiv.innerHTML = '<h2>Final Scores:</h2>' + scoresHtml;
 
-            // Display game outcome
-            let gameOverMessage = '';
             const clientIsWinner = winner === connectedWallet;
-            // Convert betAmount from atomic units to USDC for display
-            const betAmountUSDC = fromAtomicUnits(betAmount);
-            const winnings = betAmountUSDC * (botOpponent ? 1.5 : 1.8);
+            const isTournament = (gameMode === 'tournament' || !!tournamentId);
+            let gameOverMessage = '';
 
             if (botOpponent) {
                 const humanPlayer = players.find(p => p.username === connectedWallet && !p.isBot);
                 const botPlayer = players.find(p => p.isBot);
                 if (clientIsWinner) {
-                    gameOverMessage = `Congratulations! You defeated ${botPlayer ? botPlayer.username : 'the bot'} with ${humanPlayer ? humanPlayer.score : 0} correct answers! You won ${winnings.toFixed(2)} USDC!`;
-                    if (payoutSignature) {
-                        gameOverMessage += `<br><a href="https://explorer.solana.com/tx/${payoutSignature}?cluster=devnet" target="_blank">View transaction</a>`;
-                    }
+                    gameOverMessage = `🎉 You defeated ${botPlayer ? botPlayer.username : 'the bot'} with ${humanPlayer ? humanPlayer.score : 0} correct answers!`;
                     if (typeof celebrateWin === 'function') celebrateWin('bot_win');
-                } else if (winner === botPlayer?.username) {
+                } else {
                     gameOverMessage = `Game Over! You got ${humanPlayer ? humanPlayer.score : 0} correct answers. Better luck next time!`;
-                } else {
-                    gameOverMessage = `Game Over against ${botPlayer ? botPlayer.username : 'the bot'}! Your score: ${humanPlayer ? humanPlayer.score : 0}.`;
-                    if (winner) {
-                        gameOverMessage += ` The winner was ${winner}.`;
-                    } else {
-                        gameOverMessage += " It was a draw!";
-                    }
                 }
-            } else if (singlePlayerMode && !botOpponent) {
-                const player = players[0];
-                if (clientIsWinner) {
-                    gameOverMessage = `Congratulations! You won in single player mode with ${player.score} correct answers! You won ${winnings.toFixed(2)} USDC!`;
-                    if (payoutSignature) {
-                        gameOverMessage += `<br><a href="https://explorer.solana.com/tx/${payoutSignature}?cluster=devnet" target="_blank">View transaction</a>`;
-                    }
-                } else {
-                    gameOverMessage = `Game Over! You got ${player.score} correct answers. You need at least 5 correct answers to win in single player.`;
-                }
-            } else {
+            } else if (isTournament) {
                 const clientPlayer = players.find(p => p.username === connectedWallet);
-                const opponentPlayer = players.find(p => p.username !== connectedWallet);
                 if (clientIsWinner) {
-                    gameOverMessage = `Congratulations! You are the winner with a score of ${clientPlayer.score}! You won ${winnings.toFixed(2)} USDC!`;
-                    if (payoutSignature) {
-                        gameOverMessage += `<br><a href="https://explorer.solana.com/tx/${payoutSignature}?cluster=devnet" target="_blank">View transaction</a>`;
+                    gameOverMessage = `🏆 You won this tournament match with a score of ${clientPlayer ? clientPlayer.score : 0}!`;
+                    if (prizeAmount) {
+                        gameOverMessage += ` Prize of <strong>${prizeAmount} USDC</strong> will be sent to your wallet.`;
                     }
                     if (typeof celebrateWin === 'function') celebrateWin('normal');
                 } else if (winner) {
                     const winnerPlayer = players.find(p => p.username === winner);
-                    gameOverMessage = `Game Over! The winner is ${winner} with a score of ${winnerPlayer.score}. Better luck next time!`;
+                    gameOverMessage = `Tournament match over! ${winner} wins with a score of ${winnerPlayer ? winnerPlayer.score : 0}. Keep competing!`;
+                } else {
+                    gameOverMessage = "Tournament match is a draw!";
+                }
+                if (tournamentId) {
+                    gameOverMessage += ` <a href="/tournaments.html">View tournament standings</a>`;
+                }
+            } else {
+                // Practice mode
+                const clientPlayer = players.find(p => p.username === connectedWallet);
+                if (clientIsWinner) {
+                    gameOverMessage = `🎉 You won with a score of ${clientPlayer ? clientPlayer.score : 0}! Great job!`;
+                    gameOverMessage += ` <em>Want to play for real prizes? <a href="/subscription.html">Upgrade to Premium</a> for tournament access.</em>`;
+                    if (typeof celebrateWin === 'function') celebrateWin('normal');
+                } else if (winner) {
+                    const winnerPlayer = players.find(p => p.username === winner);
+                    gameOverMessage = `Game Over! ${winner} wins with a score of ${winnerPlayer ? winnerPlayer.score : 0}. Better luck next time!`;
                 } else {
                     gameOverMessage = "Game Over! It's a draw!";
                 }
@@ -1603,11 +1621,7 @@
 
             waitingMessage.innerHTML = gameOverMessage;
 
-            // Reset UI after game over
-            setTimeout(() => {
-                resetGame();
-                updateBalance();
-            }, 7000);
+            setTimeout(() => { resetGame(); }, 7000);
         });
 
         socket.on('playerLeft', (username) => {
@@ -1618,20 +1632,21 @@
 
         socket.on('gameOverForfeit', (data) => {
             console.log('Forfeit game over:', data);
-            const { winner, disconnectedPlayer, betAmount, payoutSignature, botOpponent, message } = data;
+            const { winner, disconnectedPlayer, message, gameMode, tournamentId, prizeAmount } = data;
 
             resetGame();
 
-            let forfeitMessage = message;
             const clientIsWinner = winner === connectedWallet;
-            // Convert betAmount from atomic units to USDC for display
-            const betAmountUSDC = fromAtomicUnits(betAmount);
-            const winnings = betAmountUSDC * (botOpponent ? 1.5 : 1.8);
+            const isTournament = (gameMode === 'tournament' || !!tournamentId);
+            let forfeitMessage = message;
 
             if (clientIsWinner) {
-                forfeitMessage += ` You've been awarded ${winnings.toFixed(2)} USDC for the win!`;
-                if (payoutSignature) {
-                    forfeitMessage += `<br><a href="https://explorer.solana.com/tx/${payoutSignature}?cluster=devnet" target="_blank">View transaction</a>`;
+                if (isTournament && prizeAmount) {
+                    forfeitMessage += ` You win this match! Prize of <strong>${prizeAmount} USDC</strong> will be sent to your wallet.`;
+                } else if (isTournament) {
+                    forfeitMessage += ` You win this tournament match!`;
+                } else {
+                    forfeitMessage += ` You win this practice match! Well played.`;
                 }
                 if (typeof celebrateWin === 'function') celebrateWin('forfeit');
             }
@@ -1645,7 +1660,6 @@
                 <p>${winner} is the winner.</p>
             </div>`;
                 joinGameBtn.style.display = 'inline-block';
-                updateBalance();
             }, 7000);
         });
 
@@ -1714,8 +1728,8 @@
 
             console.log('Restoring game state:', {
                 roomId: currentRoomId,
-                betAmount: fromAtomicUnits(currentBetAmount) + ' USDC',
-                betAmountAtomic: currentBetAmount,
+                gameMode: currentGameMode,
+                tournamentId: currentTournamentId,
                 gameStarted: data.gameStarted,
                 playerCount: data.players.length
             });
@@ -1723,7 +1737,7 @@
             if (data.gameStarted) {
                 // Game is in progress - show game screen
                 joinGameBtn.style.display = 'none';
-                document.getElementById('betAmount').disabled = true;
+                // (bet selector removed — subscription model)
 
                 // Update players display
                 updatePlayerUI(data.players);
@@ -1769,7 +1783,7 @@
             } else {
                 // Game hasn't started yet - show waiting room
                 joinGameBtn.style.display = 'none';
-                document.getElementById('betAmount').disabled = true;
+                // (bet selector removed — subscription model)
 
                 // Update player list
                 playersDiv.innerHTML = '<h2>Players:</h2>' + data.players.map(p =>
@@ -1790,8 +1804,8 @@
             // Log restoration details
             console.log('Game state restored successfully:', {
                 roomId: currentRoomId,
-                betAmount: fromAtomicUnits(currentBetAmount) + ' USDC',
-                betAmountAtomic: currentBetAmount,
+                gameMode: currentGameMode,
+                tournamentId: currentTournamentId,
                 players: data.players.map(p => p.username),
                 gameStarted: data.gameStarted
             });
@@ -1990,7 +2004,7 @@
             waitingMessage.textContent = '';
             joinGameBtn.style.display = 'block';
             joinGameBtn.disabled = false;
-            document.getElementById('betAmount').disabled = false;
+            // (bet selector removed)
 
             document.body.classList.remove('playing-bot');
 
@@ -2112,162 +2126,60 @@
             modal.style.display = 'flex';
 
             document.getElementById('waitForPlayerBtn').onclick = async function() {
-                if (isProcessingBet) {
-                    console.log('Bet already in progress—ignoring click');
-                    return;
-                }
+                if (isProcessingBet) return;
                 isProcessingBet = true;
-
                 try {
-                    console.log('Player chose to play against human');
                     modal.style.display = 'none';
-
-                    if (!connectedWallet || !window.solana?.isConnected) {
-                        throw new Error('Wallet disconnected. Please reconnect.');
-                    }
-                    if (!currentBetAmount) {
-                        throw new Error('No bet amount available. Please start a new game.');
-                    }
-
-                    validateBetAndWallet(currentBetAmount, connectedWallet);
+                    if (!connectedWallet) throw new Error('Wallet disconnected. Please reconnect.');
 
                     this.disabled = true;
-                    this.textContent = 'Processing...';
-                    waitingMessage.textContent = 'Verifying security...';
+                    this.textContent = 'Joining...';
 
-                    // FIX: Get reCAPTCHA BEFORE transaction - if this fails, no money is lost
-                    let recaptchaToken = null;
-                    if (window.recaptchaEnabled) {
-                        try {
-                            recaptchaToken = await getRecaptchaToken('place_bet');
-                        } catch (error) {
-                            logError('reCAPTCHA-human-matchmaking:', error);
-                            alert('Security verification failed. No funds were deducted. Please try again.');
-                            throw error;
-                        }
+                    if (currentGameMode === 'tournament' && currentTournamentId) {
+                        waitingMessage.textContent = 'Joining tournament matchmaking...';
+                        socket.emit('joinTournamentGame', {
+                            walletAddress: connectedWallet,
+                            tournamentId: currentTournamentId
+                        });
+                    } else {
+                        waitingMessage.textContent = 'Looking for another player...';
+                        socket.emit('joinPracticeGame', {
+                            walletAddress: connectedWallet,
+                            gameMode: 'human'
+                        });
                     }
-
-                    waitingMessage.textContent = 'Please confirm transaction in wallet...';
-
-                    // Generate nonce FIRST, before creating transaction
-                    const nonce = generateUUID();
-                    console.log('Generated nonce for human matchmaking:', nonce);
-
-                    // Create and send transaction AFTER reCAPTCHA succeeds
-                    const transaction = await usdcManager.createTransferTransaction(connectedWallet, currentBetAmount, nonce);
-                    const signedTransaction = await window.solana.signTransaction(transaction);
-
-                    waitingMessage.textContent = 'Sending transaction...';
-                    const txSignature = await connection.sendRawTransaction(signedTransaction.serialize());
-                    console.log('Transaction signature for human matchmaking:', txSignature);
-
-                    waitingMessage.textContent = 'Joining matchmaking...';
-
-                    socket.emit('joinHumanMatchmaking', {
-                        walletAddress: connectedWallet,
-                        betAmount: currentBetAmount,
-                        transactionSignature: txSignature,
-                        gameMode: 'human',
-                        recaptchaToken,
-                        nonce
-                    });
-
-                    // Update Join Game button to show success
-                    joinGameBtn.textContent = 'Transaction Sent ✓';
                     joinGameBtn.disabled = true;
-                    
-                    waitingMessage.textContent = 'Looking for another player...';
-                    await updateBalance();
                 } catch (error) {
                     logError('human-matchmaking', error);
-                    if (!error.message.includes('User rejected')) {
-                        alert('Error: ' + error.message);
-                    }
-                    waitingMessage.textContent = 'Error starting matchmaking. Please try again.';
+                    alert('Error: ' + error.message);
+                    waitingMessage.textContent = 'Error joining game. Please try again.';
                     resetUIAfterError();
                 } finally {
                     isProcessingBet = false;
                     this.disabled = false;
-                    this.textContent = 'Playing against human';
+                    this.textContent = 'Play vs Human';
                 }
             };
 
             document.getElementById('playAgainstBotBtn').onclick = async function() {
-                if (isProcessingBet) {
-                    console.log('Bet already in progress—ignoring click');
-                    return;
-                }
+                if (isProcessingBet) return;
                 isProcessingBet = true;
-
                 try {
-                    console.log('Player chose to play against bot');
                     modal.style.display = 'none';
-
-                    if (!connectedWallet || !window.solana?.isConnected) {
-                        throw new Error('Wallet disconnected. Please reconnect.');
-                    }
-                    if (!currentBetAmount) {
-                        throw new Error('No bet amount available. Please start a new game.');
-                    }
-
-                    validateBetAndWallet(currentBetAmount, connectedWallet);
+                    if (!connectedWallet) throw new Error('Wallet disconnected. Please reconnect.');
 
                     this.disabled = true;
-                    this.textContent = 'Processing...';
-                    waitingMessage.textContent = 'Verifying security...';
+                    this.textContent = 'Creating game...';
+                    waitingMessage.textContent = 'Starting bot game...';
 
-                    // FIX: Get reCAPTCHA BEFORE transaction - if this fails, no money is lost
-                    let recaptchaToken = null;
-                    if (window.recaptchaEnabled) {
-                        try {
-                            recaptchaToken = await getRecaptchaToken('place_bet');
-                        } catch (error) {
-                            logError('reCAPTCHA-bot-game:', error);
-                            alert('Security verification failed. No funds were deducted. Please try again.');
-                            throw error;
-                        }
-                    }
-
-                    waitingMessage.textContent = 'Please confirm transaction in wallet...';
-
-                    // Generate nonce FIRST, before creating transaction
-                    const nonce = generateUUID();
-                    console.log('Generated nonce for bot game:', nonce);
-
-                    // Create and send transaction AFTER reCAPTCHA succeeds
-                    const transaction = await usdcManager.createTransferTransaction(connectedWallet, currentBetAmount, nonce);
-                    const signedTransaction = await window.solana.signTransaction(transaction);
-
-                    const rawTx = signedTransaction.serialize();
-                    waitingMessage.textContent = 'Sending transaction...';
-                    const txSignature = await connection.sendRawTransaction(rawTx, {
-                        skipPreflight: false,
-                        preflightCommitment: 'confirmed'
-                    });
-                    console.log('Transaction signature for bot game:', txSignature);
-
-                    waitingMessage.textContent = 'Creating game...';
-
-                    socket.emit('joinBotGame', {
+                    socket.emit('joinPracticeGame', {
                         walletAddress: connectedWallet,
-                        betAmount: currentBetAmount,
-                        transactionSignature: txSignature,
-                        gameMode: 'bot',
-                        recaptchaToken,
-                        nonce
+                        gameMode: 'bot'
                     });
-
-                    // Update Join Game button to show success
-                    joinGameBtn.textContent = 'Transaction Sent ✓';
                     joinGameBtn.disabled = true;
-                    
-                    waitingMessage.textContent = 'Creating a game with a bot opponent...';
-                    await updateBalance();
                 } catch (error) {
                     logError('bot-game', error);
-                    if (!error.message.includes('User rejected')) {
-                        alert('Error: ' + error.message);
-                    }
+                    alert('Error: ' + error.message);
                     waitingMessage.textContent = 'Error starting bot game. Please try again.';
                     resetUIAfterError();
                 } finally {

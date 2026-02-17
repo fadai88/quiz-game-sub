@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tournaments - Quiz Game</title>
+    <link rel="stylesheet" href="/styles.css">
+    <style>
+        .tournaments-container {
+            max-width: 1400px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+
+        .premium-banner {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            border-radius: 15px;
+            padding: 30px;
+            color: white;
+            text-align: center;
+            margin-bottom: 40px;
+        }
+
+        .premium-banner h2 {
+            margin: 0 0 15px 0;
+        }
+
+        .upgrade-btn {
+            background: white;
+            color: #f5576c;
+            border: none;
+            padding: 15px 40px;
+            border-radius: 25px;
+            font-size: 18px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 15px;
+        }
+
+        .tournaments-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 30px;
+            margin: 40px 0;
+        }
+
+        .tournament-card {
+            background: #1e293b;
+            border-radius: 15px;
+            padding: 25px;
+            color: white;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.3);
+            transition: transform 0.3s ease;
+        }
+
+        .tournament-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .tournament-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: start;
+            margin-bottom: 20px;
+        }
+
+        .tournament-title {
+            font-size: 20px;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+
+        .tournament-badge {
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+
+        .badge-scheduled {
+            background: #3b82f6;
+        }
+
+        .badge-registration {
+            background: #10b981;
+        }
+
+        .badge-in-progress {
+            background: #f59e0b;
+        }
+
+        .badge-completed {
+            background: #6b7280;
+        }
+
+        .tournament-info {
+            margin: 15px 0;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .info-label {
+            color: #94a3b8;
+        }
+
+        .info-value {
+            font-weight: bold;
+        }
+
+        .prize-pool {
+            background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+            margin: 15px 0;
+        }
+
+        .prize-amount {
+            font-size: 28px;
+            font-weight: bold;
+        }
+
+        .participants-count {
+            background: rgba(59, 130, 246, 0.2);
+            padding: 10px;
+            border-radius: 8px;
+            text-align: center;
+            margin: 10px 0;
+        }
+
+        .tournament-actions {
+            margin-top: 20px;
+        }
+
+        .action-btn {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            font-weight: bold;
+            cursor: pointer;
+            font-size: 16px;
+            transition: all 0.3s ease;
+        }
+
+        .register-btn {
+            background: #10b981;
+            color: white;
+        }
+
+        .register-btn:hover {
+            background: #059669;
+        }
+
+        .unregister-btn {
+            background: #ef4444;
+            color: white;
+        }
+
+        .unregister-btn:hover {
+            background: #dc2626;
+        }
+
+        .join-btn {
+            background: #3b82f6;
+            color: white;
+        }
+
+        .join-btn:hover {
+            background: #2563eb;
+        }
+
+        .action-btn:disabled {
+            background: #6b7280;
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+
+        .section-title {
+            font-size: 28px;
+            font-weight: bold;
+            margin: 40px 0 20px 0;
+            color: white;
+        }
+
+        .no-tournaments {
+            text-align: center;
+            padding: 60px;
+            color: #94a3b8;
+            font-size: 18px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 60px;
+            color: #94a3b8;
+            font-size: 18px;
+        }
+
+        .countdown {
+            background: rgba(59, 130, 246, 0.2);
+            padding: 10px;
+            border-radius: 8px;
+            text-align: center;
+            margin: 10px 0;
+            font-size: 18px;
+            font-weight: bold;
+            color: #60a5fa;
+        }
+    </style>
+</head>
+<body>
+    <div class="tournaments-container">
+        <h1>Tournaments</h1>
+
+        <!-- Premium Banner (shown to free users) -->
+        <div id="premiumBanner" class="premium-banner" style="display: none;">
+            <h2>🏆 Premium Feature</h2>
+            <p>Tournaments are exclusive to Premium subscribers</p>
+            <p>Compete for real USDC prizes!</p>
+            <button class="upgrade-btn" onclick="window.location.href='/subscription.html'">
+                Upgrade to Premium
+            </button>
+        </div>
+
+        <!-- Active Tournaments -->
+        <div id="activeTournamentsSection">
+            <h2 class="section-title">🔥 Active Tournaments</h2>
+            <div id="activeTournaments" class="tournaments-grid"></div>
+        </div>
+
+        <!-- Upcoming Tournaments -->
+        <div id="upcomingTournamentsSection">
+            <h2 class="section-title">📅 Upcoming Tournaments</h2>
+            <div id="upcomingTournaments" class="tournaments-grid"></div>
+        </div>
+
+        <!-- My Tournament History -->
+        <div id="myTournamentsSection">
+            <h2 class="section-title">📊 My Tournament History</h2>
+            <div id="myTournaments" class="tournaments-grid"></div>
+        </div>
+    </div>
+
+    <script>
+        const TOURNAMENTS_API = '/api/tournaments';
+        const SUBSCRIPTION_API = '/api/subscription';
+        
+        let userSubscription = null;
+        let hasPremium = false;
+
+        async function checkSubscription() {
+            try {
+                const response = await fetch(`${SUBSCRIPTION_API}/status`, {
+                    credentials: 'include'
+                });
+
+                if (!response.ok) return;
+
+                const data = await response.json();
+                if (data.success) {
+                    userSubscription = data;
+                    hasPremium = data.tier === 'premium' && data.status === 'active';
+                }
+            } catch (error) {
+                console.error('Error checking subscription:', error);
+            }
+        }
+
+        async function loadTournaments() {
+            if (!hasPremium) {
+                document.getElementById('premiumBanner').style.display = 'block';
+                document.getElementById('activeTournamentsSection').style.display = 'none';
+                document.getElementById('upcomingTournamentsSection').style.display = 'none';
+                document.getElementById('myTournamentsSection').style.display = 'none';
+                return;
+            }
+
+            try {
+                // Load active tournaments
+                const activeResponse = await fetch(`${TOURNAMENTS_API}/active`, {
+                    credentials: 'include'
+                });
+                const activeData = await activeResponse.json();
+                if (activeData.success) {
+                    renderTournaments(activeData.tournaments, 'activeTournaments');
+                }
+
+                // Load upcoming tournaments
+                const upcomingResponse = await fetch(`${TOURNAMENTS_API}/upcoming`, {
+                    credentials: 'include'
+                });
+                const upcomingData = await upcomingResponse.json();
+                if (upcomingData.success) {
+                    renderTournaments(upcomingData.tournaments, 'upcomingTournaments');
+                }
+
+                // Load user's tournament history
+                const myResponse = await fetch(`${TOURNAMENTS_API}/my-history`, {
+                    credentials: 'include'
+                });
+                const myData = await myResponse.json();
+                if (myData.success) {
+                    renderTournaments(myData.tournaments, 'myTournaments', true);
+                }
+
+            } catch (error) {
+                console.error('Error loading tournaments:', error);
+            }
+        }
+
+        function renderTournaments(tournaments, containerId, isHistory = false) {
+            const container = document.getElementById(containerId);
+            
+            if (!tournaments || tournaments.length === 0) {
+                container.innerHTML = '<div class="no-tournaments">No tournaments available</div>';
+                return;
+            }
+
+            container.innerHTML = tournaments.map(tournament => {
+                const isRegistered = tournament.participants?.some(p => p.userId === userSubscription?.userId);
+                const isFull = tournament.participants?.length >= tournament.maxPlayers;
+                const startTime = new Date(tournament.startTime);
+                const regDeadline = new Date(tournament.registrationDeadline);
+                const now = new Date();
+
+                return `
+                    <div class="tournament-card">
+                        <div class="tournament-header">
+                            <div>
+                                <div class="tournament-title">${tournament.name}</div>
+                                <p style="color: #94a3b8; font-size: 14px;">${tournament.description || ''}</p>
+                            </div>
+                            <div class="tournament-badge badge-${tournament.status}">
+                                ${tournament.status.toUpperCase().replace('_', ' ')}
+                            </div>
+                        </div>
+
+                        ${tournament.prizePool?.total > 0 ? `
+                            <div class="prize-pool">
+                                <div style="font-size: 14px; opacity: 0.9;">Prize Pool</div>
+                                <div class="prize-amount">${tournament.prizePool.total} ${tournament.prizePool.currency}</div>
+                            </div>
+                        ` : ''}
+
+                        <div class="participants-count">
+                            ${tournament.participants?.length || 0} / ${tournament.maxPlayers} Players
+                        </div>
+
+                        <div class="tournament-info">
+                            <div class="info-row">
+                                <span class="info-label">Start Time</span>
+                                <span class="info-value">${startTime.toLocaleString()}</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Format</span>
+                                <span class="info-value">${tournament.format?.replace('_', ' ')}</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Questions</span>
+                                <span class="info-value">${tournament.rules?.questionsPerGame || 10} per game</span>
+                            </div>
+                        </div>
+
+                        ${!isHistory && now < startTime ? `
+                            <div class="countdown" id="countdown-${tournament._id}">
+                                Starting in: <span class="countdown-value"></span>
+                            </div>
+                        ` : ''}
+
+                        <div class="tournament-actions">
+                            ${getTournamentAction(tournament, isRegistered, isFull, now, regDeadline, isHistory)}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            // Start countdowns
+            tournaments.forEach(tournament => {
+                if (!isHistory && new Date() < new Date(tournament.startTime)) {
+                    startCountdown(tournament._id, new Date(tournament.startTime));
+                }
+            });
+        }
+
+        function getTournamentAction(tournament, isRegistered, isFull, now, regDeadline, isHistory) {
+            if (isHistory) {
+                const userParticipant = tournament.participants?.find(p => p.userId === userSubscription?.userId);
+                const winner = tournament.winners?.find(w => w.userId === userSubscription?.userId);
+                
+                if (winner) {
+                    return `<button class="action-btn" disabled>🏆 Position ${winner.position} - Won ${winner.prizeAmount} USDC</button>`;
+                }
+                return `<button class="action-btn" disabled>Score: ${userParticipant?.score || 0}</button>`;
+            }
+
+            if (tournament.status === 'registration') {
+                if (now > regDeadline) {
+                    return `<button class="action-btn" disabled>Registration Closed</button>`;
+                }
+                if (isRegistered) {
+                    return `<button class="action-btn unregister-btn" onclick="unregisterFromTournament('${tournament._id}')">Unregister</button>`;
+                }
+                if (isFull) {
+                    return `<button class="action-btn" disabled>Tournament Full</button>`;
+                }
+                return `<button class="action-btn register-btn" onclick="registerForTournament('${tournament._id}')">Register Now</button>`;
+            }
+
+            if (tournament.status === 'in_progress' && isRegistered) {
+                return `<button class="action-btn join-btn" onclick="joinTournament('${tournament._id}')">Join Now</button>`;
+            }
+
+            if (tournament.status === 'completed') {
+                return `<button class="action-btn" disabled>Completed</button>`;
+            }
+
+            return `<button class="action-btn" disabled>${tournament.status}</button>`;
+        }
+
+        function startCountdown(tournamentId, startTime) {
+            const countdownElement = document.getElementById(`countdown-${tournamentId}`);
+            if (!countdownElement) return;
+
+            const valueElement = countdownElement.querySelector('.countdown-value');
+
+            const updateCountdown = () => {
+                const now = new Date();
+                const diff = startTime - now;
+
+                if (diff <= 0) {
+                    valueElement.textContent = 'Starting now!';
+                    return;
+                }
+
+                const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+                const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+                const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+                const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+
+                valueElement.textContent = `${days}d ${hours}h ${minutes}m ${seconds}s`;
+            };
+
+            updateCountdown();
+            setInterval(updateCountdown, 1000);
+        }
+
+        async function registerForTournament(tournamentId) {
+            try {
+                const response = await fetch(`${TOURNAMENTS_API}/${tournamentId}/register`, {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+
+                const data = await response.json();
+                
+                if (data.success) {
+                    alert('Successfully registered for tournament!');
+                    loadTournaments();
+                } else {
+                    alert(data.error || 'Failed to register');
+                }
+            } catch (error) {
+                console.error('Registration error:', error);
+                alert('Failed to register for tournament');
+            }
+        }
+
+        async function unregisterFromTournament(tournamentId) {
+            if (!confirm('Are you sure you want to unregister from this tournament?')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`${TOURNAMENTS_API}/${tournamentId}/unregister`, {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+
+                const data = await response.json();
+                
+                if (data.success) {
+                    alert('Successfully unregistered from tournament');
+                    loadTournaments();
+                } else {
+                    alert(data.error || 'Failed to unregister');
+                }
+            } catch (error) {
+                console.error('Unregistration error:', error);
+                alert('Failed to unregister from tournament');
+            }
+        }
+
+        function joinTournament(tournamentId) {
+            // Redirect to game page with tournament ID
+            window.location.href = `/game.html?tournament=${tournamentId}`;
+        }
+
+        // Initialize
+        (async function() {
+            await checkSubscription();
+            await loadTournaments();
+        })();
+    </script>
+</body>
+</html>
