@@ -264,10 +264,75 @@
     </div>
 
     <script src="https://unpkg.com/@solana/web3.js@latest/lib/index.iife.min.js"></script>
+    <script src="https://unpkg.com/@solana/spl-token@latest/lib/index.iife.js"></script>
     <script>
         const SUBSCRIPTION_API = '/api/subscription';
         let walletAddress = null;
         let currentSubscription = null;
+
+        // Solana configuration
+        const config = {
+            USDC_MINT: new solanaWeb3.PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'),
+            TREASURY_WALLET: new solanaWeb3.PublicKey('NoyR3nErDpw4fWDyHQ3CCURAe4TjTf9TkHZ7vhuDTp4'),
+        };
+
+        const connection = new solanaWeb3.Connection(
+            'https://courtnay-0wegdq-fast-mainnet.helius-rpc.com',
+            'confirmed'
+        );
+
+        // Helper to find associated token address
+        async function findAssociatedTokenAddress(walletAddress, tokenMintAddress) {
+            return await solanaWeb3.PublicKey.findProgramAddress(
+                [
+                    walletAddress.toBuffer(),
+                    spl.TOKEN_PROGRAM_ID.toBuffer(),
+                    tokenMintAddress.toBuffer(),
+                ],
+                spl.ASSOCIATED_TOKEN_PROGRAM_ID
+            );
+        }
+
+        // Create USDC transfer transaction for subscription
+        async function createSubscriptionTransaction(fromWallet, amountUSDC) {
+            try {
+                const fromWalletPubkey = new solanaWeb3.PublicKey(fromWallet);
+                const amount = Math.floor(amountUSDC * 1_000_000); // Convert to atomic units
+
+                // Get associated token accounts
+                const [fromTokenAccount] = await findAssociatedTokenAddress(
+                    fromWalletPubkey,
+                    config.USDC_MINT
+                );
+                const [toTokenAccount] = await findAssociatedTokenAddress(
+                    config.TREASURY_WALLET,
+                    config.USDC_MINT
+                );
+
+                // Create transfer instruction
+                const transferInstruction = spl.createTransferInstruction(
+                    fromTokenAccount,
+                    toTokenAccount,
+                    fromWalletPubkey,
+                    amount,
+                    [],
+                    spl.TOKEN_PROGRAM_ID
+                );
+
+                // Create transaction
+                const transaction = new solanaWeb3.Transaction();
+                const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+                transaction.recentBlockhash = blockhash;
+                transaction.lastValidBlockHeight = lastValidBlockHeight;
+                transaction.feePayer = fromWalletPubkey;
+                transaction.add(transferInstruction);
+
+                return transaction;
+            } catch (error) {
+                console.error('Error creating subscription transaction:', error);
+                throw new Error('Failed to create payment transaction: ' + error.message);
+            }
+        }
 
         async function connectWallet() {
             try {
@@ -361,18 +426,26 @@
                 const pricesData = await pricesResponse.json();
                 const amount = plan === 'monthly' ? pricesData.prices.monthly : pricesData.prices.yearly;
 
-                // Create transaction (you'll need to implement this based on your Solana setup)
+                // Create USDC transfer transaction
+                showMessage(`Creating payment transaction for $${amount} USDC...`, 'info');
+                const transaction = await createSubscriptionTransaction(walletAddress, amount);
+
+                // Sign transaction with Phantom
+                showMessage('Please approve the transaction in your Phantom wallet...', 'info');
                 const { solana } = window;
-                const connection = new solanaWeb3.Connection(
-                    'YOUR_RPC_URL',
-                    'confirmed'
-                );
+                const signedTransaction = await solana.signTransaction(transaction);
 
-                // TODO: Create and send subscription payment transaction
-                // This is a placeholder - implement actual Solana transaction
-                const transactionSignature = 'MOCK_SIGNATURE_' + Date.now();
+                // Send transaction to Solana network
+                showMessage('Sending transaction to Solana network...', 'info');
+                const signature = await connection.sendRawTransaction(signedTransaction.serialize());
+                console.log('Subscription payment transaction signature:', signature);
 
-                // Submit subscription
+                // Wait for confirmation
+                showMessage('Waiting for transaction confirmation...', 'info');
+                await connection.confirmTransaction(signature, 'confirmed');
+
+                // Submit subscription to server
+                showMessage('Activating subscription...', 'info');
                 const response = await fetch(`${SUBSCRIPTION_API}/subscribe`, {
                     method: 'POST',
                     headers: {
@@ -381,7 +454,7 @@
                     credentials: 'include',
                     body: JSON.stringify({
                         walletAddress,
-                        transactionSignature,
+                        transactionSignature: signature,
                         plan
                     })
                 });

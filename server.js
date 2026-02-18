@@ -565,7 +565,8 @@ const leaveRoomSchema = Joi.object({
 
 // NEW: Validation schemas for subscription-based model
 const joinPracticeGameSchema = Joi.object({
-    walletAddress: solanaPublicKey
+    walletAddress: solanaPublicKey,
+    gameMode: Joi.string().valid('bot', 'human').optional().default('bot')
 });
 
 const joinTournamentGameSchema = Joi.object({
@@ -3045,8 +3046,8 @@ io.on('connection', (socket) => {
                             return;
                         }
 
-                        const { walletAddress } = data;
-                        logger.info('Practice game request:', { walletAddress });
+                        const { walletAddress, gameMode = 'bot' } = data;
+                        logger.info('Practice game request:', { walletAddress, gameMode });
 
                         // Verify user is authenticated
                         const user = await User.findOne({ walletAddress });
@@ -3076,7 +3077,7 @@ io.on('connection', (socket) => {
 
                         // Create practice game room (no bet amount)
                         const roomId = generateRoomId();
-                        await createGameRoom(roomId, 0, 'bot', {
+                        await createGameRoom(roomId, 0, gameMode, {
                             gameMode: GAME_MODES.PRACTICE,
                             isPractice: true
                         });
@@ -3094,16 +3095,23 @@ io.on('connection', (socket) => {
 
                         socket.join(roomId);
                         socket.roomId = roomId;
-                        socket.emit('gameJoined', { roomId, mode: 'practice' });
+                        socket.emit('gameJoined', { roomId, mode: 'practice', gameMode });
 
-                        // Auto-start bot game for practice mode
-                        const botName = chooseBotName();
-                        socket.emit('botGameCreated', {
-                            gameRoomId: roomId,
-                            botName
-                        });
+                        // Auto-start bot game for practice mode, or wait for human matchmaking
+                        if (gameMode === 'bot') {
+                            const botName = chooseBotName();
+                            socket.emit('botGameCreated', {
+                                gameRoomId: roomId,
+                                botName
+                            });
 
-                        await startSinglePlayerGame(roomId);
+                            await startSinglePlayerGame(roomId);
+                        } else {
+                            // Human vs human practice - notify player waiting for opponent
+                            logger.info(`Practice game ${roomId} waiting for human opponent`);
+                            socket.emit('waitingForOpponent', { roomId });
+                        }
+                        
                         await logGameRoomsState();
                     } catch (error) {
                         const sanitized = sanitizeError(error, 'joinPracticeGame', 'Failed to start practice game.');

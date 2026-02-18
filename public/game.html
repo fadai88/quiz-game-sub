@@ -1069,6 +1069,11 @@
 
         async function updateBalance() {
             try {
+                // Skip balance updates in practice mode (no USDC needed)
+                if (currentGameMode === 'practice') {
+                    document.getElementById('balanceDisplay').style.display = 'none';
+                    return;
+                }
                 if (!connectedWallet) {
                     document.getElementById('balanceDisplay').textContent = 'Balance: Not connected';
                     return;
