@@ -264,60 +264,72 @@
     </div>
 
     <script src="https://unpkg.com/@solana/web3.js@latest/lib/index.iife.min.js"></script>
-    <script src="https://unpkg.com/@solana/spl-token@latest/lib/index.iife.js"></script>
     <script>
+        // Hardcoded program IDs - no SPL Token library needed
+        const TOKEN_PROGRAM_ID = new solanaWeb3.PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+        const ASSOCIATED_TOKEN_PROGRAM_ID = new solanaWeb3.PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+
         const SUBSCRIPTION_API = '/api/subscription';
         let walletAddress = null;
         let currentSubscription = null;
 
         // Solana configuration
         const config = {
-            USDC_MINT: new solanaWeb3.PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'),
+            USDC_MINT: new solanaWeb3.PublicKey('Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr'), // Devnet USDC mint
             TREASURY_WALLET: new solanaWeb3.PublicKey('NoyR3nErDpw4fWDyHQ3CCURAe4TjTf9TkHZ7vhuDTp4'),
         };
 
         const connection = new solanaWeb3.Connection(
-            'https://courtnay-0wegdq-fast-mainnet.helius-rpc.com',
+            'https://devnet.helius-rpc.com/?api-key=961d5e62-871f-447a-bda0-0d61ce151d6e',
             'confirmed'
         );
 
-        // Helper to find associated token address
+        // Helper to find associated token address (manual PDA derivation)
         async function findAssociatedTokenAddress(walletAddress, tokenMintAddress) {
-            return await solanaWeb3.PublicKey.findProgramAddress(
+            return (await solanaWeb3.PublicKey.findProgramAddress(
                 [
                     walletAddress.toBuffer(),
-                    spl.TOKEN_PROGRAM_ID.toBuffer(),
+                    TOKEN_PROGRAM_ID.toBuffer(),
                     tokenMintAddress.toBuffer(),
                 ],
-                spl.ASSOCIATED_TOKEN_PROGRAM_ID
-            );
+                ASSOCIATED_TOKEN_PROGRAM_ID
+            ))[0];
         }
 
-        // Create USDC transfer transaction for subscription
+        // Create USDC transfer transaction for subscription (manual instruction creation)
         async function createSubscriptionTransaction(fromWallet, amountUSDC) {
             try {
                 const fromWalletPubkey = new solanaWeb3.PublicKey(fromWallet);
                 const amount = Math.floor(amountUSDC * 1_000_000); // Convert to atomic units
 
                 // Get associated token accounts
-                const [fromTokenAccount] = await findAssociatedTokenAddress(
+                const fromTokenAccount = await findAssociatedTokenAddress(
                     fromWalletPubkey,
                     config.USDC_MINT
                 );
-                const [toTokenAccount] = await findAssociatedTokenAddress(
+                const toTokenAccount = await findAssociatedTokenAddress(
                     config.TREASURY_WALLET,
                     config.USDC_MINT
                 );
 
-                // Create transfer instruction
-                const transferInstruction = spl.createTransferInstruction(
-                    fromTokenAccount,
-                    toTokenAccount,
-                    fromWalletPubkey,
-                    amount,
-                    [],
-                    spl.TOKEN_PROGRAM_ID
-                );
+                // SPL Token Transfer instruction accounts: [source, destination, owner]
+                // TOKEN_PROGRAM_ID is the programId, NOT an account key
+                const keys = [
+                    { pubkey: fromTokenAccount, isSigner: false, isWritable: true },
+                    { pubkey: toTokenAccount, isSigner: false, isWritable: true },
+                    { pubkey: fromWalletPubkey, isSigner: true, isWritable: false },
+                ];
+
+                const data = new Uint8Array(9);
+                const view = new DataView(data.buffer);
+                view.setUint8(0, 3); // 3 = Transfer instruction index
+                view.setBigUint64(1, BigInt(amount), true); // true = little-endian
+
+                const transferInstruction = new solanaWeb3.TransactionInstruction({
+                    keys,
+                    programId: TOKEN_PROGRAM_ID,
+                    data
+                });
 
                 // Create transaction
                 const transaction = new solanaWeb3.Transaction();
@@ -400,8 +412,11 @@
                 badge.textContent = 'Premium';
                 badge.className = 'status-badge active';
                 
-                const endDate = new Date(currentSubscription.subscription.endDate);
-                details.textContent = `Active until ${endDate.toLocaleDateString()}`;
+                const rawDate = currentSubscription.endDate;
+                const endDate = rawDate ? new Date(rawDate) : null;
+                details.textContent = endDate && !isNaN(endDate)
+                    ? `Active until ${endDate.toLocaleDateString()}`
+                    : 'Active';
                 
                 cancelBtn.style.display = 'inline-block';
             } else {
@@ -442,7 +457,11 @@
 
                 // Wait for confirmation
                 showMessage('Waiting for transaction confirmation...', 'info');
-                await connection.confirmTransaction(signature, 'confirmed');
+                await connection.confirmTransaction({
+                    signature,
+                    blockhash: transaction.recentBlockhash,
+                    lastValidBlockHeight: transaction.lastValidBlockHeight,
+                }, 'confirmed');
 
                 // Submit subscription to server
                 showMessage('Activating subscription...', 'info');
@@ -524,6 +543,7 @@
         // Initialize
         loadPrices();
         loadSubscriptionStatus();
+    
     </script>
 </body>
 </html>

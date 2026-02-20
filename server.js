@@ -29,6 +29,7 @@ if (!process.env.SESSION_SECRET && ENVIRONMENT === 'production') {
 console.log('✅ Secure session secrets configured');
 
 const User = require('./models/User');
+const Subscription = require('./models/Subscription');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -663,7 +664,7 @@ app.use((req, res, next) => {
         "font-src 'self' data:",
         
         // Connections: Allow WebSocket, Solana RPC, CDNs, and API endpoints
-        "connect-src 'self' wss: ws: https://courtnay-0wegdq-fast-mainnet.helius-rpc.com https://mainnet.helius-rpc.com https://api.anthropic.com https://unpkg.com https://cdn.jsdelivr.net https://bundle.run https://cdnjs.cloudflare.com https://www.google.com https://www.gstatic.com",
+        "connect-src 'self' wss: ws: https://courtnay-0wegdq-fast-mainnet.helius-rpc.com https://devnet.helius-rpc.com https://mainnet.helius-rpc.com https://api.anthropic.com https://unpkg.com https://cdn.jsdelivr.net https://bundle.run https://cdnjs.cloudflare.com https://www.google.com https://www.gstatic.com",
         
         // Frames: Allow Google reCAPTCHA frames
         "frame-src 'self' https://www.google.com https://recaptcha.google.com https://www.recaptcha.net",
@@ -5879,10 +5880,18 @@ app.get('/api/subscription/prices', (req, res) => {
 app.get('/api/subscription/status', authenticate, async (req, res) => {
     try {
         const user = await User.findById(req.user.id);
+
+        let endDate = null;
+        if (user.subscriptionId) {
+            const sub = await Subscription.findById(user.subscriptionId);
+            endDate = sub?.endDate || null;
+        }
+
         res.json({
             success: true,
             status: user.subscriptionStatus || 'none',
             tier: user.accountTier || 'free',
+            endDate,
             subscription: user.subscriptionId || null
         });
     } catch (error) {
@@ -5906,6 +5915,53 @@ app.post('/api/subscription/cancel', authenticate, async (req, res) => {
         res.json({ success: true, message: 'Subscription cancelled' });
     } catch (error) {
         logger.error('[SUBSCRIPTION] Error cancelling:', { error: error.message });
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Subscribe (activate subscription after on-chain payment)
+app.post('/api/subscription/subscribe', authenticate, async (req, res) => {
+    try {
+        const { error } = subscribeSchema.validate(req.body);
+        if (error) {
+            return res.status(400).json({ success: false, error: error.details[0].message });
+        }
+
+        const { walletAddress, transactionSignature, plan } = req.body;
+
+        // Ensure the authenticated session matches the wallet being subscribed
+        if (req.user.walletAddress !== walletAddress) {
+            return res.status(403).json({ success: false, error: 'Wallet address mismatch' });
+        }
+
+        const user = await User.findOne({ walletAddress });
+        if (!user) {
+            return res.status(404).json({ success: false, error: 'User not found' });
+        }
+
+        if (!subscriptionService) {
+            return res.status(503).json({ success: false, error: 'Subscription service unavailable' });
+        }
+
+        const subscription = await subscriptionService.createSubscription(
+            user._id,
+            walletAddress,
+            transactionSignature,
+            plan
+        );
+
+        logger.info('[SUBSCRIPTION] Created via REST:', { walletAddress, plan, transactionSignature });
+
+        res.json({
+            success: true,
+            subscription: {
+                status: subscription.status,
+                tier: subscription.tier,
+                endDate: subscription.endDate
+            }
+        });
+    } catch (error) {
+        logger.error('[SUBSCRIPTION] Error creating subscription:', { error: error.message });
         res.status(500).json({ success: false, error: error.message });
     }
 });

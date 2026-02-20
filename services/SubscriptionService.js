@@ -231,7 +231,7 @@ class SubscriptionService {
             if (pre && post.mint === this.usdcMint.toString()) {
                 const change = {
                     owner: post.owner,
-                    amount: post.uiTokenAmount.amount - pre.uiTokenAmount.amount,
+                    amount: Number(post.uiTokenAmount.amount) - Number(pre.uiTokenAmount.amount),
                     mint: post.mint
                 };
                 if (change.amount !== 0) {
