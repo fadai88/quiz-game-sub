@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin – Tournament Manager</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            min-height: 100vh;
+        }
+
+        header {
+            background: #1e293b;
+            padding: 16px 32px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid #334155;
+        }
+
+        header h1 { font-size: 20px; color: #f8fafc; }
+        .admin-badge {
+            background: #7c3aed;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: 420px 1fr;
+            gap: 0;
+            height: calc(100vh - 57px);
+        }
+
+        /* ── Left panel: create form ── */
+        .panel-left {
+            background: #1e293b;
+            border-right: 1px solid #334155;
+            padding: 28px;
+            overflow-y: auto;
+        }
+
+        .panel-left h2 { font-size: 16px; font-weight: 700; margin-bottom: 20px; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; }
+
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; font-size: 13px; color: #94a3b8; margin-bottom: 6px; font-weight: 600; }
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            width: 100%;
+            background: #0f172a;
+            border: 1px solid #334155;
+            color: #e2e8f0;
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+        .form-group input:focus,
+        .form-group select:focus,
+        .form-group textarea:focus {
+            outline: none;
+            border-color: #6366f1;
+        }
+        .form-group textarea { resize: vertical; min-height: 70px; }
+
+        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+        .btn-create {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 15px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: opacity 0.2s;
+            margin-top: 8px;
+        }
+        .btn-create:hover { opacity: 0.9; }
+        .btn-create:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .alert {
+            padding: 12px 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            margin-bottom: 16px;
+            display: none;
+        }
+        .alert-success { background: #064e3b; color: #6ee7b7; border: 1px solid #065f46; }
+        .alert-error   { background: #450a0a; color: #fca5a5; border: 1px solid #7f1d1d; }
+
+        /* ── Right panel: tournament list ── */
+        .panel-right {
+            padding: 28px;
+            overflow-y: auto;
+        }
+
+        .panel-right-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .panel-right h2 { font-size: 16px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; }
+
+        .btn-refresh {
+            background: #1e293b;
+            border: 1px solid #334155;
+            color: #94a3b8;
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+        .btn-refresh:hover { border-color: #6366f1; color: #a5b4fc; }
+
+        .tournament-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .tournament-table th {
+            text-align: left;
+            padding: 10px 14px;
+            font-size: 12px;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid #1e293b;
+        }
+        .tournament-table td {
+            padding: 14px;
+            border-bottom: 1px solid #1e293b;
+            font-size: 14px;
+            vertical-align: middle;
+        }
+        .tournament-table tr:hover td { background: #1e293b; }
+
+        .status-pill {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+        .status-scheduled   { background: #1d4ed8; color: #bfdbfe; }
+        .status-registration{ background: #065f46; color: #6ee7b7; }
+        .status-in_progress { background: #92400e; color: #fde68a; }
+        .status-completed   { background: #374151; color: #9ca3af; }
+        .status-cancelled   { background: #450a0a; color: #fca5a5; }
+
+        .btn-cancel {
+            background: transparent;
+            border: 1px solid #ef4444;
+            color: #ef4444;
+            padding: 5px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+        .btn-cancel:hover { background: #ef4444; color: white; }
+        .btn-cancel:disabled { opacity: 0.3; cursor: not-allowed; }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px;
+            color: #475569;
+        }
+        .empty-state svg { margin-bottom: 12px; opacity: 0.3; }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 16px; height: 16px;
+            border: 2px solid #334155;
+            border-top-color: #6366f1;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .access-denied {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            gap: 16px;
+            color: #64748b;
+        }
+        .access-denied h2 { color: #ef4444; }
+    </style>
+</head>
+<body>
+
+<div id="accessDenied" class="access-denied" style="display:none;">
+    <h2>⛔ Access Denied</h2>
+    <p>This page is restricted to admin wallets.</p>
+    <a href="/" style="color:#6366f1">← Back to home</a>
+</div>
+
+<div id="adminContent" style="display:none;">
+    <header>
+        <h1>⚙️ Tournament Manager</h1>
+        <span class="admin-badge">ADMIN</span>
+    </header>
+
+    <div class="layout">
+        <!-- Create Form -->
+        <div class="panel-left">
+            <h2>Create Tournament</h2>
+
+            <div id="createAlert" class="alert"></div>
+
+            <form id="createForm">
+                <div class="form-group">
+                    <label>Tournament Name *</label>
+                    <input type="text" id="name" placeholder="e.g. Saturday Night Showdown" required maxlength="100">
+                </div>
+
+                <div class="form-group">
+                    <label>Description</label>
+                    <textarea id="description" placeholder="Optional description..."></textarea>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Format</label>
+                        <select id="format">
+                            <option value="single_elimination">Single Elimination</option>
+                            <option value="round_robin">Round Robin</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Type</label>
+                        <select id="type">
+                            <option value="scheduled">Scheduled</option>
+                            <option value="on_demand">On Demand</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>Start Time *</label>
+                    <input type="datetime-local" id="startTime" required>
+                </div>
+
+                <div class="form-group">
+                    <label>Registration Deadline * <small style="color:#64748b">(must be before start)</small></label>
+                    <input type="datetime-local" id="registrationDeadline" required>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Min Players</label>
+                        <input type="number" id="minPlayers" value="4" min="4" max="128">
+                    </div>
+                    <div class="form-group">
+                        <label>Max Players</label>
+                        <input type="number" id="maxPlayers" value="32" min="4" max="256">
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Prize Pool (USDC)</label>
+                        <input type="number" id="prizePool" value="0" min="0" step="0.01">
+                    </div>
+                    <div class="form-group">
+                        <label>Entry Fee (USDC)</label>
+                        <input type="number" id="entryFee" value="0" min="0" step="0.01">
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Questions / Game</label>
+                        <input type="number" id="questionsPerGame" value="10" min="5" max="30">
+                    </div>
+                    <div class="form-group">
+                        <label>Seconds / Question</label>
+                        <input type="number" id="timePerQuestion" value="15" min="10" max="60">
+                    </div>
+                </div>
+
+                <button type="submit" class="btn-create" id="submitBtn">Create Tournament</button>
+            </form>
+        </div>
+
+        <!-- Tournament List -->
+        <div class="panel-right">
+            <div class="panel-right-header">
+                <h2>All Tournaments</h2>
+                <button class="btn-refresh" onclick="loadTournaments()">↻ Refresh</button>
+            </div>
+
+            <div id="tournamentList">
+                <div class="empty-state"><div class="loading-spinner"></div></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // ── Auth check ────────────────────────────────────────────────────────────
+    async function checkAdminAccess() {
+        try {
+            const res = await fetch('/api/admin/tournaments', { credentials: 'include' });
+            if (res.status === 401) {
+                window.location.href = '/login.html?redirect=/admin-tournaments.html';
+                return false;
+            }
+            if (res.status === 403) {
+                document.getElementById('accessDenied').style.display = 'flex';
+                return false;
+            }
+            document.getElementById('adminContent').style.display = 'block';
+            return true;
+        } catch (e) {
+            document.getElementById('accessDenied').style.display = 'flex';
+            return false;
+        }
+    }
+
+    // ── Load & render tournament list ─────────────────────────────────────────
+    async function loadTournaments() {
+        const container = document.getElementById('tournamentList');
+        container.innerHTML = '<div class="empty-state"><div class="loading-spinner"></div></div>';
+
+        try {
+            const res = await fetch('/api/admin/tournaments', { credentials: 'include' });
+            const data = await res.json();
+
+            if (!data.success || !data.tournaments.length) {
+                container.innerHTML = '<div class="empty-state"><p>No tournaments yet. Create one!</p></div>';
+                return;
+            }
+
+            container.innerHTML = `
+                <table class="tournament-table">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Status</th>
+                            <th>Start Time</th>
+                            <th>Reg. Deadline</th>
+                            <th>Players</th>
+                            <th>Prize Pool</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${data.tournaments.map(t => `
+                            <tr>
+                                <td>
+                                    <strong>${escHtml(t.name)}</strong>
+                                </td>
+                                <td><span class="status-pill status-${t.status}">${t.status.replace('_', ' ')}</span></td>
+                                <td>${fmtDate(t.startTime)}</td>
+                                <td>${fmtDate(t.registrationDeadline)}</td>
+                                <td>
+                                    ${t.participants?.length ?? 0} / ${t.maxPlayers}
+                                    ${t.participants?.length < t.minPlayers
+                                        ? `<br><small style="color:#f59e0b">needs ${t.minPlayers - (t.participants?.length ?? 0)} more</small>`
+                                        : ''}
+                                </td>
+                                <td>${t.prizePool?.total > 0 ? `${t.prizePool.total} ${t.prizePool.currency}` : '—'}</td>
+                                <td>
+                                    <button class="btn-cancel"
+                                        onclick="cancelTournament('${t._id}', this)"
+                                        ${['completed','cancelled'].includes(t.status) ? 'disabled' : ''}>
+                                        Cancel
+                                    </button>
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+        } catch (e) {
+            container.innerHTML = '<div class="empty-state"><p style="color:#ef4444">Failed to load tournaments</p></div>';
+        }
+    }
+
+    // ── Create tournament ─────────────────────────────────────────────────────
+    document.getElementById('createForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const btn = document.getElementById('submitBtn');
+        btn.disabled = true;
+        btn.textContent = 'Creating...';
+        hideAlert();
+
+        const startTime            = document.getElementById('startTime').value;
+        const registrationDeadline = document.getElementById('registrationDeadline').value;
+
+        // Client-side deadline check
+        if (new Date(registrationDeadline) >= new Date(startTime)) {
+            showAlert('Registration deadline must be before the start time.', 'error');
+            btn.disabled = false;
+            btn.textContent = 'Create Tournament';
+            return;
+        }
+
+        const payload = {
+            name:                 document.getElementById('name').value.trim(),
+            description:          document.getElementById('description').value.trim(),
+            type:                 document.getElementById('type').value,
+            format:               document.getElementById('format').value,
+            startTime:            new Date(startTime).toISOString(),
+            registrationDeadline: new Date(registrationDeadline).toISOString(),
+            minPlayers:           parseInt(document.getElementById('minPlayers').value),
+            maxPlayers:           parseInt(document.getElementById('maxPlayers').value),
+            prizePool:            parseFloat(document.getElementById('prizePool').value) || 0,
+            entryFee:             parseFloat(document.getElementById('entryFee').value) || 0,
+            questionsPerGame:     parseInt(document.getElementById('questionsPerGame').value),
+            timePerQuestion:      parseInt(document.getElementById('timePerQuestion').value),
+        };
+
+        try {
+            const res  = await fetch('/api/admin/tournaments', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+
+            if (data.success) {
+                showAlert(`✅ Tournament "${data.tournament.name}" created successfully!`, 'success');
+                document.getElementById('createForm').reset();
+                loadTournaments();
+            } else {
+                showAlert(data.error || 'Failed to create tournament', 'error');
+            }
+        } catch (err) {
+            showAlert('Network error. Please try again.', 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Create Tournament';
+        }
+    });
+
+    // ── Cancel tournament ─────────────────────────────────────────────────────
+    async function cancelTournament(id, btn) {
+        if (!confirm('Cancel this tournament? This cannot be undone.')) return;
+        btn.disabled = true;
+        btn.textContent = '...';
+
+        try {
+            const res  = await fetch(`/api/admin/tournaments/${id}/cancel`, {
+                method: 'POST',
+                credentials: 'include'
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadTournaments();
+            } else {
+                alert(data.error || 'Failed to cancel');
+                btn.disabled = false;
+                btn.textContent = 'Cancel';
+            }
+        } catch (e) {
+            alert('Network error');
+            btn.disabled = false;
+            btn.textContent = 'Cancel';
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    function fmtDate(iso) {
+        if (!iso) return '—';
+        return new Date(iso).toLocaleString(undefined, {
+            month: 'short', day: 'numeric',
+            hour: '2-digit', minute: '2-digit'
+        });
+    }
+
+    function escHtml(str) {
+        return String(str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    function showAlert(msg, type) {
+        const el = document.getElementById('createAlert');
+        el.textContent = msg;
+        el.className = `alert alert-${type}`;
+        el.style.display = 'block';
+        if (type === 'success') setTimeout(hideAlert, 5000);
+    }
+
+    function hideAlert() {
+        const el = document.getElementById('createAlert');
+        el.style.display = 'none';
+    }
+
+    // ── Prefill datetime inputs with sensible defaults ────────────────────────
+    function prefillDates() {
+        const now     = new Date();
+        const regTime = new Date(now.getTime() + 30 * 60 * 1000);   // 30 min from now
+        const start   = new Date(now.getTime() + 60 * 60 * 1000);   // 1 hr from now
+
+        const toLocal = d => {
+            const pad = n => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        };
+
+        document.getElementById('registrationDeadline').value = toLocal(regTime);
+        document.getElementById('startTime').value            = toLocal(start);
+    }
+
+    // ── Boot ──────────────────────────────────────────────────────────────────
+    (async () => {
+        const ok = await checkAdminAccess();
+        if (ok) {
+            prefillDates();
+            loadTournaments();
+        }
+    })();
+</script>
+</body>
+</html>

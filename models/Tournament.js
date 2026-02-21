@@ -154,14 +154,13 @@ TournamentSchema.index({ status: 1, type: 1 });
 TournamentSchema.statics.getActiveTournaments = async function() {
     return this.find({
         status: { $in: ['registration', 'in_progress'] },
-        startTime: { $gte: new Date() }
     }).sort({ startTime: 1 });
 };
 
 // Static method to get upcoming tournaments
 TournamentSchema.statics.getUpcomingTournaments = async function() {
     return this.find({
-        status: 'scheduled',
+        status: 'registration',
         startTime: { $gte: new Date() }
     }).sort({ startTime: 1 }).limit(10);
 };
@@ -170,7 +169,7 @@ TournamentSchema.statics.getUpcomingTournaments = async function() {
 TournamentSchema.methods.isRegistrationOpen = function() {
     const now = new Date();
     return this.status === 'registration' && 
-           now >= this.registrationDeadline && 
+           now <= this.registrationDeadline && 
            this.participants.length < this.maxPlayers;
 };
 

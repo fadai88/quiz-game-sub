@@ -390,9 +390,10 @@ const { getCachedTreasurySecretKey } = require('./aws-secrets-integration');
 const PaymentQueue = require('./models/PaymentQueue'); // Adjust path as needed
 const PaymentProcessor = require('./services/PaymentProcessor'); // Adjust path as needed
 
-// NEW: Import Subscription and Tournament services
+// NEW: Import Subscription and Tournament services/models
 const SubscriptionService = require('./services/SubscriptionService');
 const TournamentService = require('./services/TournamentService');
+const Tournament = require('./models/Tournament');
 const cron = require('node-cron');
 
 // ============================================================================
@@ -581,6 +582,24 @@ const subscribeSchema = Joi.object({
     walletAddress: solanaPublicKey,
     transactionSignature: Joi.string().required(),
     plan: Joi.string().valid('monthly', 'yearly').required()
+});
+
+const createTournamentSchema = Joi.object({
+    name:                 Joi.string().min(3).max(100).required(),
+    description:          Joi.string().max(500).optional().allow(''),
+    type:                 Joi.string().valid('scheduled', 'on_demand').default('scheduled'),
+    format:               Joi.string().valid('single_elimination', 'round_robin', 'bracket').default('single_elimination'),
+    startTime:            Joi.date().iso().greater('now').required(),
+    registrationDeadline: Joi.date().iso().less(Joi.ref('startTime')).required()
+                            .messages({ 'date.less': 'Registration deadline must be before start time' }),
+    minPlayers:           Joi.number().integer().min(4).max(128).default(4),
+    maxPlayers:           Joi.number().integer().min(Joi.ref('minPlayers')).max(256).default(100),
+    entryFee:             Joi.number().min(0).default(0),
+    prizePool:            Joi.number().min(0).default(0),
+    currency:             Joi.string().valid('USDC', 'SOL').default('USDC'),
+    questionsPerGame:     Joi.number().integer().min(5).max(30).default(10),
+    timePerQuestion:      Joi.number().integer().min(10).max(60).default(15),
+    categories:           Joi.array().items(Joi.string()).default([]),
 });
 
 const matchFoundSchema = Joi.object({
@@ -5107,6 +5126,8 @@ async function handleGameOver(room, roomId) {
 
             if (tournamentService && room.tournamentId) {
                 const humanPlayers = room.players.filter(p => !p.isBot);
+                let winnerUserId = null;
+                let loserUserId = null;
 
                 for (const player of humanPlayers) {
                     const user = await User.findOne({ walletAddress: player.username });
@@ -5119,9 +5140,29 @@ async function handleGameOver(room, roomId) {
                                 player.score || 0,
                                 result
                             );
+                            if (result === 'win')  winnerUserId = user._id;
+                            if (result === 'loss') loserUserId  = user._id;
                         } catch (tournError) {
                             logger.error(`Failed to update tournament score for ${player.username}:`, tournError);
                         }
+                    }
+                }
+
+                // Advance the bracket once both scores are saved
+                if (winnerUserId && loserUserId) {
+                    try {
+                        const { action } = await tournamentService.processMatchResult(
+                            room.tournamentId, winnerUserId, loserUserId
+                        );
+
+                        if (action === 'round_advanced') {
+                            // Notify all sockets in this tournament that a new round started
+                            io.emit('tournamentRoundAdvanced', { tournamentId: room.tournamentId });
+                        } else if (action === 'tournament_complete') {
+                            io.emit('tournamentComplete', { tournamentId: room.tournamentId });
+                        }
+                    } catch (advanceErr) {
+                        logger.error('Failed to advance tournament round:', advanceErr);
                     }
                 }
             }
@@ -5851,6 +5892,15 @@ async function authenticate(req, res, next) {
     }
 }
 
+function requireAdmin(req, res, next) {
+    // Admin wallet addresses — move to env/config in production
+    const ADMIN_WALLETS = (process.env.ADMIN_WALLETS || '').split(',').map(w => w.trim()).filter(Boolean);
+    if (!req.user || !ADMIN_WALLETS.includes(req.user.walletAddress)) {
+        return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+    next();
+}
+
 // ============================================================================
 // SUBSCRIPTION MANAGEMENT ENDPOINTS
 // ============================================================================
@@ -6056,6 +6106,69 @@ app.get('/api/tournaments/my-history', authenticate, async (req, res) => {
     }
 });
 
+// ============================================================================
+// ADMIN TOURNAMENT MANAGEMENT ENDPOINTS
+// ============================================================================
+
+// Create tournament (Admin only)
+app.post('/api/admin/tournaments', authenticate, requireAdmin, async (req, res) => {
+    try {
+        const { error, value } = createTournamentSchema.validate(req.body);
+        if (error) {
+            return res.status(400).json({ success: false, error: error.details[0].message });
+        }
+
+        if (!tournamentService) {
+            return res.status(503).json({ success: false, error: 'Tournament service not available' });
+        }
+
+        const tournament = await tournamentService.createTournament(value);
+        logger.info(`[ADMIN] Tournament created by ${req.user.walletAddress}: ${tournament._id} - ${tournament.name}`);
+
+        res.status(201).json({ success: true, tournament });
+    } catch (error) {
+        logger.error('[ADMIN] Error creating tournament:', { error: error.message });
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// List all tournaments (Admin)
+app.get('/api/admin/tournaments', authenticate, requireAdmin, async (req, res) => {
+    try {
+        const tournaments = await Tournament.find()
+            .sort({ createdAt: -1 })
+            .limit(50)
+            .select('name status startTime registrationDeadline minPlayers maxPlayers participants prizePool');
+
+        res.json({ success: true, tournaments });
+    } catch (error) {
+        logger.error('[ADMIN] Error listing tournaments:', { error: error.message });
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Cancel tournament (Admin)
+app.post('/api/admin/tournaments/:id/cancel', authenticate, requireAdmin, async (req, res) => {
+    try {
+        const tournament = await Tournament.findById(req.params.id);
+        if (!tournament) {
+            return res.status(404).json({ success: false, error: 'Tournament not found' });
+        }
+        if (tournament.status === 'completed') {
+            return res.status(400).json({ success: false, error: 'Cannot cancel a completed tournament' });
+        }
+
+        tournament.status = 'cancelled';
+        await tournament.save();
+
+        logger.info(`[ADMIN] Tournament cancelled by ${req.user.walletAddress}: ${tournament._id}`);
+        res.json({ success: true, tournament });
+    } catch (error) {
+        logger.error('[ADMIN] Error cancelling tournament:', { error: error.message });
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 app.get('/admin', (req, res) => {
     const clientIP = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
     logger.warn(`Potential bot detected accessing admin honeypot: ${clientIP}`);
@@ -6068,6 +6181,8 @@ app.get('/admin', (req, res) => {
 
 async function handlePlayerLeftWin(roomId, remainingPlayer, disconnectedPlayer, betAmount, botOpponent, allPlayers) {
     try {
+        const room = await getGameRoom(roomId); // get room before deleting
+
         // Emit game over event with forfeit information (no P2P payouts in subscription model)
         io.to(roomId).emit('gameOverForfeit', {
             winner: remainingPlayer.username,
@@ -6083,6 +6198,23 @@ async function handlePlayerLeftWin(roomId, remainingPlayer, disconnectedPlayer, 
             botOpponent: botOpponent,
             betAmount: betAmount
         });
+
+        // Advance tournament bracket on forfeit
+        if (room && room.gameMode === GAME_MODES.TOURNAMENT && room.tournamentId && tournamentService) {
+            const winnerUser = await User.findOne({ walletAddress: remainingPlayer.username });
+            const loserUser  = await User.findOne({ walletAddress: disconnectedPlayer.username });
+            if (winnerUser && loserUser) {
+                try {
+                    await tournamentService.updatePlayerScore(room.tournamentId, winnerUser._id, remainingPlayer.score || 0, 'win');
+                    await tournamentService.updatePlayerScore(room.tournamentId, loserUser._id, disconnectedPlayer.score || 0, 'loss');
+                    const { action } = await tournamentService.processMatchResult(room.tournamentId, winnerUser._id, loserUser._id);
+                    if (action === 'round_advanced')     io.emit('tournamentRoundAdvanced', { tournamentId: room.tournamentId });
+                    if (action === 'tournament_complete') io.emit('tournamentComplete',      { tournamentId: room.tournamentId });
+                } catch (e) {
+                    logger.error('Failed to advance tournament after forfeit:', e);
+                }
+            }
+        }
 
         // Clean up the room
         await deleteGameRoom(roomId);
