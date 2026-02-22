@@ -8,7 +8,7 @@ const mongoose = require('mongoose');
 const GameSessionSchema = new mongoose.Schema({
     roomId:    { type: String, required: true, unique: true, index: true },
     betAmount: { type: Number, required: true },
-    gameMode:  { type: String, enum: ['bot', 'human', 'multiplayer'], default: 'bot' },
+    gameMode:  { type: String, enum: ['practice', 'tournament'], default: 'practice' },
     players: [{
         walletAddress: String,
         socketId:      String,

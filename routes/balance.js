@@ -13,12 +13,13 @@ const context = require('../context');
 const User    = require('../models/User');
 const PaymentQueue = require('../models/PaymentQueue');
 const { walletParamSchema, paymentIdParamSchema } = require('../config/schemas');
+const { authenticate }       = require('../middleware/authenticate');
 const { SecurityLogger }     = require('../utils/securityLogger');
 const { trackValidationFailure } = require('../config/alerts');
 
 // ─── GET /api/balance/:walletAddress (authenticated) ─────────────────────────
 
-router.get('/balance/:walletAddress', async (req, res) => {
+router.get('/balance/:walletAddress', authenticate, async (req, res) => {
     try {
         const { walletAddress } = req.params;
         if (!walletAddress || walletAddress.length < 32 || walletAddress.length > 44) {
@@ -26,15 +27,9 @@ router.get('/balance/:walletAddress', async (req, res) => {
             return res.status(400).json({ error: 'Invalid wallet address' });
         }
 
-        const { sessionToken } = req.signedCookies;
-        if (!sessionToken) return res.status(401).json({ error: 'Not authenticated' });
-
-        const sessionData = await context.redisClient.get(`session:${sessionToken}`);
-        if (!sessionData) return res.status(401).json({ error: 'Session expired' });
-
-        const sessionInfo = JSON.parse(sessionData);
-        if (sessionInfo.walletAddress !== walletAddress) {
-            SecurityLogger.log('balance_check_unauthorized', { ip: req.ip, requestedWallet: walletAddress, sessionWallet: sessionInfo.walletAddress });
+        // Ensure the authenticated user can only check their own balance
+        if (req.user.walletAddress !== walletAddress) {
+            SecurityLogger.log('balance_check_unauthorized', { ip: req.ip, requestedWallet: walletAddress, sessionWallet: req.user.walletAddress });
             return res.status(403).json({ error: 'Unauthorized' });
         }
 

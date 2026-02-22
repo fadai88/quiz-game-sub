@@ -63,7 +63,7 @@ const { registerSocketHandlers } = require('./socket/index');
 const authRoutes          = require('./routes/auth');
 const balanceRoutes       = require('./routes/balance');
 const subscriptionRoutes  = require('./routes/subscriptions');
-const tournamentRoutes    = require('./routes/tournaments');
+const { tournamentRouter, adminTournamentRouter } = require('./routes/tournaments');
 const { registerCronJobs } = require('./jobs/cronJobs');
 
 // ─── Session secret ───────────────────────────────────────────────────────────
@@ -112,7 +112,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use('/api/auth',         authRoutes);
 app.use('/api',              balanceRoutes);
 app.use('/api/subscription', subscriptionRoutes);
-app.use('/api/tournaments',  tournamentRoutes);
+app.use('/api/tournaments',       tournamentRouter);
+app.use('/api/admin/tournaments', adminTournamentRouter);
 
 // ─── Admin honeypot ───────────────────────────────────────────────────────────
 app.get('/admin', (req, res) => {

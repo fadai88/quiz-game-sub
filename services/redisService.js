@@ -101,7 +101,6 @@ async function initializeRedis() {
         logger.info(`Redis test: ${testValue}`);
 
         context.set('redisClient', redisClient);
-        global.redisClient = redisClient; // backward-compat
 
         await initializeRateLimiter(redisClient);
 

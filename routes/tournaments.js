@@ -78,9 +78,11 @@ router.get('/my-history', authenticate, async (req, res) => {
     }
 });
 
-// ─── Admin ────────────────────────────────────────────────────────────────────
+// ─── Admin (mounted at /api/admin/tournaments) ──────────────────────────────
 
-router.post('/admin', authenticate, requireAdmin, async (req, res) => {
+const adminRouter = express.Router();
+
+adminRouter.post('/', authenticate, requireAdmin, async (req, res) => {
     try {
         const { error, value } = createTournamentSchema.validate(req.body);
         if (error) return res.status(400).json({ success: false, error: error.details[0].message });
@@ -95,7 +97,7 @@ router.post('/admin', authenticate, requireAdmin, async (req, res) => {
     }
 });
 
-router.get('/admin', authenticate, requireAdmin, async (req, res) => {
+adminRouter.get('/', authenticate, requireAdmin, async (req, res) => {
     try {
         const tournaments = await Tournament.find()
             .sort({ createdAt: -1 }).limit(50)
@@ -107,7 +109,7 @@ router.get('/admin', authenticate, requireAdmin, async (req, res) => {
     }
 });
 
-router.post('/admin/:id/cancel', authenticate, requireAdmin, async (req, res) => {
+adminRouter.post('/:id/cancel', authenticate, requireAdmin, async (req, res) => {
     try {
         const tournament = await Tournament.findById(req.params.id);
         if (!tournament)                        return res.status(404).json({ success: false, error: 'Tournament not found' });
@@ -122,4 +124,4 @@ router.post('/admin/:id/cancel', authenticate, requireAdmin, async (req, res) =>
     }
 });
 
-module.exports = router;
+module.exports = { tournamentRouter: router, adminTournamentRouter: adminRouter };

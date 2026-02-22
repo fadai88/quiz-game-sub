@@ -8,7 +8,6 @@
 
 const cookie          = require('cookie');
 const cookieSignature = require('cookie-signature');
-const { RateLimiterRedis } = require('rate-limiter-flexible');
 const { PublicKey }   = require('@solana/web3.js');
 const nacl            = require('tweetnacl');
 const logger          = require('../logger');
@@ -17,6 +16,7 @@ const BotDetector     = require('../botDetector');
 const User            = require('../models/User');
 const GameSession     = require('../models/GameSession');
 
+const { socketRateLimiter }             = require('../services/redisService');
 const { SecurityLogger, AuditLogger }  = require('../utils/securityLogger');
 const { sanitizeForLog }               = require('../utils/sanitize');
 const { verifyRecaptcha }              = require('../utils/helpers');
@@ -151,8 +151,7 @@ function registerConnectionHandler(io) {
         socket.use(async (packet, next) => {
             try {
                 if (packet.type === 0 || packet.type === 2) { next(); return; }
-                const limiter = new RateLimiterRedis({ storeClient: context.redisClient, points: 10, duration: 30, keyPrefix: 'socket-packet' });
-                await limiter.consume(socket.id);
+                await socketRateLimiter.consume(socket.id);
                 next();
             } catch {
                 next(new Error('Rate limited'));

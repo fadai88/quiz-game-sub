@@ -14,7 +14,7 @@ const { refundToVirtualBalance } = require('../services/playerService');
  */
 function registerCronJobs() {
     // ── Safety net: refund stuck games every 5 minutes ────────────────────────
-    setInterval(async () => {
+    cron.schedule('*/5 * * * *', async () => {
         try {
             const cutoffTime = new Date(Date.now() - 15 * 60 * 1000);
             const stuckGames = await GameSession.find({ status: 'active', startTime: { $lt: cutoffTime } });
@@ -39,7 +39,7 @@ function registerCronJobs() {
         } catch (error) {
             logger.error('❌ Safety Net Cron Error:', error);
         }
-    }, 5 * 60 * 1000);
+    });
     logger.info('🛡️ Safety Net cron job initialized (runs every 5 minutes)');
 
     // ── Subscription expiry: every hour ───────────────────────────────────────
