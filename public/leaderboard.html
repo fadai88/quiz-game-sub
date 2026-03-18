@@ -1,284 +1,201 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Leaderboard - Trivia Game</title>
-    <link rel="stylesheet" href="styles.css">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Leaderboard – Proof of Smart</title>
     <style>
-        #leaderboardTable {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 20px;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-        }
-        
-        #leaderboardTable th, #leaderboardTable td {
-            padding: 12px 15px;
-            text-align: left;
-            border-bottom: 1px solid #ddd;
-        }
-        
-        #leaderboardTable th {
-            background-color: var(--primary-color, #4a90e2);
-            color: white;
-            font-weight: bold;
-        }
-        
-        #leaderboardTable tr:nth-child(even) {
-            background-color: var(--row-alt-bg, #f8f8f8);
-        }
-        
-        #leaderboardTable tr:hover {
-            background-color: var(--row-hover-bg, #f1f1f1);
-        }
-        
-        .truncated-address {
-            font-family: monospace;
-        }
-        
-        .winnings {
-            font-weight: bold;
-            color: var(--success-color, #2e7d32);
-        }
-        
-        .medal {
-            display: inline-block;
-            width: 24px;
-            height: 24px;
-            line-height: 24px;
-            text-align: center;
-            border-radius: 50%;
-            margin-right: 10px;
-            font-weight: bold;
-        }
-        
-        .gold { background-color: #ffd700; color: #5d4037; }
-        .silver { background-color: #c0c0c0; color: #455a64; }
-        .bronze { background-color: #cd7f32; color: #3e2723; }
-        
-        .dark-theme #leaderboardTable th {
-            background-color: #2c3e50;
-        }
-        
-        .dark-theme #leaderboardTable tr:nth-child(even) {
-            background-color: #283747;
-        }
-        
-        .dark-theme #leaderboardTable tr:hover {
-            background-color: #34495e;
-        }
-        
-        .dark-theme .winnings {
-            color: #81c784;
-        }
-        
-        #refreshBtn {
-            margin-bottom: 15px;
-            padding: 8px 16px;
-            background-color: var(--primary-color, #4a90e2);
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            transition: background-color 0.3s;
-        }
-        
-        #refreshBtn:hover {
-            background-color: var(--primary-color-dark, #3a7bc8);
-        }
-        
-        #refreshBtn:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-        }
-        
-        .loading {
-            display: inline-block;
-            width: 20px;
-            height: 20px;
-            border: 3px solid rgba(255,255,255,.3);
-            border-radius: 50%;
-            border-top-color: #fff;
-            animation: spin 1s ease-in-out infinite;
-            margin-left: 10px;
-            vertical-align: middle;
-        }
-        
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-        
-        .error-message {
-            background-color: #ffebee;
-            color: #c62828;
-            padding: 15px;
-            border-radius: 4px;
-            margin-top: 20px;
-            text-align: center;
-            border-left: 4px solid #c62828;
-        }
-        
-        .dark-theme .error-message {
-            background-color: #5d4037;
-            color: #ffccbc;
-            border-left-color: #ff5722;
-        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: #0f172a; color: #e2e8f0; font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; }
+        header { background: #1e293b; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #334155; }
+        header h1 { font-size: 1.4rem; color: #f8fafc; }
+        nav ul { list-style: none; display: flex; gap: 24px; }
+        nav a { color: #94a3b8; text-decoration: none; font-size: .9rem; }
+        nav a:hover { color: #f8fafc; }
+
+        .container { max-width: 900px; margin: 0 auto; padding: 32px 20px; }
+        h2 { font-size: 1.8rem; margin-bottom: 4px; color: #f8fafc; }
+        .subtitle { color: #64748b; font-size: .9rem; margin-bottom: 28px; }
+
+        .cycle-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
+        .cycle-pill { padding: 6px 16px; border-radius: 20px; border: 1px solid #334155; background: #1e293b; color: #94a3b8; font-size: .82rem; cursor: pointer; transition: all .15s; }
+        .cycle-pill:hover { border-color: #64748b; color: #e2e8f0; }
+        .cycle-pill.active { background: #f59e0b; border-color: #f59e0b; color: #0f172a; font-weight: 700; }
+        .cycle-badge { margin-left: 5px; font-size: .7rem; vertical-align: middle; }
+
+        .cycle-info-bar { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: #1e293b; border: 1px solid #334155; border-radius: 8px; margin-bottom: 20px; font-size: .88rem; }
+        .cycle-info-bar .lbl { color: #64748b; }
+        .cycle-info-bar .val { color: #f8fafc; font-weight: 600; }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .status-dot.active { background: #22c55e; }
+        .status-dot.closed { background: #64748b; }
+
+        .table-wrap { background: #1e293b; border: 1px solid #334155; border-radius: 10px; overflow: hidden; }
+        table { width: 100%; border-collapse: collapse; }
+        thead th { padding: 12px 16px; font-size: .75rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: .06em; text-align: left; border-bottom: 1px solid #334155; }
+        tbody td { padding: 14px 16px; font-size: .92rem; border-bottom: 1px solid #1a2540; vertical-align: middle; }
+        tbody tr:last-child td { border-bottom: none; }
+        tbody tr:hover { background: #243044; }
+
+        .rank-cell { font-weight: 700; font-family: monospace; }
+        .rank-1 { color: #f59e0b; } .rank-2 { color: #94a3b8; } .rank-3 { color: #b45309; }
+        .addr { font-family: monospace; font-size: .85rem; color: #cbd5e1; }
+        .wins { color: #4ade80; font-weight: 600; font-family: monospace; }
+        .losses { color: #f87171; font-family: monospace; }
+        .pct { color: #94a3b8; font-family: monospace; font-size: .85rem; }
+
+        .awards-section { margin-top: 24px; background: #1e293b; border: 1px solid #f59e0b44; border-radius: 10px; padding: 20px; display: none; }
+        .awards-section h3 { font-size: 1rem; color: #f59e0b; margin-bottom: 14px; }
+        .award-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid #243044; font-size: .88rem; }
+        .award-row:last-child { border-bottom: none; }
+        .award-rank { font-weight: 700; color: #f59e0b; min-width: 28px; }
+        .award-addr { font-family: monospace; color: #cbd5e1; flex: 1; }
+        .award-prize { color: #4ade80; font-weight: 600; }
+
+        .empty { text-align: center; padding: 48px 20px; color: #475569; }
+        .empty .icon { font-size: 2.5rem; margin-bottom: 10px; }
+        .spinner { display: inline-block; width: 20px; height: 20px; border: 2px solid #334155; border-top-color: #f59e0b; border-radius: 50%; animation: spin .8s linear infinite; vertical-align: middle; margin-right: 8px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .refresh-btn { margin-left: auto; padding: 6px 14px; border: 1px solid #334155; background: transparent; color: #94a3b8; border-radius: 6px; font-size: .82rem; cursor: pointer; transition: all .15s; }
+        .refresh-btn:hover { border-color: #64748b; color: #e2e8f0; }
+        @media (max-width: 600px) { thead th:nth-child(5), tbody td:nth-child(5) { display: none; } }
     </style>
 </head>
 <body>
-    <header>
-        <h1>Proof of Smart Leaderboard</h1>
-        <nav>
-            <ul>
-                <li><a href="index.html">Home</a></li>
-                <li><a href="game.html">Play Game</a></li>
-            </ul>
-        </nav>
-    </header>
-    <main>
-        <div id="leaderboardContainer">
-            <h2>Top Winners</h2>
-            <button id="refreshBtn" onclick="refreshLeaderboard()">Refresh Leaderboard</button>
-            <table id="leaderboardTable">
-                <thead>
-                    <tr>
-                        <th>Rank</th>
-                        <th>Wallet Address</th>
-                        <th>Games Played</th>
-                        <th>Wins</th>
-                        <th>Total Winnings (USDC)</th>
-                    </tr>
-                </thead>
-                <tbody id="leaderboardBody"></tbody>
-            </table>
-            <div id="noDataMessage" style="display: none; margin-top: 20px; text-align: center;">
-                No leaderboard data available yet. Be the first to play and win!
-            </div>
-            <div id="errorMessage" style="display: none;"></div>
-        </div>
-    </main>
-    <script>
-        const leaderboardBody = document.getElementById('leaderboardBody');
-        const noDataMessage = document.getElementById('noDataMessage');
-        const errorMessage = document.getElementById('errorMessage');
-        const leaderboardTable = document.getElementById('leaderboardTable');
-        
-        // Function to format wallet address
-        function formatWalletAddress(address) {
-            if (!address) return 'Unknown';
-            if (address.length <= 12) return address;
-            return `${address.slice(0, 6)}...${address.slice(-4)}`;
-        }
-        
-        // Function to load leaderboard data via REST API
-        async function loadLeaderboard() {
-            try {
-                // Hide error message
-                errorMessage.style.display = 'none';
-                
-                const response = await fetch('/api/leaderboard');
-                
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                
-                const leaderboard = await response.json();
-                
-                // Clear existing data
-                leaderboardBody.innerHTML = '';
-                
-                // Check if leaderboard is empty
-                if (!leaderboard || leaderboard.length === 0) {
-                    noDataMessage.style.display = 'block';
-                    leaderboardTable.style.display = 'none';
-                    return;
-                }
-                
-                // Show table, hide no data message
-                noDataMessage.style.display = 'none';
-                leaderboardTable.style.display = 'table';
-                
-                // Populate leaderboard
-                leaderboard.forEach((user, index) => {
-                    const row = document.createElement('tr');
-                    
-                    // Create medal for top 3
-                    let rankDisplay = `${index + 1}`;
-                    if (index < 3) {
-                        const medalClass = ['gold', 'silver', 'bronze'][index];
-                        rankDisplay = `<span class="medal ${medalClass}">${index + 1}</span>`;
-                    }
-                    
-                    // Format wallet address
-                    const formattedAddress = formatWalletAddress(user.username || user.walletAddress);
-                    
-                    // Format total winnings
-                    const winnings = user.totalWinnings || 0;
-                    const formattedWinnings = winnings.toFixed(2);
-                    
-                    // Calculate win rate
-                    const gamesPlayed = user.gamesPlayed || 0;
-                    const wins = user.wins || 0;
-                    const winRate = gamesPlayed > 0 ? (wins / gamesPlayed * 100).toFixed(1) + '%' : '0%';
-                    
-                    row.innerHTML = `
-                        <td>${rankDisplay}</td>
-                        <td class="truncated-address">${formattedAddress}</td>
-                        <td>${gamesPlayed}</td>
-                        <td>${wins} (${winRate})</td>
-                        <td class="winnings">${formattedWinnings}</td>
-                    `;
-                    leaderboardBody.appendChild(row);
-                });
-                
-                console.log('Leaderboard loaded successfully:', leaderboard.length, 'entries');
-                
-            } catch (error) {
-                console.error('Error loading leaderboard:', error);
-                
-                // Show error message
-                errorMessage.className = 'error-message';
-                errorMessage.textContent = `Failed to load leaderboard: ${error.message}. Please try refreshing.`;
-                errorMessage.style.display = 'block';
-                
-                // Hide table
-                leaderboardTable.style.display = 'none';
-                noDataMessage.style.display = 'none';
-            }
-        }
-        
-        // Function to refresh leaderboard with UI feedback
-        async function refreshLeaderboard() {
-            const refreshBtn = document.getElementById('refreshBtn');
-            refreshBtn.disabled = true;
-            refreshBtn.innerHTML = 'Refreshing... <span class="loading"></span>';
-            
-            try {
-                await loadLeaderboard();
-            } finally {
-                // Re-enable the button after a delay
-                setTimeout(() => {
-                    refreshBtn.disabled = false;
-                    refreshBtn.innerHTML = 'Refresh Leaderboard';
-                }, 1000);
-            }
-        }
-        
-        // Set theme on load
-        document.addEventListener('DOMContentLoaded', () => {
-            // Load saved theme
-            const savedTheme = localStorage.getItem('theme');
-            if (savedTheme === 'dark') {
-                document.body.classList.add('dark-theme');
-            }
-            
-            // Load leaderboard data
-            loadLeaderboard();
+
+<header>
+    <h1>Proof of Smart</h1>
+    <nav><ul>
+        <li><a href="index.html">Home</a></li>
+        <li><a href="game.html">Play Game</a></li>
+        <li><a href="tournaments.html">Tournaments</a></li>
+        <li><a href="subscription.html">Subscription</a></li>
+        <li><a href="leaderboard.html">Leaderboard</a></li>
+    </ul></nav>
+</header>
+
+<div class="container">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:6px">
+        <h2>Leaderboard</h2>
+        <button class="refresh-btn" onclick="refreshCurrent()">↻ Refresh</button>
+    </div>
+    <p class="subtitle">Weekly win/loss standings · Prizes awarded at end of each cycle</p>
+
+    <div class="cycle-bar" id="cyclePills"><span class="spinner"></span> Loading cycles…</div>
+
+    <div class="cycle-info-bar" id="cycleInfoBar" style="display:none">
+        <div class="status-dot" id="statusDot"></div>
+        <span class="lbl">Cycle:</span>
+        <span class="val" id="cycleLabel">—</span>
+        <span class="lbl" style="margin-left:auto">Started:</span>
+        <span class="val" id="cycleStarted">—</span>
+    </div>
+
+    <div class="table-wrap" id="tableWrap">
+        <div class="empty"><div class="icon">⏳</div><p>Loading standings…</p></div>
+    </div>
+
+    <div class="awards-section" id="awardsSection">
+        <h3>🏆 Prize Awards</h3>
+        <div id="awardsBody"></div>
+    </div>
+</div>
+
+<script>
+let allCycles = [], activeCycleId = null;
+
+function fmtAddr(a) { return a && a.length > 12 ? `${a.slice(0,6)}…${a.slice(-4)}` : (a || 'Unknown'); }
+function fmtDate(d) { return d ? new Date(d).toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'}) : '—'; }
+
+async function loadCycles() {
+    try {
+        const r = await fetch('/api/leaderboard/cycles');
+        allCycles = await r.json();
+    } catch { allCycles = []; }
+
+    if (!allCycles.length) {
+        try { const r = await fetch('/api/leaderboard'); const d = await r.json(); if (d.cycle) allCycles = [d.cycle]; } catch {}
+    }
+
+    renderPills();
+    if (allCycles.length) { activeCycleId = allCycles[0]._id || allCycles[0].id; await loadStandings(activeCycleId); }
+}
+
+function renderPills() {
+    const bar = document.getElementById('cyclePills');
+    if (!allCycles.length) { bar.innerHTML = '<span style="color:#475569;font-size:.88rem">No cycles yet</span>'; return; }
+    bar.innerHTML = allCycles.map(c => {
+        const id = c._id || c.id;
+        return `<div class="cycle-pill" data-id="${id}" onclick="selectCycle('${id}',this)">${c.label}<span class="cycle-badge">${c.status==='active'?'🟢':'🔒'}</span></div>`;
+    }).join('');
+}
+
+function selectCycle(id, el) {
+    document.querySelectorAll('.cycle-pill').forEach(p => p.classList.remove('active'));
+    if (el) el.classList.add('active');
+    activeCycleId = id; loadStandings(id);
+}
+
+function refreshCurrent() { activeCycleId ? loadStandings(activeCycleId) : loadCycles(); }
+
+async function loadStandings(cycleId) {
+    document.getElementById('tableWrap').innerHTML = `<div class="empty"><span class="spinner"></span> Loading…</div>`;
+    document.getElementById('awardsSection').style.display = 'none';
+    document.getElementById('cycleInfoBar').style.display  = 'none';
+    try {
+        const url = cycleId ? `/api/leaderboard/cycle/${cycleId}` : '/api/leaderboard';
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderCycleInfo(data.cycle);
+        renderTable(data.rows || []);
+        if (data.cycle?.status === 'closed' && data.cycle?.awards?.length) renderAwards(data.cycle.awards);
+        document.querySelectorAll('.cycle-pill').forEach(p => {
+            p.classList.toggle('active', p.dataset.id === String(data.cycle?._id || data.cycle?.id));
         });
-        
-        // Auto-refresh every 30 seconds
-        setInterval(loadLeaderboard, 30000);
-    </script>
+    } catch(err) {
+        document.getElementById('tableWrap').innerHTML = `<div class="empty"><div class="icon">⚠️</div><p>${err.message}</p></div>`;
+    }
+}
+
+function renderCycleInfo(c) {
+    if (!c) return;
+    document.getElementById('cycleInfoBar').style.display = 'flex';
+    document.getElementById('cycleLabel').textContent   = c.label || '—';
+    document.getElementById('cycleStarted').textContent = fmtDate(c.startedAt || c.started_at);
+    document.getElementById('statusDot').className = 'status-dot ' + (c.status === 'active' ? 'active' : 'closed');
+}
+
+function renderTable(rows) {
+    const wrap = document.getElementById('tableWrap');
+    if (!rows.length) {
+        wrap.innerHTML = `<div class="empty"><div class="icon">🎯</div><p>No games played in this cycle yet.</p><p style="margin-top:8px;font-size:.85rem"><a href="game.html" style="color:#f59e0b">Be the first to play →</a></p></div>`;
+        return;
+    }
+    const MEDALS = ['🥇','🥈','🥉'];
+    wrap.innerHTML = `<table><thead><tr><th>#</th><th>Wallet</th><th>Wins</th><th>Losses</th><th>Games</th><th>Win %</th></tr></thead><tbody>` +
+        rows.map(r => `<tr>
+            <td class="rank-cell ${r.rank<=3?'rank-'+r.rank:''}">${r.rank<=3?MEDALS[r.rank-1]:r.rank}</td>
+            <td class="addr">${fmtAddr(r.username)}</td>
+            <td class="wins">${r.wins}</td>
+            <td class="losses">${r.losses}</td>
+            <td>${r.gamesPlayed}</td>
+            <td class="pct">${r.winPct}%</td>
+        </tr>`).join('') + `</tbody></table>`;
+}
+
+function renderAwards(awards) {
+    document.getElementById('awardsBody').innerHTML = [...awards].sort((a,b)=>a.rank-b.rank).map(a =>
+        `<div class="award-row"><span class="award-rank">#${a.rank}</span><span class="award-addr">${fmtAddr(a.walletAddress)}</span><span class="award-prize">${a.prizeNote||''}</span></div>`
+    ).join('');
+    document.getElementById('awardsSection').style.display = 'block';
+}
+
+loadCycles();
+setInterval(() => {
+    const active = allCycles.find(c => c.status === 'active');
+    if (active && (active._id||active.id) === activeCycleId) loadStandings(activeCycleId);
+}, 30_000);
+</script>
 </body>
 </html>

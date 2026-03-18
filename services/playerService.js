@@ -3,11 +3,11 @@
  * Player stats updates, refunds, active-room lookups, and forfeit handling.
  */
 
-const mongoose = require('mongoose');
 const logger = require('../logger');
 const context = require('../context');
 const User = require('../models/User');
-const { fromAtomicUnits, calculateWinnings, formatUSDC } = require('../utils/usdcUtils');
+const PrizeCycle = require('../models/PrizeCycle');
+const { fromAtomicUnits, formatUSDC } = require('../utils/usdcUtils');
 const { getCleanActiveRooms, getGameRoom, deleteGameRoom, logGameRoomsState } = require('./roomManager');
 const { alertManager } = require('../config/alerts');
 const { GAME_MODES } = require('../config/constants');
@@ -47,57 +47,31 @@ async function refundToVirtualBalance(walletAddress, amount, reason) {
 
 async function updatePlayerStats(players, roomData) {
     logger.info('Updating stats for all players:', players);
-    const { winner, botOpponent, betAmount } = roomData;
-    const multiplier    = botOpponent ? 1.5 : 1.8;
-    const winningAmount = calculateWinnings(betAmount, multiplier);
+    const { winner } = roomData;
 
-    const supportsTransactions =
-        mongoose.connection.client.topology?.description?.type !== 'Single';
+    // ── Subscription model: no immediate payout. Record win/loss only. ──────────
+    // Prizes are distributed at end of the weekly cycle by the admin.
+    const cycle = await PrizeCycle.getOrCreateActive();
 
-    if (supportsTransactions) {
-        const session = await mongoose.startSession();
-        session.startTransaction();
-        try {
-            for (const player of players) {
-                if (player.isBot || !player.username) continue;
-                const isWinner  = player.username === winner;
-                const updateObj = { $inc: { gamesPlayed: 1, correctAnswers: player.score || 0 } };
-                if (isWinner) {
-                    updateObj.$inc.wins = 1;
-                    updateObj.$inc.totalWinnings = fromAtomicUnits(Number(winningAmount));
-                }
-                await User.findOneAndUpdate(
-                    { walletAddress: player.username },
-                    updateObj,
-                    { upsert: true, new: true, session }
-                );
-                logger.info(`Updated ${player.username} (winner: ${isWinner})`);
-            }
-            await session.commitTransaction();
-        } catch (error) {
-            await session.abortTransaction();
-            logger.error('Error updating player stats (transaction rolled back):', error);
-            throw error;
-        } finally {
-            session.endSession();
-        }
-    } else {
-        // Fallback for single-node MongoDB (no transactions)
-        for (const player of players) {
-            if (player.isBot || !player.username) continue;
-            const isWinner  = player.username === winner;
-            const updateObj = { $inc: { gamesPlayed: 1, correctAnswers: player.score || 0 } };
-            if (isWinner) {
-                updateObj.$inc.wins = 1;
-                updateObj.$inc.totalWinnings = fromAtomicUnits(Number(winningAmount));
-            }
-            try {
-                await User.findOneAndUpdate({ walletAddress: player.username }, updateObj, { upsert: true, new: true });
-                logger.info(`Updated ${player.username} (winner: ${isWinner})`);
-            } catch (err) {
-                logger.error(`Error updating stats for ${player.username}:`, err);
-            }
-        }
+    for (const player of players) {
+        if (player.isBot || !player.username) continue;
+        const isWinner = player.username === winner;
+
+        await User.findOneAndUpdate(
+            { walletAddress: player.username },
+            {
+                $inc: {
+                    gamesPlayed:    1,
+                    correctAnswers: player.score || 0,
+                    wins:           isWinner ? 1 : 0,
+                    losses:         isWinner ? 0 : 1,
+                },
+                // Track which cycle this game belongs to (latest active)
+                $set: { lastActiveCycleId: cycle._id },
+            },
+            { upsert: true, new: true }
+        );
+        logger.info(`Stats updated: ${player.username} | winner=${isWinner} | cycle=${cycle._id}`);
     }
 }
 

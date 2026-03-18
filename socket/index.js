@@ -16,7 +16,7 @@ const BotDetector     = require('../botDetector');
 const User            = require('../models/User');
 const GameSession     = require('../models/GameSession');
 
-const { socketRateLimiter }             = require('../services/redisService');
+const { socketRateLimiter, eventLimiters } = require('../services/redisService');
 const { SecurityLogger, AuditLogger }  = require('../utils/securityLogger');
 const { sanitizeForLog }               = require('../utils/sanitize');
 const { verifyRecaptcha }              = require('../utils/helpers');
@@ -40,7 +40,6 @@ const { startGame, startSinglePlayerGame, completeQuestion, abortGameWithRefund 
 const { updatePlayerStats, refundToVirtualBalance, findPlayerActiveRoom, handlePlayerLeftWin } = require('../services/playerService');
 const { verifyAndValidateTransaction } = require('../services/transactionVerifier');
 const { rateLimitEvent, rateLimitFailedRecaptcha, isBlocked: isBlockedFn } = require('../services/rateLimitService');
-const { eventLimiters } = require('../services/redisService');
 
 const SESSION_SECRET = process.env.SESSION_SECRET;
 
