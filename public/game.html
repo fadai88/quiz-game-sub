@@ -2393,7 +2393,35 @@
                     return;
                 }
 
-                // Update UI with player results
+                // Disable further interactions
+                submitAnswerBtn.disabled = true;
+                submitAnswerBtn.style.display = 'none';
+                if (window.syncTimeout) { clearTimeout(window.syncTimeout); window.syncTimeout = null; }
+                if (countdownInterval) { clearInterval(countdownInterval); countdownTimer.textContent = ''; countdownTimer.style.display = 'none'; }
+
+                // Find this player's result
+                const myResult = playerResults.find(r => r.username === connectedWallet);
+
+                // Color the answer options
+                const normalizeText = (text) => text.trim().toLowerCase().replace(/\s+/g, ' ');
+                const optionDivs = document.querySelectorAll('#options div');
+                optionDivs.forEach((div) => {
+                    const label = div.querySelector('label');
+                    const input = div.querySelector('input');
+                    if (!label || !input) return;
+
+                    const optionIndex = parseInt(input.value);
+                    const isCorrectOption = normalizeText(label.textContent) === normalizeText(correctAnswerText);
+                    const isMyAnswer = myResult && optionIndex === myResult.answer;
+
+                    if (isCorrectOption) {
+                        div.classList.add('correct');           // always green the right answer
+                    } else if (isMyAnswer && !myResult.isCorrect) {
+                        div.classList.add('wrong');             // red only MY wrong pick
+                    }
+                });
+
+                // Round results text
                 const resultsHtml = playerResults.map(result => {
                     const status = result.isCorrect ? '✓ Correct' : result.answer === -1 ? '⏰ Timed Out' : '✗ Incorrect';
                     const botLabel = result.isBot ? ' 🤖' : '';
@@ -2401,28 +2429,8 @@
                 }).join('');
                 playersDiv.innerHTML = `<h2>Round Results:</h2>${resultsHtml}`;
 
-                // Display correct answer
                 waitingMessage.innerHTML = `<p class="correct-answer">Correct Answer: ${correctAnswerText}</p>`;
-                const options = document.querySelectorAll('#options label');
-                const normalizeText = (text) => text.trim().toLowerCase().replace(/\s+/g, ' ');
-                options.forEach((label) => {
-                    if (normalizeText(label.textContent) === normalizeText(correctAnswerText)) {
-                        label.parentElement.classList.add('correct');
-                    }
-                });
 
-                // Disable further interactions
-                submitAnswerBtn.disabled = true;
-                submitAnswerBtn.style.display = 'none';
-                if (window.syncTimeout) { 
-                    clearTimeout(window.syncTimeout);
-                    window.syncTimeout = null;
-                }
-                if (countdownInterval) {
-                    clearInterval(countdownInterval);
-                    countdownTimer.textContent = '';
-                    countdownTimer.style.display = 'none';
-                }
             } catch (error) {
                 logError('roundComplete', error);
                 waitingMessage.innerHTML = `<p class="error-message">Error displaying round results</p>`;

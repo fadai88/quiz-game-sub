@@ -16,7 +16,7 @@ const BotDetector     = require('../botDetector');
 const User            = require('../models/User');
 const GameSession     = require('../models/GameSession');
 
-const { socketRateLimiter, eventLimiters } = require('../services/redisService');
+const redisService = require('../services/redisService');
 const { SecurityLogger, AuditLogger }  = require('../utils/securityLogger');
 const { sanitizeForLog }               = require('../utils/sanitize');
 const { verifyRecaptcha }              = require('../utils/helpers');
@@ -98,7 +98,13 @@ async function validateSocketSession(socket, eventName) {
 
     const { walletAddress } = socket.user;
     try {
-        const session = await context.redisClient.get(`session:${walletAddress}`);
+        const sessionToken = socket.user.sessionToken;
+        if (!sessionToken) {
+            socket.emit('error', { message: 'Session expired: Please login again', code: 'SESSION_EXPIRED' });
+            socket.disconnect(true);
+            return false;
+        }
+        const session = await context.redisClient.get(`session:${sessionToken}`);
         if (!session) {
             socket.emit('error', { message: 'Session expired: Please login again', code: 'SESSION_EXPIRED' });
             socket.disconnect(true);
@@ -106,7 +112,7 @@ async function validateSocketSession(socket, eventName) {
         }
         const sessionData = JSON.parse(session);
         if (Date.now() - sessionData.timestamp > 24 * 60 * 60 * 1000) {
-            await context.redisClient.del(`session:${walletAddress}`);
+            await context.redisClient.del(`session:${sessionToken}`);
             socket.emit('error', { message: 'Session expired: Please login again', code: 'SESSION_EXPIRED' });
             socket.disconnect(true);
             return false;
@@ -150,10 +156,19 @@ function registerConnectionHandler(io) {
         socket.use(async (packet, next) => {
             try {
                 if (packet.type === 0 || packet.type === 2) { next(); return; }
-                await socketRateLimiter.consume(socket.id);
+
+                const limiter = redisService.socketRateLimiter;
+                if (!limiter) { next(); return; } // Redis not ready yet — fail open
+
+                await limiter.consume(socket.id);
                 next();
-            } catch {
-                next(new Error('Rate limited'));
+            } catch (err) {
+                if (err?.msBeforeNext !== undefined) {
+                    next(new Error('Rate limited'));
+                } else {
+                    logger.error('Socket packet middleware error:', { error: err?.message });
+                    next(); // fail open on unexpected errors
+                }
             }
         });
 
@@ -230,7 +245,7 @@ function registerConnectionHandler(io) {
                 const verifyToken = uuidv4();
                 await context.redisClient.set(`verify:${walletAddress}`, verifyToken, 'EX', 300);
 
-                AuditLogger.userLogin(walletAddress, clientIP, 'socket');
+                SecurityLogger.loginSuccess(walletAddress, { sessionId: verifyToken, fingerprint: clientData?.userAgent }, socket.handshake);
                 socket.emit('loginSuccess', { walletAddress, verifyToken, virtualBalance: user.virtualBalance || 0 });
                 logger.info(`Wallet login success: ${walletAddress}`);
             } catch (error) {
@@ -456,7 +471,7 @@ async function handleGameEvent(socket, event, args) {
         await updateGameRoom(roomId, room);
         socket.join(roomId); socket.roomId = roomId;
 
-        await GameSession.create({ roomId, betAmount: 0, gameMode: 'bot', players: [{ walletAddress, socketId: socket.id }], status: 'active' });
+        await GameSession.create({ roomId, betAmount: 0, gameMode: 'practice', players: [{ walletAddress, socketId: socket.id }], status: 'active' });
 
         socket.emit('joinedRoom', { roomId, players: room.players, betAmount: 0, gameMode: 'practice', isPractice: true });
         await startSinglePlayerGame(roomId);

@@ -298,6 +298,10 @@ class AlertManager {
      * ✅ FIXED: Already async
      */
     async sendAlert(alertType, identifier, counter, threshold) {
+        if (!threshold) {
+            logger.warn('sendAlert called with unknown alertType, skipping', { alertType, identifier });
+            return;
+        }
         const alertKey = `${alertType}:${identifier}`;
         const now = Date.now();
         

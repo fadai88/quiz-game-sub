@@ -321,6 +321,11 @@ table {
     color: white !important;
 }
 
+#options div.correct label { color: #2e7d32; font-weight: bold; }
+#options div.correct { background-color: #e8f5e9; border-radius: 4px; }
+#options div.wrong label  { color: #b71c1c; font-weight: bold; }
+#options div.wrong  { background-color: #ffebee; border-radius: 4px; }
+
 .non-copyable {
     user-select: none;
 }

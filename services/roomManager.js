@@ -117,7 +117,7 @@ async function removeWaitingRoom(betAmount, roomId) {
 
 async function createGameRoom(roomId, betAmount, roomMode = 'waiting', options = {}) {
     const room = {
-        players: [], betAmount, questions: [], questionIdMap: {},
+        players: [], betAmount, questions: [], questionIdMap: new Map(),
         currentQuestionIndex: -1, answersReceived: 0, gameStarted: false,
         roomMode, waitingTimeout: null, questionTimeout: null,
         playerLeft: false, hasBot: false, questionStartTime: null,
