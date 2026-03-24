@@ -2298,10 +2298,15 @@
             }
         });
 
-        socket.on('botRoomCreated', (roomId) => {
-            console.log(`Bot room created: ${roomId}`);
-            currentRoomId = roomId;
-            
+        socket.on('joinedRoom', (data) => {
+            console.log('Joined room:', data);
+            currentRoomId = data.roomId;
+        });
+
+        socket.on('botRoomCreated', (data) => {
+            console.log('Bot room created:', data);
+            currentRoomId = data.roomId;
+
             // Now request the bot game in this dedicated room
             switchToBotMode();
         });

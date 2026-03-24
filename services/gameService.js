@@ -16,6 +16,7 @@ const {
 } = require('./roomManager');
 const { TriviaBot, chooseBotName, determineBotDifficulty } = require('./botService');
 const { updatePlayerStats, refundToVirtualBalance } = require('./playerService');
+const { acquireIdempotencyLock } = require('../utils/idempotency');
 
 // Quiz model is expected to be in models/Quiz — adjust path if different
 const Quiz = require('../models/Quiz');
@@ -254,24 +255,26 @@ async function startNextQuestion(roomId) {
         await deleteGameRoom(roomId); return;
     }
 
-    room.questionIdMap.set(currentQuestion.tempId, { ...currentQuestion, shuffledOptions, shuffledCorrectAnswer });
-    await updateGameRoom(roomId, room);
-
     io.to(roomId).emit('clearQuestionUI');
     io.to(roomId).emit('nextQuestion', {
-        questionId:      currentQuestion.tempId,
-        question:        currentQuestion.question,
-        options:         shuffledOptions,
-        questionNumber:  room.currentQuestionIndex + 1,
-        totalQuestions:  room.questions.length,
+        questionId:     currentQuestion.tempId,
+        question:       currentQuestion.question,
+        options:        shuffledOptions,
+        questionNumber: room.currentQuestionIndex + 1,
+        totalQuestions: room.questions.length,
         questionEndsAt,
     });
 
     // Question timeout handler
+    const timeoutForIndex = room.currentQuestionIndex;
     room.questionTimeout = setTimeout(async () => {
         try {
             const updatedRoom = await atomicRoomUpdate(roomId, async (latest) => {
                 if (!latest || latest.isDeleted) return latest;
+                // Stale timeout from a previous question — the round already completed early
+                if (latest.currentQuestionIndex !== timeoutForIndex) {
+                    latest._staleTimeout = true; return latest;
+                }
                 if (latest.players.filter(p => !p.isBot).length === 0) {
                     latest.isDeleted = true; latest._shouldStopGame = true; return latest;
                 }
@@ -286,6 +289,8 @@ async function startNextQuestion(roomId) {
                 });
                 return latest;
             });
+
+            if (updatedRoom._staleTimeout) return;
 
             if (updatedRoom._shouldStopGame) {
                 await deleteGameRoom(roomId); await logGameRoomsState(); return;
@@ -346,6 +351,13 @@ async function completeQuestion(roomId) {
         if (room.questionTimeout) clearTimeout(room.questionTimeout);
         await redisClient.del(`room:${roomId}`);
         await logGameRoomsState(); return;
+    }
+
+    const lockKey = `completeQuestion:${roomId}:${room.currentQuestionIndex}`;
+    const lockAcquired = await acquireIdempotencyLock(lockKey, 30);
+    if (!lockAcquired) {
+        logger.info(`completeQuestion: duplicate call blocked for room ${roomId} question ${room.currentQuestionIndex}`);
+        return;
     }
 
     const humanPlayers = room.players.filter(p => !p.isBot);
