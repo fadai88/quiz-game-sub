@@ -2360,11 +2360,12 @@
 
         socket.on('matchFound', async (data) => {
             console.log('Match found:', data);
-            currentRoomId = data.gameRoomId;
+            currentRoomId = data.gameRoomId || data.roomId;
             waitingMessage.textContent = 'Match found! Game is starting...';
-            
+
             if (waitingTimeout) {
                 clearTimeout(waitingTimeout);
+                waitingTimeout = null;
             }
 
             // Get reCAPTCHA token for playerReady

@@ -465,17 +465,58 @@ async function handleGameEvent(socket, event, args) {
         }
 
         const { generateRoomId } = require('../utils/helpers');
-        const roomId = generateRoomId();
-        const room   = await createGameRoom(roomId, 0, 'bot', { gameMode: 'practice', isPractice: true });
-        room.players.push({ id: socket.id, username: walletAddress, score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false });
-        await updateGameRoom(roomId, room);
-        socket.join(roomId); socket.roomId = roomId;
 
-        await GameSession.create({ roomId, betAmount: 0, gameMode: 'practice', players: [{ walletAddress, socketId: socket.id }], status: 'active' });
+        if (gameMode === 'human') {
+            // ── Human vs human matchmaking (mirrors joinHumanMatchmaking) ──────
+            const pool = await getMatchmakingPool(0);
+            const alreadyQueued = pool.some(p => p.walletAddress === walletAddress);
+            if (alreadyQueued) { socket.emit('matchmakingError', 'Already in queue'); return; }
 
-        socket.emit('joinedRoom', { roomId, players: room.players, betAmount: 0, gameMode: 'practice', isPractice: true });
-        await startSinglePlayerGame(roomId);
-        await logGameRoomsState();
+            await addToMatchmakingPool(0, { walletAddress, socketId: socket.id, joinTime: Date.now() });
+            socket.matchmakingPool = 0;
+
+            const updatedPool = await getMatchmakingPool(0);
+            if (updatedPool.length >= 2) {
+                const p1 = updatedPool[0]; const p2 = updatedPool[1];
+                await removeFromMatchmakingPool(0, p1.socketId);
+                await removeFromMatchmakingPool(0, p2.socketId);
+
+                const roomId = generateRoomId();
+                const room = await createGameRoom(roomId, 0, 'human', { gameMode: 'practice', isPractice: true });
+                room.players.push(
+                    { id: p1.socketId, username: p1.walletAddress, score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false },
+                    { id: p2.socketId, username: p2.walletAddress, score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false }
+                );
+                await updateGameRoom(roomId, room);
+
+                const p1Socket = io.sockets.sockets.get(p1.socketId);
+                const p2Socket = io.sockets.sockets.get(p2.socketId);
+                if (p1Socket) { p1Socket.join(roomId); p1Socket.roomId = roomId; p1Socket.matchmakingPool = null; }
+                if (p2Socket) { p2Socket.join(roomId); p2Socket.roomId = roomId; p2Socket.matchmakingPool = null; }
+
+                await GameSession.create({ roomId, betAmount: 0, gameMode: 'practice', players: [{ walletAddress: p1.walletAddress, socketId: p1.socketId }, { walletAddress: p2.walletAddress, socketId: p2.socketId }], status: 'active' });
+
+                io.to(roomId).emit('matchFound', { gameRoomId: roomId, players: [p1.walletAddress, p2.walletAddress], mode: 'practice' });
+                await startGame(roomId);
+            } else {
+                socket.emit('matchmakingJoined', { waitingRoomId: 'matchmaking-practice', mode: 'practice' });
+            }
+            await logMatchmakingState();
+
+        } else {
+            // ── Bot game ──────────────────────────────────────────────────────
+            const roomId = generateRoomId();
+            const room = await createGameRoom(roomId, 0, 'bot', { gameMode: 'practice', isPractice: true });
+            room.players.push({ id: socket.id, username: walletAddress, score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false });
+            await updateGameRoom(roomId, room);
+            socket.join(roomId); socket.roomId = roomId;
+
+            await GameSession.create({ roomId, betAmount: 0, gameMode: 'practice', players: [{ walletAddress, socketId: socket.id }], status: 'active' });
+
+            socket.emit('joinedRoom', { roomId, players: room.players, betAmount: 0, gameMode: 'practice', isPractice: true });
+            await startSinglePlayerGame(roomId);
+            await logGameRoomsState();
+        }
         return;
     }
 
