@@ -97,6 +97,12 @@ const UserSchema = new mongoose.Schema({
         type: Number,
         default: 0
     },
+    lastActiveCycleId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'PrizeCycle',
+        default: null,
+        index: true,
+    },
 }, {
     timestamps: true
 });

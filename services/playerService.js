@@ -122,6 +122,7 @@ async function handlePlayerLeftWin(roomId, remainingPlayer, disconnectedPlayer, 
             winner:      remainingPlayer.username,
             botOpponent,
             betAmount,
+            gameMode:    room?.gameMode,
         });
 
         // Advance tournament bracket on forfeit
