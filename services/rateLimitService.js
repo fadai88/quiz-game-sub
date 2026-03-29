@@ -28,6 +28,10 @@ async function rateLimitEvent(walletAddress, eventName, ip = null, socket = null
                 await limiter.consume(`ip:${ip}`, 1);
             } catch {
                 logger.error(`🚨 [RATE LIMIT] IP ${ip} exceeded limit for ${eventName}`);
+                if (eventName === 'submitAnswer') {
+                    if (socket) socket.emit('answerError', 'Too many submissions. Please wait.');
+                    throw new Error(`Rate limit exceeded for ${eventName}. Please wait before trying again.`);
+                }
                 await redisClient.set(`blocklist:${ip}`, '1', 'EX', 600);
                 if (socket) socket.disconnect(true);
                 throw new Error(`Rate limit exceeded for ${eventName}. Please wait before trying again.`);

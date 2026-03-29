@@ -47,7 +47,12 @@ async function refundToVirtualBalance(walletAddress, amount, reason) {
 
 async function updatePlayerStats(players, roomData) {
     logger.info('Updating stats for all players:', players);
-    const { winner } = roomData;
+    const { winner, gameMode } = roomData;
+
+    if (gameMode !== 'ranked' && gameMode !== 'tournament') {
+        logger.info('Practice game — skipping leaderboard stat update');
+        return;
+    }
 
     // ── Subscription model: no immediate payout. Record win/loss only. ──────────
     // Prizes are distributed at end of the weekly cycle by the admin.

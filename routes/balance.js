@@ -113,7 +113,7 @@ router.get('/leaderboard', async (req, res) => {
         // For a clean per-cycle breakdown consider adding a CycleStats
         // sub-document — but for the simple launch version this is sufficient.
 
-        const players = await User.find({ lastActiveCycleId: cycle._id })
+        const players = await User.find({ lastActiveCycleId: cycle._id, accountTier: 'premium', subscriptionStatus: 'active' })
             .select('walletAddress wins losses gamesPlayed correctAnswers')
             .sort({ wins: -1, losses: 1, walletAddress: 1 })
             .limit(50)

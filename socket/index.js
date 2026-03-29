@@ -26,7 +26,7 @@ const { alertManager, trackValidationFailure, trackRateLimitViolation, trackBotS
 const {
     transactionSchema, submitAnswerSchema, playerReadySchema,
     switchToBotSchema, requestBotRoomSchema, requestBotGameSchema,
-    leaveRoomSchema, matchFoundSchema, joinPracticeGameSchema, joinTournamentGameSchema,
+    leaveRoomSchema, matchFoundSchema, joinPracticeGameSchema, joinHumanMatchmakingSchema, joinTournamentGameSchema,
 } = require('../config/schemas');
 
 const {
@@ -314,7 +314,7 @@ function registerConnectionHandler(io) {
         const gameEvents = [
             'joinGame', 'playerReady', 'joinPracticeGame', 'joinTournamentGame',
             'subscribe', 'joinHumanMatchmaking', 'joinBotGame', 'switchToBot',
-            'matchFound', 'leaveRoom', 'requestBotRoom', 'requestBotGame', 'submitAnswer',
+            'leaveRoom', 'requestBotRoom', 'requestBotGame', 'submitAnswer',
         ];
 
         gameEvents.forEach(event => {
@@ -462,6 +462,12 @@ async function handleGameEvent(socket, event, args) {
 
         if (await isBlockedFn(walletAddress) || await isBlockedFn(clientIP)) {
             socket.emit('joinGameFailure', 'Access denied'); return;
+        }
+
+        const practiceUser = await User.findOne({ walletAddress });
+        if (practiceUser && practiceUser.hasPremiumAccess()) {
+            socket.emit('joinGameFailure', 'Premium subscribers cannot join practice games. Use ranked matchmaking instead.');
+            return;
         }
 
         const { generateRoomId } = require('../utils/helpers');
@@ -707,11 +713,17 @@ async function handleGameEvent(socket, event, args) {
 
     // ── joinHumanMatchmaking ───────────────────────────────────────────────────
     if (event === 'joinHumanMatchmaking') {
-        const { error } = requestBotRoomSchema.validate(data);
+        const { error } = joinHumanMatchmakingSchema.validate(data);
         if (error) { socket.emit('matchmakingError', 'Invalid input format'); return; }
         const { walletAddress, betAmount } = data;
         const clientIP = socket.handshake.headers['x-forwarded-for'] || socket.handshake.address;
         await rateLimitEvent(walletAddress, 'joinHumanMatchmaking', clientIP, socket);
+
+        const matchUser = await User.findOne({ walletAddress });
+        if (!matchUser || !matchUser.hasPremiumAccess()) {
+            socket.emit('matchmakingError', 'A subscription is required to play ranked games. Practice games are available for free.');
+            return;
+        }
 
         const pool = await getMatchmakingPool(betAmount);
         const alreadyQueued = pool.some(p => p.walletAddress === walletAddress);
@@ -720,15 +732,27 @@ async function handleGameEvent(socket, event, args) {
         await addToMatchmakingPool(betAmount, { walletAddress, socketId: socket.id, joinTime: Date.now() });
         socket.matchmakingPool = betAmount;
 
-        const updatedPool = await getMatchmakingPool(betAmount);
-        if (updatedPool.length >= 2) {
-            const p1 = updatedPool[0]; const p2 = updatedPool[1];
+        const fullPool = await getMatchmakingPool(betAmount);
+        const premiumPool = [];
+        for (const entry of fullPool) {
+            const entryUser = await User.findOne({ walletAddress: entry.walletAddress });
+            if (entryUser && entryUser.hasPremiumAccess()) {
+                premiumPool.push(entry);
+            } else {
+                await removeFromMatchmakingPool(betAmount, entry.socketId);
+                const expiredSocket = io.sockets.sockets.get(entry.socketId);
+                if (expiredSocket) expiredSocket.emit('matchmakingError', 'Your subscription has expired. Please renew to continue playing ranked games.');
+            }
+        }
+
+        if (premiumPool.length >= 2) {
+            const p1 = premiumPool[0]; const p2 = premiumPool[1];
             await removeFromMatchmakingPool(betAmount, p1.socketId);
             await removeFromMatchmakingPool(betAmount, p2.socketId);
 
             const { generateRoomId } = require('../utils/helpers');
             const roomId = generateRoomId();
-            const room   = await createGameRoom(roomId, betAmount, 'human');
+            const room   = await createGameRoom(roomId, betAmount, 'human', { gameMode: 'ranked', isPractice: false });
             room.players.push(
                 { id: p1.socketId, username: p1.walletAddress, score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false },
                 { id: p2.socketId, username: p2.walletAddress, score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false }
@@ -745,7 +769,7 @@ async function handleGameEvent(socket, event, args) {
 
             await startGame(roomId);
         } else {
-            socket.emit('waitingForMatch', { betAmount, position: updatedPool.length });
+            socket.emit('matchmakingJoined', { waitingRoomId: 'ranked-queue', position: premiumPool.length, mode: 'ranked' });
         }
         await logMatchmakingState();
         return;

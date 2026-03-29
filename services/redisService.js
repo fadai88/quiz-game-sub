@@ -20,7 +20,7 @@ async function initializeRateLimiter(redisClient) {
         });
 
         const eventDefs = [
-            { name: 'submitAnswer',         points: 10,  duration: 60, blockDuration: 300 },
+            { name: 'submitAnswer',         points: 20,  duration: 30, blockDuration: 300 },
             { name: 'joinGame',             points: 5,   duration: 60, blockDuration: 180 },
             { name: 'joinHumanMatchmaking', points: 5,   duration: 60, blockDuration: 180 },
             { name: 'joinBotGame',          points: 8,   duration: 60, blockDuration: 120 },

@@ -299,7 +299,11 @@ async function atomicRoomUpdate(roomId, updateFn, maxRetries = 5) {
             return updatedRoom;
         } catch (error) {
             await context.redisClient.unwatch();
-            logger.error(`Error in atomicRoomUpdate for room ${roomId}:`, error);
+            if (error.message.includes('not found')) {
+                logger.info(`atomicRoomUpdate: room ${roomId} already deleted, skipping`);
+            } else {
+                logger.error(`Error in atomicRoomUpdate for room ${roomId}:`, error);
+            }
             throw error;
         }
     }

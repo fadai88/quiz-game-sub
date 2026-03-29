@@ -269,6 +269,12 @@ async function startNextQuestion(roomId) {
     const timeoutForIndex = room.currentQuestionIndex;
     room.questionTimeout = setTimeout(async () => {
         try {
+            const exists = await getGameRoom(roomId);
+            if (!exists || exists.isDeleted) {
+                logger.info(`Timeout fired for already-deleted room ${roomId}, skipping`);
+                return;
+            }
+
             const updatedRoom = await atomicRoomUpdate(roomId, async (latest) => {
                 if (!latest || latest.isDeleted) return latest;
                 // Stale timeout from a previous question — the round already completed early
@@ -300,9 +306,11 @@ async function startNextQuestion(roomId) {
             });
             await completeQuestion(roomId);
         } catch (error) {
-            if (!error.message.includes('not found')) {
-                logger.error(`Error in timeout handler for room ${roomId}:`, error);
+            if (error.message.includes('not found')) {
+                logger.info(`Room ${roomId} gone by timeout, ignoring`);
+                return;
             }
+            logger.error(`Error in timeout handler for room ${roomId}:`, error);
         }
     }, QUESTION_DURATION);
 
@@ -438,7 +446,7 @@ async function handleGameOver(room, roomId) {
         await updatePlayerStats(room.players.map(p => ({
             username: p.username, score: p.score || 0,
             totalResponseTime: p.totalResponseTime || 0, isBot: p.isBot || false,
-        })), { winner, botOpponent, betAmount: room.betAmount });
+        })), { winner, botOpponent, betAmount: room.betAmount, gameMode: room.gameMode });
 
         // Update recent questions
         for (const player of room.players.filter(p => !p.isBot)) {

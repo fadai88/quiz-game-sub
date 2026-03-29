@@ -658,6 +658,7 @@
 
         let connectedWallet = null;
         let currentRoomId = null;
+        let isPremium = false;  // set by initGameMode()
         let currentBetAmount = null; // kept for compatibility, not used for betting
 
         // ── Subscription / Game Mode ─────────────────────────────────────────────
@@ -670,6 +671,8 @@
             const modeEl = document.getElementById('gameModeInfo');
             const humanReward = document.getElementById('humanRewardInfo');
             const botReward   = document.getElementById('botRewardInfo');
+            const botBtn      = document.getElementById('playAgainstBotBtn');
+            const humanBtn    = document.getElementById('waitForPlayerBtn');
 
             if (currentGameMode === 'tournament') {
                 // Verify premium access before allowing tournament play
@@ -689,10 +692,27 @@
                 if (humanReward) humanReward.textContent = 'Compete for USDC prize';
                 if (botReward)   botReward.textContent   = 'Practice before your match';
             } else {
-                modeEl.innerHTML = '🎮 <strong>Practice Mode</strong> — Play for fun, no prizes. ' +
-                    '<a href="/subscription.html">Upgrade to Premium</a> for tournament prizes.';
-                if (humanReward) humanReward.textContent = 'Practice match';
-                if (botReward)   botReward.textContent   = 'Practice vs AI';
+                // Check subscription tier to show/hide game options
+                try {
+                    const res = await fetch('/api/subscription/status', { credentials: 'include' });
+                    const subData = await res.json();
+                    isPremium = subData.success && subData.tier === 'premium' && subData.status === 'active';
+                } catch(e) {
+                    console.error('Subscription check failed:', e);
+                }
+
+                if (isPremium) {
+                    if (botBtn)   botBtn.style.display = 'none';
+                    if (humanBtn) humanBtn.querySelector('.choice-title').textContent = 'Play Ranked Match';
+                    modeEl.innerHTML = '🏅 <strong>Ranked Mode</strong> — Premium players only.';
+                    if (humanReward) humanReward.textContent = 'Ranked match';
+                } else {
+                    if (humanBtn) humanBtn.style.display = 'none';
+                    if (botBtn)   botBtn.querySelector('.choice-title').textContent = 'Practice vs Bot';
+                    modeEl.innerHTML = '🎮 <strong>Practice Mode</strong> — Play for fun, no prizes. ' +
+                        '<a href="/subscription.html">Upgrade to Premium</a> for ranked matches.';
+                    if (botReward) botReward.textContent = 'Practice vs AI';
+                }
             }
         })();
         // ────────────────────────────────────────────────────────────────────────
@@ -2130,6 +2150,9 @@
             const modal = document.getElementById('gameChoiceModal');
             modal.style.display = 'flex';
 
+            const botBtn = document.getElementById('playAgainstBotBtn');
+            if (botBtn) botBtn.style.display = isPremium ? 'none' : '';
+
             document.getElementById('waitForPlayerBtn').onclick = async function() {
                 if (isProcessingBet) return;
                 isProcessingBet = true;
@@ -2145,6 +2168,12 @@
                         socket.emit('joinTournamentGame', {
                             walletAddress: connectedWallet,
                             tournamentId: currentTournamentId
+                        });
+                    } else if (isPremium) {
+                        waitingMessage.textContent = 'Looking for a ranked opponent...';
+                        socket.emit('joinHumanMatchmaking', {
+                            walletAddress: connectedWallet,
+                            betAmount: 0
                         });
                     } else {
                         waitingMessage.textContent = 'Looking for another player...';
@@ -2360,7 +2389,7 @@
 
         socket.on('matchFound', async (data) => {
             console.log('Match found:', data);
-            currentRoomId = data.gameRoomId || data.roomId;
+            currentRoomId = data.roomId || data.gameRoomId;
             waitingMessage.textContent = 'Match found! Game is starting...';
 
             if (waitingTimeout) {
@@ -2371,7 +2400,7 @@
             // Get reCAPTCHA token for playerReady
             const recaptchaToken = await getRecaptchaToken('player_ready');
             socket.emit('playerReady', { 
-                roomId: data.gameRoomId, 
+                roomId: currentRoomId, 
                 preferredMode: 'human',
                 recaptchaToken
             });
@@ -2379,13 +2408,13 @@
 
         socket.on('botGameCreated', async (data) => {
             console.log('Bot game created:', data);
-            currentRoomId = data.gameRoomId;
+            currentRoomId = data.roomId || data.gameRoomId;
             waitingMessage.textContent = `Starting game against ${data.botName}...`;
 
             // Get reCAPTCHA token for playerReady
             const recaptchaToken = await getRecaptchaToken('player_ready');
             socket.emit('playerReady', { 
-                roomId: data.gameRoomId, 
+                roomId: currentRoomId, 
                 preferredMode: 'bot',
                 recaptchaToken
             });

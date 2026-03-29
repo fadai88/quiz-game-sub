@@ -81,6 +81,11 @@ const joinPracticeGameSchema = Joi.object({
     gameMode:      Joi.string().valid('bot', 'human').optional().default('bot'),
 });
 
+const joinHumanMatchmakingSchema = Joi.object({
+    walletAddress: solanaPublicKey,
+    betAmount:     Joi.number().integer().min(0).default(0).optional(),
+});
+
 const joinTournamentGameSchema = Joi.object({
     walletAddress: solanaPublicKey,
     tournamentId:  Joi.string().pattern(/^[a-f0-9]{24}$/).required()
@@ -134,7 +139,7 @@ module.exports = {
     transactionSchema, submitAnswerSchema, playerReadySchema,
     switchToBotSchema, requestBotRoomSchema, requestBotGameSchema,
     leaveRoomSchema, matchFoundSchema, joinPracticeGameSchema,
-    joinTournamentGameSchema, subscribeSchema,
+    joinHumanMatchmakingSchema, joinTournamentGameSchema, subscribeSchema,
     // HTTP schemas
     loginSchema, walletParamSchema, paymentIdParamSchema, createTournamentSchema,
 };
