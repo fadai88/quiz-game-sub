@@ -324,41 +324,58 @@
                 connectButton.innerHTML = '<img src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 128 128%27 fill=%27%23AB9FF2%27%3E%3Cpath d=%27M96 24c17.7 0 32 14.3 32 32v48c0 17.7-14.3 32-32 32H32C14.3 136 0 121.7 0 104V56c0-17.7 14.3-32 32-32h64zm-32 40c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16zm32 0c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16z%27/%3E%3C/svg%3E" alt="Phantom" class="wallet-icon">Connecting...';
                 
                 try {
-                    // Connect to wallet
-                    const resp = await window.solana.connect();
+                    // ── Step 1: Connect wallet ────────────────────────────────
+                    const resp      = await window.solana.connect();
                     const publicKey = resp.publicKey.toString();
                     console.log('Connected to wallet:', publicKey);
-                    
-                    // Sign message to verify wallet ownership
-                    const message = `Login to Proof of Smart: ${Date.now()}`;
-                    const encodedMessage = new TextEncoder().encode(message);
-                    console.log('Requesting signature for message:', message);
-                    const signedData = await window.solana.signMessage(encodedMessage, 'utf8');
-                    console.log('Got signature:', signedData.signature);
-                    
-                    // Convert Uint8Array to base64 string for transmission
-                    const signature = btoa(String.fromCharCode.apply(null, signedData.signature));
-                    
-                    // Store for HTTP authentication after Socket.IO verification
-                    lastSignature = signature;
-                    lastMessage = message;
 
-                    // Send to server for verification
-                    socket.emit('walletLogin', { 
-                        walletAddress: publicKey, 
-                        signature: signature,
-                        message: message,
-                        recaptchaToken: recaptchaToken,
+                    // ── Step 2: Request a server-issued challenge ─────────────
+                    console.log('Requesting login challenge from server…');
+                    const { nonce, issuedAt } = await new Promise((resolve, reject) => {
+                        const onChallenge = (data) => {
+                            socket.off('challengeError', onError);
+                            resolve(data);
+                        };
+                        const onError = (msg) => {
+                            socket.off('challenge', onChallenge);
+                            reject(new Error(msg || 'Failed to get challenge'));
+                        };
+                        socket.once('challenge',      onChallenge);
+                        socket.once('challengeError', onError);
+                        socket.emit('requestChallenge', { walletAddress: publicKey });
+                        setTimeout(() => {
+                            socket.off('challenge',      onChallenge);
+                            socket.off('challengeError', onError);
+                            reject(new Error('Challenge request timed out. Please try again.'));
+                        }, 10_000);
+                    });
+
+                    // ── Step 3: Sign the server-dictated message ──────────────
+                    // Template must stay in sync with utils/challengeStore.js
+                    const message        = `Sign in to Proof of Smart\nNonce: ${nonce}\nIssued: ${issuedAt}`;
+                    const encodedMessage = new TextEncoder().encode(message);
+                    console.log('Requesting wallet signature for server challenge…');
+                    const signedData  = await window.solana.signMessage(encodedMessage, 'utf8');
+                    const signature   = btoa(String.fromCharCode(...signedData.signature));
+
+                    // Store for follow-up HTTP /api/auth/login call
+                    lastSignature = signature;
+                    lastMessage   = message;
+
+                    // ── Step 4: Send nonce + signature (not message) ──────────
+                    socket.emit('walletLogin', {
+                        walletAddress:  publicKey,
+                        signature,
+                        nonce,
+                        recaptchaToken,
                         clientData: {
-                            timestamp: new Date().toISOString(),
-                            timeOnPage: behaviorMetrics.timeOnPage,
-                            mouseMovements: behaviorMetrics.mouseMovements,
-                            clicks: behaviorMetrics.clicks,
-                            userAgent: navigator.userAgent,
-                            language: navigator.language,
-                            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-                            screenResolution: `${window.screen.width}x${window.screen.height}`
-                        }
+                            timestamp:        new Date().toISOString(),
+                            timeOnPage:       behaviorMetrics.timeOnPage,
+                            mouseMovements:   behaviorMetrics.mouseMovements,
+                            screenResolution: `${screen.width}x${screen.height}`,
+                            timezone:         Intl.DateTimeFormat().resolvedOptions().timeZone,
+                            userAgent:        navigator.userAgent,
+                        },
                     });
                     console.log('Sent login request to server');
                 } catch (error) {

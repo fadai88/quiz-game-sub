@@ -15,6 +15,7 @@ const context         = require('../context');
 const BotDetector     = require('../botDetector');
 const User            = require('../models/User');
 const GameSession     = require('../models/GameSession');
+const { issueChallenge, consumeChallenge } = require('../utils/challengeStore');
 
 const redisService = require('../services/redisService');
 const { SecurityLogger, AuditLogger }  = require('../utils/securityLogger');
@@ -172,23 +173,49 @@ function registerConnectionHandler(io) {
             }
         });
 
-        // ── walletLogin ────────────────────────────────────────────────────────
-        socket.on('walletLogin', async ({ walletAddress, signature, message, recaptchaToken, clientData }) => {
+        // ── requestChallenge ───────────────────────────────────────────────────
+        socket.on('requestChallenge', async ({ walletAddress } = {}) => {
             try {
-                const clientIP = socket.handshake.headers['x-forwarded-for']?.split(',')[0]?.trim() || socket.handshake.address;
+                if (!walletAddress || typeof walletAddress !== 'string' ||
+                    walletAddress.length < 32 || walletAddress.length > 44) {
+                    return socket.emit('challengeError', 'Invalid wallet address');
+                }
 
+                const { nonce, issuedAt } = await issueChallenge(walletAddress);
+                socket.emit('challenge', { nonce, issuedAt });
+            } catch (error) {
+                logger.error('[CHALLENGE] Failed to issue challenge:', { error: error.message });
+                socket.emit('challengeError', 'Failed to generate challenge. Please try again.');
+            }
+        });
+
+        // ── walletLogin ────────────────────────────────────────────────────────
+        // Accepts: { walletAddress, signature, nonce, recaptchaToken, clientData }
+        // NOTE: `message` is no longer accepted from the client.
+        //       The server reconstructs it from the stored challenge (H3 fix).
+        socket.on('walletLogin', async ({ walletAddress, signature, nonce, recaptchaToken, clientData }) => {
+            try {
+                const clientIP = socket.handshake.headers['x-forwarded-for']?.split(',')[0]?.trim()
+                    || socket.handshake.address;
+
+                // ── Blocklist checks ──────────────────────────────────────────
                 const isWalletBlocked = await context.redisClient.get(`blocklist:wallet:${walletAddress}`);
-                if (isWalletBlocked) { socket.emit('loginFailure', 'This wallet is temporarily blocked.'); return; }
+                if (isWalletBlocked) {
+                    socket.emit('loginFailure', 'This wallet is temporarily blocked.');
+                    return;
+                }
 
+                // ── Login rate limit ──────────────────────────────────────────
                 const loginLimitKey = `login:${clientIP}`;
                 const loginAttempts = await context.redisClient.get(loginLimitKey) || 0;
-                if (loginAttempts > 100) {
+                if (parseInt(loginAttempts) >= 5) {
                     SecurityLogger.rateLimitExceeded(clientIP, 'login', 5, '1 minute');
                     trackRateLimitViolation(clientIP, { eventName: 'login' });
                     return socket.emit('loginFailure', 'Too many login attempts. Please try again later.');
                 }
-                await context.redisClient.set(loginLimitKey, parseInt(loginAttempts) + 1, 'EX', 3600);
+                await context.redisClient.set(loginLimitKey, parseInt(loginAttempts) + 1, 'EX', 60);
 
+                // ── reCAPTCHA ─────────────────────────────────────────────────
                 let recaptchaResult;
                 try {
                     recaptchaResult = await verifyRecaptcha(recaptchaToken);
@@ -200,25 +227,43 @@ function registerConnectionHandler(io) {
                     return socket.emit('loginFailure', 'Verification failed. Please try again.');
                 }
 
-                // Fallback anomaly check if reCAPTCHA disabled
+                // ── Fallback anomaly check (reCAPTCHA disabled) ───────────────
                 if (process.env.ENABLE_RECAPTCHA !== 'true') {
                     const anomalies = [];
                     if (!clientData) anomalies.push('missing clientData');
                     else {
                         try {
-                            if (clientData.timezone && !Intl.supportedValuesOf('timeZone').includes(clientData.timezone)) anomalies.push('invalid timezone');
+                            if (clientData.timezone && !Intl.supportedValuesOf('timeZone').includes(clientData.timezone))
+                                anomalies.push('invalid timezone');
                         } catch {}
-                        if (clientData.screenResolution && !/^\d+x\d+$/.test(clientData.screenResolution)) anomalies.push('invalid resolution');
+                        if (clientData.screenResolution && !/^\d+x\d+$/.test(clientData.screenResolution))
+                            anomalies.push('invalid resolution');
                     }
-                    if (anomalies.length > 0) return socket.emit('loginFailure', 'Invalid client information. Please try again.');
+                    if (anomalies.length > 0)
+                        return socket.emit('loginFailure', 'Invalid client information. Please try again.');
                 }
 
-                // Verify wallet signature
+                // ── Challenge validation (H3 fix) ─────────────────────────────
+                let canonicalMessage;
                 try {
-                    const publicKey     = new PublicKey(walletAddress);
+                    canonicalMessage = await consumeChallenge(walletAddress, nonce);
+                } catch (challengeError) {
+                    logger.warn(`[LOGIN] Challenge validation failed for ${walletAddress}: ${challengeError.message}`);
+                    SecurityLogger.log('challenge_validation_failed', {
+                        walletAddress,
+                        ip: clientIP,
+                        reason: challengeError.message,
+                    });
+                    return socket.emit('loginFailure', challengeError.message);
+                }
+
+                // ── Wallet signature verification ─────────────────────────────
+                try {
+                    const publicKey      = new PublicKey(walletAddress);
                     const signatureBytes = Uint8Array.from(atob(signature), c => c.charCodeAt(0));
-                    const messageBytes   = new TextEncoder().encode(message);
-                    const verified = nacl.sign.detached.verify(messageBytes, signatureBytes, publicKey.toBytes());
+                    const messageBytes   = new TextEncoder().encode(canonicalMessage);
+                    const verified       = nacl.sign.detached.verify(messageBytes, signatureBytes, publicKey.toBytes());
+
                     if (!verified) {
                         SecurityLogger.log('wallet_signature_invalid', { walletAddress, ip: clientIP });
                         trackFailedLogin(walletAddress, clientIP, { reason: 'invalid_signature' });
@@ -229,18 +274,19 @@ function registerConnectionHandler(io) {
                     return socket.emit('loginFailure', 'Signature verification failed. Please try again.');
                 }
 
-                // Create/update user
+                // ── Create / update user ──────────────────────────────────────
                 let user = await User.findOne({ walletAddress });
                 if (!user) {
                     user = await User.create({ walletAddress, registrationIP: clientIP, registrationDate: new Date() });
                 } else {
-                    user.lastLoginDate = new Date(); user.lastLoginIP = clientIP;
+                    user.lastLoginDate = new Date();
+                    user.lastLoginIP   = clientIP;
                     await user.save();
                 }
 
                 socket.user = { walletAddress, socketId: socket.id };
 
-                // Generate a one-time verify token for the HTTP login endpoint
+                // ── Issue one-time verify token for HTTP /api/auth/login ──────
                 const { v4: uuidv4 } = require('uuid');
                 const verifyToken = uuidv4();
                 await context.redisClient.set(`verify:${walletAddress}`, verifyToken, 'EX', 300);
