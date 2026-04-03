@@ -14,8 +14,9 @@ const { eventLimiters, safeRedisOp } = require('./redisService');
 async function rateLimitEvent(walletAddress, eventName, ip = null, socket = null) {
     const limiter = eventLimiters.get(eventName);
     if (!limiter) {
-        logger.warn(`⚠️  No rate limiter configured for event: ${eventName}`);
-        return; // fail-open if unconfigured
+        logger.error(`🚨 [RATE LIMIT] No limiter configured for event: ${eventName} — blocking by default`);
+        if (socket) socket.disconnect(true);
+        throw new Error(`Event "${eventName}" is not rate-limit configured. Connection closed.`);
     }
 
     const redisClient = context.redisClient;

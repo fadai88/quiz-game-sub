@@ -53,6 +53,19 @@ function registerSocketAuthMiddleware(io) {
     io.use(async (socket, next) => {
         const startTime = Date.now();
         try {
+            // Block-list check — must run before next() so blocked IPs cannot emit events
+            const ip = getClientIpFromSocket(socket);
+            try {
+                const isBlocked = await context.redisClient.get(`blocklist:${ip}`);
+                if (isBlocked) {
+                    logger.warn(`Blocked IP attempting to connect: ${ip}`);
+                    return next(new Error('Connection refused'));
+                }
+            } catch (err) {
+                logger.error('Error checking IP blocklist in middleware:', { error: err?.message, ip });
+                // fail open on Redis error so legitimate users aren't locked out
+            }
+
             const incomingEvent = socket.handshake.auth?.event || '';
             if (incomingEvent === 'walletLogin' || incomingEvent === 'walletReconnect') {
                 return next();
@@ -140,19 +153,6 @@ function registerConnectionHandler(io) {
         };
 
         botDetector.trackConnection(connectionData.ip, connectionData.userAgent, socket.id);
-
-        // Block-list check on connect
-        (async () => {
-            try {
-                const isBlocked = await context.redisClient.get(`blocklist:${connectionData.ip}`);
-                if (isBlocked) {
-                    logger.warn(`Blocked IP attempting to connect: ${connectionData.ip}`);
-                    socket.disconnect();
-                }
-            } catch (error) {
-                logger.error('Error checking IP blocklist:', { error: error?.message, ip: connectionData.ip });
-            }
-        })();
 
         // Per-packet rate limiter (burst-friendly)
         socket.use(async (packet, next) => {
