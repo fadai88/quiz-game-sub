@@ -1,0 +1,278 @@
+        // Hardcoded program IDs - no SPL Token library needed
+        const TOKEN_PROGRAM_ID = new solanaWeb3.PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+        const ASSOCIATED_TOKEN_PROGRAM_ID = new solanaWeb3.PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+
+        const SUBSCRIPTION_API = '/api/subscription';
+        let walletAddress = null;
+        let currentSubscription = null;
+
+        // Solana configuration
+        const config = {
+            USDC_MINT: new solanaWeb3.PublicKey('Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr'), // Devnet USDC mint
+            TREASURY_WALLET: new solanaWeb3.PublicKey('NoyR3nErDpw4fWDyHQ3CCURAe4TjTf9TkHZ7vhuDTp4'),
+        };
+
+        const connection = new solanaWeb3.Connection(
+            'https://devnet.helius-rpc.com/?api-key=961d5e62-871f-447a-bda0-0d61ce151d6e',
+            'confirmed'
+        );
+
+        // Helper to find associated token address (manual PDA derivation)
+        async function findAssociatedTokenAddress(walletAddress, tokenMintAddress) {
+            return (await solanaWeb3.PublicKey.findProgramAddress(
+                [
+                    walletAddress.toBuffer(),
+                    TOKEN_PROGRAM_ID.toBuffer(),
+                    tokenMintAddress.toBuffer(),
+                ],
+                ASSOCIATED_TOKEN_PROGRAM_ID
+            ))[0];
+        }
+
+        // Create USDC transfer transaction for subscription (manual instruction creation)
+        async function createSubscriptionTransaction(fromWallet, amountUSDC) {
+            try {
+                const fromWalletPubkey = new solanaWeb3.PublicKey(fromWallet);
+                const amount = Math.floor(amountUSDC * 1_000_000); // Convert to atomic units
+
+                // Get associated token accounts
+                const fromTokenAccount = await findAssociatedTokenAddress(
+                    fromWalletPubkey,
+                    config.USDC_MINT
+                );
+                const toTokenAccount = await findAssociatedTokenAddress(
+                    config.TREASURY_WALLET,
+                    config.USDC_MINT
+                );
+
+                // SPL Token Transfer instruction accounts: [source, destination, owner]
+                // TOKEN_PROGRAM_ID is the programId, NOT an account key
+                const keys = [
+                    { pubkey: fromTokenAccount, isSigner: false, isWritable: true },
+                    { pubkey: toTokenAccount, isSigner: false, isWritable: true },
+                    { pubkey: fromWalletPubkey, isSigner: true, isWritable: false },
+                ];
+
+                const data = new Uint8Array(9);
+                const view = new DataView(data.buffer);
+                view.setUint8(0, 3); // 3 = Transfer instruction index
+                view.setBigUint64(1, BigInt(amount), true); // true = little-endian
+
+                const transferInstruction = new solanaWeb3.TransactionInstruction({
+                    keys,
+                    programId: TOKEN_PROGRAM_ID,
+                    data
+                });
+
+                // Create transaction
+                const transaction = new solanaWeb3.Transaction();
+                const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+                transaction.recentBlockhash = blockhash;
+                transaction.lastValidBlockHeight = lastValidBlockHeight;
+                transaction.feePayer = fromWalletPubkey;
+                transaction.add(transferInstruction);
+
+                return transaction;
+            } catch (error) {
+                console.error('Error creating subscription transaction:', error);
+                throw new Error('Failed to create payment transaction: ' + error.message);
+            }
+        }
+
+        async function connectWallet() {
+            try {
+                const { solana } = window;
+                if (!solana?.isPhantom) {
+                    showMessage('Please install Phantom wallet', 'error');
+                    return null;
+                }
+
+                const resp = await solana.connect();
+                walletAddress = resp.publicKey.toString();
+                return walletAddress;
+            } catch (error) {
+                console.error('Wallet connection error:', error);
+                showMessage('Failed to connect wallet', 'error');
+                return null;
+            }
+        }
+
+        async function loadSubscriptionStatus() {
+            try {
+                const response = await fetch(`${SUBSCRIPTION_API}/status`, {
+                    credentials: 'include'
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to load subscription status');
+                }
+
+                const data = await response.json();
+                if (data.success) {
+                    currentSubscription = data;
+                    updateSubscriptionDisplay();
+                }
+            } catch (error) {
+                console.error('Error loading subscription:', error);
+            }
+        }
+
+        async function loadPrices() {
+            try {
+                const response = await fetch(`${SUBSCRIPTION_API}/prices`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.getElementById('monthlyPrice').textContent = data.prices.monthly;
+                    document.getElementById('yearlyPrice').textContent = data.prices.yearly;
+                }
+            } catch (error) {
+                console.error('Error loading prices:', error);
+            }
+        }
+
+        function updateSubscriptionDisplay() {
+            if (!currentSubscription) return;
+
+            const container = document.getElementById('currentSubscription');
+            const badge = document.getElementById('statusBadge');
+            const details = document.getElementById('subscriptionDetails');
+            const cancelBtn = document.getElementById('cancelBtn');
+
+            container.style.display = 'block';
+
+            if (currentSubscription.tier === 'premium' && currentSubscription.status === 'active') {
+                badge.textContent = 'Premium';
+                badge.className = 'status-badge active';
+                
+                const rawDate = currentSubscription.endDate;
+                const endDate = rawDate ? new Date(rawDate) : null;
+                details.textContent = endDate && !isNaN(endDate)
+                    ? `Active until ${endDate.toLocaleDateString()}`
+                    : 'Active';
+                
+                cancelBtn.style.display = 'inline-block';
+            } else {
+                badge.textContent = 'Free';
+                badge.className = 'status-badge free';
+                details.textContent = 'Upgrade to Premium for tournament access';
+                cancelBtn.style.display = 'none';
+            }
+        }
+
+        async function subscribe(plan) {
+            try {
+                if (!walletAddress) {
+                    walletAddress = await connectWallet();
+                    if (!walletAddress) return;
+                }
+
+                showMessage('Processing subscription... Please approve the transaction in Phantom', 'info');
+
+                // Get price
+                const pricesResponse = await fetch(`${SUBSCRIPTION_API}/prices`);
+                const pricesData = await pricesResponse.json();
+                const amount = plan === 'monthly' ? pricesData.prices.monthly : pricesData.prices.yearly;
+
+                // Create USDC transfer transaction
+                showMessage(`Creating payment transaction for $${amount} USDC...`, 'info');
+                const transaction = await createSubscriptionTransaction(walletAddress, amount);
+
+                // Sign transaction with Phantom
+                showMessage('Please approve the transaction in your Phantom wallet...', 'info');
+                const { solana } = window;
+                const signedTransaction = await solana.signTransaction(transaction);
+
+                // Send transaction to Solana network
+                showMessage('Sending transaction to Solana network...', 'info');
+                const signature = await connection.sendRawTransaction(signedTransaction.serialize());
+                console.log('Subscription payment transaction signature:', signature);
+
+                // Wait for confirmation
+                showMessage('Waiting for transaction confirmation...', 'info');
+                await connection.confirmTransaction({
+                    signature,
+                    blockhash: transaction.recentBlockhash,
+                    lastValidBlockHeight: transaction.lastValidBlockHeight,
+                }, 'confirmed');
+
+                // Submit subscription to server
+                showMessage('Activating subscription...', 'info');
+                const response = await fetch(`${SUBSCRIPTION_API}/subscribe`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        walletAddress,
+                        transactionSignature: signature,
+                        plan
+                    })
+                });
+
+                const data = await response.json();
+                
+                if (data.success) {
+                    showMessage('Subscription activated successfully!', 'success');
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 2000);
+                } else {
+                    showMessage(data.error || 'Subscription failed', 'error');
+                }
+
+            } catch (error) {
+                console.error('Subscription error:', error);
+                showMessage('Failed to process subscription', 'error');
+            }
+        }
+
+        async function cancelSubscription() {
+            if (!confirm('Are you sure you want to cancel your subscription? You will keep access until the end of your billing period.')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`${SUBSCRIPTION_API}/cancel`, {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+
+                const data = await response.json();
+                
+                if (data.success) {
+                    showMessage('Subscription cancelled. You will keep access until the end of your billing period.', 'success');
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 2000);
+                } else {
+                    showMessage(data.error || 'Failed to cancel subscription', 'error');
+                }
+            } catch (error) {
+                console.error('Cancel error:', error);
+                showMessage('Failed to cancel subscription', 'error');
+            }
+        }
+
+        function showMessage(text, type) {
+            const messageDiv = document.getElementById('message');
+            messageDiv.className = type === 'error' ? 'error-message' : 'success-message';
+            messageDiv.textContent = text;
+            messageDiv.style.display = 'block';
+
+            if (type === 'success') {
+                setTimeout(() => {
+                    messageDiv.style.display = 'none';
+                }, 5000);
+            }
+        }
+
+        // Event listeners
+        document.getElementById('subscribeMonthlyBtn').addEventListener('click', () => subscribe('monthly'));
+        document.getElementById('subscribeYearlyBtn').addEventListener('click', () => subscribe('yearly'));
+        document.getElementById('cancelBtn').addEventListener('click', cancelSubscription);
+
+        // Initialize
+        loadPrices();
+        loadSubscriptionStatus();

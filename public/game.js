@@ -1,0 +1,2042 @@
+        function getErrorMessage(error) {
+            // Handle sanitized error objects from server
+            if (error && typeof error === 'object') {
+                // New sanitized format: { error: "message", code: "ERROR_CODE", errorId: "abc123" }
+                if (error.error) {
+                    return error.error;
+                }
+                // Validation errors may have this structure
+                if (error.message) {
+                    return error.message;
+                }
+                // Fallback for generic objects
+                return 'An error occurred. Please try again.';
+            }
+            // Handle string errors (legacy or simple messages)
+            if (typeof error === 'string') {
+                return error;
+            }
+            // Unknown format
+            return 'An error occurred. Please try again.';
+        }
+        
+        // Safe console logging - only log error IDs in production, not full details
+        function logError(context, error) {
+            const isProduction = window.location.hostname !== 'localhost' && 
+                                 !window.location.hostname.includes('127.0.0.1');
+            
+            if (isProduction) {
+                // Production: Only log error ID for support
+                if (error && error.errorId) {
+                    console.log(`[${context}] Error ID: ${error.errorId}`);
+                } else {
+                    console.log(`[${context}] An error occurred`);
+                }
+            } else {
+                // Development: Log sanitized details (not full stack traces)
+                console.log(`[${context}]`, {
+                    message: getErrorMessage(error),
+                    code: error?.code,
+                    errorId: error?.errorId
+                });
+            }
+        }
+        const AccountLayout = {
+            decode(buffer) {
+                const accountInfo = {
+                    mint: new solanaWeb3.PublicKey(buffer.slice(0, 32)),
+                    owner: new solanaWeb3.PublicKey(buffer.slice(32, 64)),
+                    amount: buffer.slice(64, 72).readBigUInt64LE(0),
+                    delegateOption: buffer[72],
+                    delegate: new solanaWeb3.PublicKey(buffer.slice(73, 105)),
+                    state: buffer[105],
+                    isNativeOption: buffer[106],
+                    isNative: buffer.slice(107, 115),
+                    delegatedAmount: buffer.slice(115, 123),
+                    closeAuthorityOption: buffer[123],
+                    closeAuthority: new solanaWeb3.PublicKey(buffer.slice(124, 156))
+                };
+                return accountInfo;
+            }
+        };
+
+        // UUID v4 generator for nonces (replay protection)
+        function generateUUID() {
+            if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+                return crypto.randomUUID();
+            }
+            // Fallback for older browsers
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                const r = Math.random() * 16 | 0;
+                const v = c === 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
+        const socket = io({ 
+            withCredentials: true,
+        });
+
+        socket.on('error', (error) => {
+            logError('socket-error', error);  // ✅ Safe logging
+            
+            if (error.code === 'AUTH_REQUIRED') {
+                alert('Please login to continue');
+                window.location.href = '/login.html';
+            }
+            
+            if (error.code === 'SESSION_EXPIRED') {
+                alert('Your session has expired. Please login again.');
+                window.location.href = '/login.html';
+            }
+            
+            if (error.code === 'AUTH_ERROR') {
+                alert('Authentication error. Please try logging in again.');
+                window.location.href = '/login.html';
+            }
+        });
+
+        socket.on('connect_error', (err) => {
+            logError('connection', { message: err.message });  // ✅ Safe logging
+            // Don't show connection errors to user - they're often temporary
+        });
+
+        socket.on('connect', () => {
+            console.log('Connected via transport:', socket.io.engine.transport.name); // "polling" or "websocket"
+            socket.io.engine.once('upgrade', () => {
+                console.log('Upgraded to:', socket.io.engine.transport.name);
+            });
+
+            // Check if this is a reconnection attempt
+            if (isReconnecting) {
+                console.log('Reconnected! Waiting for game state restoration...');
+                updateReconnectAttemptDisplay();
+
+                // Wait up to 3 seconds for gameStateRestore event
+                const reconnectTimeout = setTimeout(() => {
+                    if (isReconnecting) {
+                        console.log('No game state received within timeout');
+                        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                            // Max attempts reached - give up
+                            hideReconnectingOverlay();
+                            isReconnecting = false;
+                            hasGameToRestore = false;
+                            reconnectAttempts = 0;
+                            showNotification('Unable to restore game session. Please start a new game.', 'error');
+                            resetGame();
+                        } else {
+                            // Try to restore via explicit request
+                            socket.emit('requestGameRestore', {
+                                walletAddress: connectedWallet,
+                                roomId: currentRoomId
+                            });
+                        }
+                    }
+                }, 3000);
+
+                // Store timeout reference to clear if state is restored
+                window.reconnectTimeoutRef = reconnectTimeout;
+            }
+
+            // Trigger session init after connect
+            initializeFromSession();
+        });
+
+        socket.on('loginSuccess', (data) => {
+            // This runs when game.html reconnects to the socket using the session cookie
+            if (data.serverTime) {
+                serverTimeOffset = data.serverTime - Date.now();
+                console.log('Clock synced in Game. Offset:', serverTimeOffset, 'ms');
+            }
+        });
+
+        let connectedWallet = null;
+        let currentRoomId = null;
+        let isPremium = false;  // set by initGameMode()
+        let currentBetAmount = null; // kept for compatibility, not used for betting
+
+        // ── Subscription / Game Mode ─────────────────────────────────────────────
+        const urlParams = new URLSearchParams(window.location.search);
+        const currentTournamentId = urlParams.get('tournament') || null;
+        const currentGameMode = currentTournamentId ? 'tournament' : 'practice';
+
+        // Populate game mode info banner and modal labels on load
+        (async function initGameMode() {
+            const modeEl = document.getElementById('gameModeInfo');
+            const humanReward = document.getElementById('humanRewardInfo');
+            const botReward   = document.getElementById('botRewardInfo');
+            const botBtn      = document.getElementById('playAgainstBotBtn');
+            const humanBtn    = document.getElementById('waitForPlayerBtn');
+
+            if (currentGameMode === 'tournament') {
+                // Verify premium access before allowing tournament play
+                try {
+                    const res = await fetch('/api/subscription/status', { credentials: 'include' });
+                    const subData = await res.json();
+                    if (!subData.success || subData.tier !== 'premium' || subData.status !== 'active') {
+                        modeEl.innerHTML = '⚠️ <strong>Premium required for tournaments.</strong> ' +
+                            '<a href="/subscription.html">Upgrade now</a>';
+                        document.getElementById('joinGameBtn').disabled = true;
+                        return;
+                    }
+                } catch(e) {
+                    console.error('Subscription check failed:', e);
+                }
+                modeEl.innerHTML = '🏆 <strong>Tournament Mode</strong> — Win real USDC prizes!';
+                if (humanReward) humanReward.textContent = 'Compete for USDC prize';
+                if (botReward)   botReward.textContent   = 'Practice before your match';
+            } else {
+                // Check subscription tier to show/hide game options
+                try {
+                    const res = await fetch('/api/subscription/status', { credentials: 'include' });
+                    const subData = await res.json();
+                    isPremium = subData.success && subData.tier === 'premium' && subData.status === 'active';
+                } catch(e) {
+                    console.error('Subscription check failed:', e);
+                }
+
+                if (isPremium) {
+                    if (botBtn)   botBtn.style.display = 'none';
+                    if (humanBtn) humanBtn.querySelector('.choice-title').textContent = 'Play Ranked Match';
+                    modeEl.innerHTML = '🏅 <strong>Ranked Mode</strong> — Premium players only.';
+                    if (humanReward) humanReward.textContent = 'Ranked match';
+                } else {
+                    if (humanBtn) humanBtn.style.display = 'none';
+                    if (botBtn)   botBtn.querySelector('.choice-title').textContent = 'Practice vs Bot';
+                    modeEl.innerHTML = '🎮 <strong>Practice Mode</strong> — Play for fun, no prizes. ' +
+                        '<a href="/subscription.html">Upgrade to Premium</a> for ranked matches.';
+                    if (botReward) botReward.textContent = 'Practice vs AI';
+                }
+            }
+        })();
+        // ────────────────────────────────────────────────────────────────────────
+
+        let currentQuestionId = null;
+        let questionTimer;
+        let correctAnswer;
+        let loggedInUser = null;
+        let phantomProvider = null;
+        let balanceUpdateInterval;
+        let gameTransactionInfo = null;
+        let isProcessingBet = false;  // NEW: Prevent multi-clicks
+
+        // Reconnection state variables
+        let isReconnecting = false;
+        let reconnectAttempts = 0;
+        let hasGameToRestore = false;
+        const MAX_RECONNECT_ATTEMPTS = 5;
+        let serverTimeOffset = 0;
+
+        const joinGameBtn = document.getElementById('joinGameBtn');
+        const waitingMessage = document.getElementById('waitingMessage');
+        const playersDiv = document.getElementById('players');
+        const questionDiv = document.getElementById('question');
+        const optionsDiv = document.getElementById('options');
+        const submitAnswerBtn = document.getElementById('submitAnswer');
+        const countdownTimer = document.getElementById('countdownTimer');
+
+        let countdownInterval;
+        let virtualBalance = 0;
+
+        let waitingForPlayer = true;
+        let waitingTimeout;
+        const WAITING_TIMEOUT_DURATION = 30000; // 30 seconds wait time
+
+        function getUrlParameter(name) {
+            var regex = new RegExp('[\\?&]' + name + '=([^&#]*)');
+            var results = regex.exec(location.search);
+            return results === null ? '' : decodeURIComponent(results[1].replace(/\+/g, ' '));
+        };
+
+        class USDCManager {
+            constructor(connection) {
+                this.connection = connection;
+                this.usdcMint = config.USDC_MINT;
+            }
+
+            async findAssociatedTokenAddress(walletAddress, tokenMintAddress) {
+                return (await solanaWeb3.PublicKey.findProgramAddress(
+                    [
+                        walletAddress.toBuffer(),
+                        TOKEN_PROGRAM_ID.toBuffer(),
+                        tokenMintAddress.toBuffer(),
+                    ],
+                    ASSOCIATED_TOKEN_PROGRAM_ID
+                ))[0];
+            }
+
+            async getOrCreateAssociatedTokenAccount(walletPublicKey) {
+                try {
+                    const tokenAccount = await this.findAssociatedTokenAddress(
+                        walletPublicKey,
+                        this.usdcMint
+                    );
+
+                    let accountInfo;
+                    try {
+                        // Check if account exists
+                        accountInfo = await this.connection.getAccountInfo(tokenAccount);
+                    } catch (error) {
+                        logError('account-checking', error);
+                        // CRITICAL FIX: If the RPC fails, THROW the error.
+                        // Do NOT proceed to create an account, or Phantom will pop up unnecessarily.
+                        throw error;
+                    }
+
+                    // If accountInfo exists, return it.
+                    if (accountInfo) {
+                        return { tokenAccount, transaction: null };
+                    }
+
+                    // Only proceed to creation if accountInfo is explicitly null (meaning no network error, but account doesn't exist)
+                    console.log('Account not found (valid), creating new associated token account...');
+                    const transaction = new solanaWeb3.Transaction().add(
+                        this.createAssociatedTokenAccountInstruction(
+                            walletPublicKey,
+                            tokenAccount,
+                            walletPublicKey,
+                            this.usdcMint
+                        )
+                    );
+
+                    transaction.recentBlockhash = (await this.connection.getRecentBlockhash()).blockhash;
+                    transaction.feePayer = walletPublicKey;
+
+                    return { tokenAccount, transaction };
+                } catch (error) {
+                    // This catches the thrown error above and stops the process
+                    logError('getOrCreateAssociatedTokenAccount', error);
+                    throw error;
+                }
+            }
+
+            createAssociatedTokenAccountInstruction(
+                payer,
+                associatedToken,
+                owner,
+                mint
+            ) {
+                const keys = [
+                    { pubkey: payer, isSigner: true, isWritable: true },
+                    { pubkey: associatedToken, isSigner: false, isWritable: true },
+                    { pubkey: owner, isSigner: false, isWritable: false },
+                    { pubkey: mint, isSigner: false, isWritable: false },
+                    { pubkey: solanaWeb3.SystemProgram.programId, isSigner: false, isWritable: false },
+                    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+                    { pubkey: solanaWeb3.SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+                ];
+
+                return new solanaWeb3.TransactionInstruction({
+                    keys,
+                    programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+                    data: Buffer.from([])
+                });
+            }
+
+            async getUSDCBalance(walletAddress) {
+                try {
+                    const walletPublicKey = new solanaWeb3.PublicKey(walletAddress);
+                    const { tokenAccount, transaction } = await this.getOrCreateAssociatedTokenAccount(walletPublicKey);
+
+                    if (transaction) {
+                        return {
+                            balance: 0,
+                            needsTokenAccount: true,
+                            createAccountTransaction: transaction
+                        };
+                    }
+
+                    // Get all token accounts owned by the wallet
+                    const tokenAccounts = await this.connection.getTokenAccountsByOwner(
+                        walletPublicKey,
+                        {
+                            mint: this.usdcMint
+                        }
+                    );
+
+                    // Find the token account with a balance
+                    let balance = 0;
+                    for (const { account } of tokenAccounts.value) {
+                        const accountData = account.data;
+                        const accountInfo = AccountLayout.decode(accountData);
+                        balance = Number(accountInfo.amount) / Math.pow(10, 6);
+                        if (balance > 0) break;
+                    }
+
+                    console.log('Found USDC balance:', balance);
+
+                    return {
+                        balance,
+                        needsTokenAccount: false
+                    };
+                } catch (error) {
+                    logError('usdc-balance', error);
+                    throw error;
+                }
+            }
+
+            async createTransferTransaction(walletAddress, betAmount, nonce) {
+                try {
+                    // betAmount is now in atomic units (e.g., 3000000 for 3 USDC)
+                    // Validate against atomic unit values
+                    if (!VALID_BET_AMOUNTS_ATOMIC.includes(betAmount)) {
+                        throw new Error(`Invalid bet amount. Must be 3, 10, 15, 20, or 30 USDC`);
+                    }
+
+                    const fromWallet = new solanaWeb3.PublicKey(walletAddress);
+
+                    // Get token accounts for user and treasury
+                    const fromTokenAccount = await this.findAssociatedTokenAddress(
+                        fromWallet,
+                        this.usdcMint
+                    );
+
+                    const toTokenAccount = await this.findAssociatedTokenAddress(
+                        config.TREASURY_WALLET,
+                        this.usdcMint
+                    );
+
+                    // Amount is already in atomic units (no conversion needed)
+                    const amount = betAmount;
+
+                    // Create transfer instruction
+                    const keys = [
+                        { pubkey: fromTokenAccount, isSigner: false, isWritable: true },
+                        { pubkey: toTokenAccount, isSigner: false, isWritable: true },
+                        { pubkey: fromWallet, isSigner: true, isWritable: false },
+                        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }
+                    ];
+
+                    const dataLayout = {
+                        transfer: 3,  // Command index for Transfer
+                        amount: amount
+                    };
+
+                    const data = Buffer.alloc(9);
+                    data.writeUInt8(dataLayout.transfer, 0);
+                    data.writeBigUInt64LE(BigInt(dataLayout.amount), 1);
+
+                    const transferInstruction = new solanaWeb3.TransactionInstruction({
+                        keys,
+                        programId: TOKEN_PROGRAM_ID,
+                        data
+                    });
+
+                    // NEW: Add unique memo for anti-dupe (prevents identical tx bytes across sessions)
+                    const memoText = `bet-${fromAtomicUnits(betAmount)}-${nonce}-${Date.now()}`;
+                    const memoIx = new solanaWeb3.TransactionInstruction({
+                        keys: [],  // No accounts needed
+                        programId: new solanaWeb3.PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'),  // Standard Memo program
+                        data: Buffer.from(memoText, 'utf8')  // ~20-40 unique bytes
+                    });
+
+                    // Create transaction
+                    const transaction = new solanaWeb3.Transaction();
+                    
+                    // Get recent blockhash
+                    const { blockhash, lastValidBlockHeight } = await this.connection.getLatestBlockhash();
+                    transaction.recentBlockhash = blockhash;
+                    transaction.lastValidBlockHeight = lastValidBlockHeight;
+                    transaction.feePayer = fromWallet;
+                    
+                    // NEW: Add memo FIRST (ensures uniqueness in tx message)
+                    transaction.add(memoIx);
+                    // Add instruction (existing transfer)
+                    transaction.add(transferInstruction);
+
+                    console.log('Created transfer transaction:', {
+                        from: fromTokenAccount.toString(),
+                        to: toTokenAccount.toString(),
+                        amountAtomic: amount,
+                        amountUSDC: fromAtomicUnits(amount),
+                        feePayer: fromWallet.toString()
+                    });
+                    // NEW: Optional log for debugging uniqueness
+                    console.log('Created unique tx with memo:', memoText);
+
+                    return transaction;
+                } catch (error) {
+                    logError('create-transaction', error);
+                    throw error;
+                }
+            }
+        }
+
+        const connection = new solanaWeb3.Connection(
+            'https://devnet.helius-rpc.com/?api-key=961d5e62-871f-447a-bda0-0d61ce151d6e',
+            'confirmed'
+        );
+        
+        const usdcManager = new USDCManager(connection);
+
+        async function checkSession() {
+            try {
+                const response = await fetch('/api/auth/session', {
+                    method: 'GET',
+                    credentials: 'include'  // CRITICAL: Send cookies
+                });
+                
+                const data = await response.json();
+                
+                if (data.authenticated) {
+                    console.log('✅ Session valid for wallet:', data.walletAddress);
+                    connectedWallet = data.walletAddress;
+                    
+                    // Update UI
+                    if (document.getElementById('walletStatus')) {
+                        document.getElementById('walletStatus').textContent = 
+                            `Connected: ${connectedWallet.slice(0,4)}...${connectedWallet.slice(-4)}`;
+                    }
+                    
+                    return true;
+                } else {
+                    console.warn('⚠️ No valid session - redirecting to login');
+                    window.location.href = 'login.html';
+                    return false;
+                }
+                
+            } catch (error) {
+                logError('session-check', error);
+                window.location.href = 'login.html';
+                return false;
+            }
+        }
+
+        async function logout() {
+            try {
+                await fetch('/api/auth/logout', {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+            } catch (error) {
+                logError('logout', error);
+            }
+            window.location.href = 'login.html';
+        }
+
+        // Initialize from URL or session data first
+        async function initializeFromSession() {
+            console.log('Checking session via secure cookie...');
+            
+            // Check session via HTTP (secure cookie)
+            const isAuthenticated = await checkSession();
+            
+            if (!isAuthenticated) {
+                return; // checkSession already redirects to login
+            }
+            
+            // connectedWallet is now set by checkSession()
+            console.log('✅ Wallet connected:', connectedWallet);
+            
+            // Update wallet status UI
+            document.getElementById('walletStatus').textContent = 
+                `Connected: ${connectedWallet.slice(0,4)}...${connectedWallet.slice(-4)}`;
+            
+            // NO walletReconnect needed - cookie authenticates Socket.IO automatically
+            
+            // Proceed with balance/UI init
+            try {
+                await updateBalance();  // Fetch once on connection
+                // No polling needed - balance only changes during game actions
+                await initializeWallet();
+            } catch (error) {
+                logError('session-init', error);
+                alert('Failed to initialize. Please refresh the page.');
+            }
+        }
+
+        async function initializeWallet() {
+            try {
+                if (!window.solana || !window.solana.isPhantom) {
+                    throw new Error('Phantom wallet not installed');
+                }
+
+
+                // Session already validated by checkSession() - connectedWallet is set
+                // Optional: Auto-connect to Phantom if not already connected
+                if (!window.solana.isConnected) {
+                    try {
+                        await window.solana.connect({ onlyIfTrusted: true });
+                        console.log('Auto-connected to Phantom wallet');
+                    } catch (err) {
+                        console.log('Phantom not auto-connected:', err.message);
+                    }
+                }
+
+                // Verify Phantom wallet matches session wallet (if connected)
+                if (window.solana.isConnected) {
+                    const phantomPublicKey = window.solana.publicKey.toString();
+                    if (phantomPublicKey !== connectedWallet) {
+                        console.warn(`Wallet mismatch: Phantom=${phantomPublicKey}, Session=${connectedWallet}`);
+                        alert('Wallet mismatch detected. Please log in with the correct wallet.');
+                        await logout();
+                        return;
+                    }
+                    console.log('✅ Phantom wallet verified:', phantomPublicKey);
+                }
+
+            } catch (error) {
+                logError('wallet-init', error);
+                // Don't redirect here since initializeFromSession already handles that
+            }
+        }
+
+        async function updateBalance() {
+            try {
+                // Skip balance updates in practice mode (no USDC needed)
+                if (currentGameMode === 'practice') {
+                    document.getElementById('balanceDisplay').style.display = 'none';
+                    return;
+                }
+                if (!connectedWallet) {
+                    document.getElementById('balanceDisplay').textContent = 'Balance: Not connected';
+                    return;
+                }
+
+                console.log('[balance] Fetching balance for:', connectedWallet);
+
+                // Fetch on-chain balance
+                const onChainResponse = await fetch(`/api/balance/${connectedWallet}`, {
+                    method: 'GET',
+                    credentials: 'include',
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                });
+
+                if (!onChainResponse.ok) {
+                    if (onChainResponse.status === 401) {
+                        console.error('[balance] Not authenticated - redirecting');
+                        window.location.href = 'login.html';
+                        return;
+                    }
+                    if (onChainResponse.status === 403) {
+                        console.error('[balance] Forbidden - wallet mismatch');
+                        throw new Error('Unauthorized wallet access');
+                    }
+                    throw new Error(`Balance check failed: ${onChainResponse.status}`);
+                }
+
+                const onChainData = await onChainResponse.json();
+                const onChainBalance = parseFloat(onChainData.balance) || 0;
+
+                // Fetch virtual balance
+                let virtualBalance = 0;
+                try {
+                    const virtualResponse = await fetch(`/api/virtual-balance/${connectedWallet}`, {
+                        method: 'GET',
+                        credentials: 'include',
+                        headers: {
+                            'Accept': 'application/json'
+                        }
+                    });
+
+                    if (virtualResponse.ok) {
+                        const virtualData = await virtualResponse.json();
+                        virtualBalance = parseFloat(virtualData.balance) || 0;
+                    }
+                } catch (virtualError) {
+                    console.warn('[balance] Could not fetch virtual balance:', virtualError);
+                    // Continue with 0 virtual balance
+                }
+
+                const totalBalance = onChainBalance + virtualBalance;
+
+                console.log('[balance] Balance retrieved:', {
+                    onChain: onChainBalance,
+                    virtual: virtualBalance,
+                    total: totalBalance
+                });
+
+                // Update UI
+                const balanceElement = document.getElementById('balanceDisplay');
+                if (balanceElement) {
+                    if (virtualBalance > 0) {
+                        // Show breakdown when user has virtual balance
+                        balanceElement.innerHTML = `
+                            <div class="balance-breakdown">
+                                <div class="balance-total">
+                                    Total: <strong>${totalBalance.toFixed(2)} USDC</strong>
+                                </div>
+                                <div class="balance-details">
+                                    <span class="wallet-balance">Wallet: ${onChainBalance.toFixed(2)} USDC</span>
+                                    <span class="virtual-balance-highlight">
+                                        💰 Credits: ${virtualBalance.toFixed(2)} USDC
+                                    </span>
+                                </div>
+                                <div class="balance-note">Use credits for your next game!</div>
+                            </div>
+                        `;
+                    } else {
+                        // Simple display when no virtual balance
+                        balanceElement.textContent = `Balance: ${onChainBalance.toFixed(2)} USDC`;
+                    }
+                }
+
+            } catch (error) {
+                logError('balance-update', error);
+                console.error('[balance] Failed to update balance:', error);
+
+                const balanceElement = document.getElementById('balanceDisplay');
+                if (balanceElement) {
+                    balanceElement.textContent = 'Error fetching balance';
+                }
+            }
+        }
+
+        async function connectWallet() {
+            try {
+                if (window.solana && window.solana.isPhantom) {
+                    phantomProvider = window.solana;
+                } else {
+                    alert('Phantom wallet is not installed. Please install it from https://phantom.app/');
+                    window.open('https://phantom.app/', '_blank');
+                    return;
+                }
+
+                // Get reCAPTCHA token if enabled
+                let recaptchaToken = null;
+                if (window.recaptchaEnabled && window.grecaptcha) {
+                    try {
+                        await grecaptcha.ready();
+                        recaptchaToken = await grecaptcha.execute(window.recaptchaSiteKey, {action: 'wallet_connect'});
+                    } catch (error) {
+                        logError('reCAPTCHA', error);
+                        // Continue without reCAPTCHA if there's an error.    LOOK AT THIS!!!!!
+                    }
+                }
+
+                const response = await phantomProvider.connect();
+                connectedWallet = response.publicKey.toString();
+                console.log('Connected to wallet:', connectedWallet);
+
+                // Generate message for signing
+                const message = `Login to Game - ${Date.now()}`;
+                const encodedMessage = new TextEncoder().encode(message);
+
+                // Request signature from wallet
+                const signatureBytes = await phantomProvider.signMessage(encodedMessage, 'utf8');
+                const signature = btoa(String.fromCharCode.apply(null, signatureBytes));
+
+                // Emit login event with all necessary data
+                socket.emit('walletLogin', {
+                    walletAddress: connectedWallet,
+                    signature,
+                    message,
+                    recaptchaToken,
+                    clientData: {
+                        userAgent: navigator.userAgent,
+                        language: navigator.language,
+                        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                        screenResolution: `${window.screen.width}x${window.screen.height}`
+                    }
+                });
+
+                updateWalletStatus();
+                
+                // Update balance immediately after connecting
+                await updateBalance();  // Fetch once on connection
+                // No polling needed - balance only changes during game actions
+                return connectedWallet;
+            } catch (err) {
+                logError('wallet-connection', err);
+                alert('Failed to connect wallet: ' + err.message);
+                return null;
+            }
+        }
+
+        function updateWalletStatus() {
+            if (connectedWallet) {
+                // Update UI to show connected wallet
+                const shortAddress = `${connectedWallet.slice(0, 4)}...${connectedWallet.slice(-4)}`;
+                document.getElementById('walletStatus').textContent = `Connected: ${shortAddress}`;
+            }
+        }
+
+
+        window.addEventListener('load', initializeFromSession);
+
+        window.solana?.on('disconnect', async () => {
+            console.log('Wallet disconnected');
+            if (balanceUpdateInterval) {
+                clearInterval(balanceUpdateInterval);
+            }
+            
+            // Call logout endpoint to clear cookie
+            try {
+                await fetch('/api/auth/logout', {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+            } catch (error) {
+                logError('logout', error);
+            }
+            
+            // NO localStorage to clear - session is in httpOnly cookie
+            window.location.href = 'login.html';
+        });
+
+        // Add helper functions at the top of your script section
+        async function findAssociatedTokenAddress(walletAddress, tokenMintAddress) {
+            return (await solanaWeb3.PublicKey.findProgramAddress(
+                [
+                    walletAddress.toBuffer(),
+                    TOKEN_PROGRAM_ID.toBuffer(),
+                    tokenMintAddress.toBuffer(),
+                ],
+                ASSOCIATED_TOKEN_PROGRAM_ID
+            ))[0];
+        }
+
+        function updateUIForJoining() {
+            joinGameBtn.disabled = true;
+            joinGameBtn.textContent = 'Processing...';
+            waitingMessage.textContent = 'Processing USDC payment...';
+        }
+
+        function resetJoinUI() {
+            joinGameBtn.disabled = false;
+            joinGameBtn.textContent = 'Join Game';
+            waitingMessage.textContent = '';
+        }
+
+        function resetUIAfterError() {
+            resetJoinUI();
+            waitingMessage.textContent = '';
+            const modal = document.getElementById('gameChoiceModal');
+            if (modal.style.display === 'flex') {
+                modal.style.display = 'none';
+            }
+            if (waitingTimeout) {
+                clearTimeout(waitingTimeout);
+            }
+            currentRoomId = null;
+            currentBetAmount = null;
+            gameTransactionInfo = null;
+            // NEW: Re-enable choice buttons
+            document.getElementById('playAgainstBotBtn').disabled = false;
+            document.getElementById('playAgainstBotBtn').textContent = 'Play Against Bot';
+            document.getElementById('waitForPlayerBtn').disabled = false;
+            document.getElementById('waitForPlayerBtn').textContent = 'Playing against human';
+            isProcessingBet = false;
+            console.log('UI reset after error');
+        }
+
+        // NEW: Client-side pre-validation function for bet and wallet
+        function validateBetAndWallet(betAmount, wallet) {
+            // Validate bet amount (now in atomic units)
+            if (!Number.isInteger(betAmount) || !VALID_BET_AMOUNTS_ATOMIC.includes(betAmount)) {
+                throw new Error('Invalid bet amount. Must be 3, 10, 15, 20, or 30 USDC.');
+            }
+            // Rough base58 regex for wallet (server will do full PublicKey check)
+            if (!wallet || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(wallet)) {
+                throw new Error('Invalid wallet address format.');
+            }
+            return true;
+        }
+        
+        joinGameBtn.addEventListener('click', async () => {
+            try {
+                if (!connectedWallet || !window.solana?.isConnected) {
+                    alert('Please connect your wallet first');
+                    return;
+                }
+                // No bet needed - just show game mode modal
+                updateUIForJoining();
+                waitingMessage.textContent = 'Waiting for game mode selection...';
+                showGameChoiceModal();
+            } catch (error) {
+                logError('join-game', error);
+                resetUIAfterError();
+                alert('Failed to join game: ' + error.message);
+                joinGameBtn.disabled = false;
+            }
+        });
+
+        socket.on('balanceUpdate', (newBalance) => {
+            virtualBalance = newBalance;
+            document.getElementById('balanceDisplay').textContent = `Balance: $${virtualBalance.toFixed(2)}`;
+        });
+
+        socket.on('joinGameSuccess', (data) => {
+            console.log('Successfully joined game:', data);
+            
+            // Show success state briefly before hiding
+            joinGameBtn.textContent = 'Joined Successfully ✓';
+            waitingMessage.textContent = 'Waiting for another player...';
+            
+            // Hide the button after a brief delay so user sees the success
+            setTimeout(() => {
+                joinGameBtn.style.display = 'none';
+            }, 1500);
+            
+            // No polling to stop - balance only fetched when needed
+        });
+
+        socket.on('joinGameFailure', (data) => {
+            console.log('Join game failure:', data);
+
+            // Check if this is a refund situation (money was taken but game failed)
+            if (typeof data === 'object' && data.code === 'REFUNDED_TO_BALANCE') {
+                // SUCCESS CASE: Funds were automatically refunded to virtual balance
+                console.log('Funds refunded to virtual balance:', data);
+
+                // Show success message (not an error!)
+                waitingMessage.innerHTML = `
+                    <div class="refund-success-notification">
+                        <div class="refund-icon">✅</div>
+                        <h3>Funds Saved!</h3>
+                        <p>${data.error}</p>
+                        ${data.refundReason ? `<p class="refund-reason">Reason: ${data.refundReason}</p>` : ''}
+                        <div class="refund-actions">
+                            <button onclick="location.reload()" class="refresh-button">
+                                🔄 Refresh & Check Balance
+                            </button>
+                            <button onclick="document.getElementById('joinGameBtn').click()" class="retry-button">
+                                ↩️ Retry Game
+                            </button>
+                        </div>
+                        <p class="refund-info">Your balance will update within a few seconds.</p>
+                    </div>
+                `;
+
+                // Update balance automatically
+                setTimeout(async () => {
+                    await updateBalance();
+                    console.log('Balance updated after refund');
+                }, 2000);
+
+            } else if (typeof data === 'object' && data.code === 'REFUND_FAILED') {
+                // CRITICAL CASE: Automatic refund failed - needs manual intervention
+                logError('refund-failed', data);
+
+                waitingMessage.innerHTML = `
+                    <div class="refund-failed-notification">
+                        <div class="refund-icon">⚠️</div>
+                        <h3>Manual Refund Required</h3>
+                        <p>${data.error}</p>
+                        <div class="support-info">
+                            <p><strong>What to do:</strong></p>
+                            <ol>
+                                <li>Take a screenshot of this message</li>
+                                <li>Note your wallet address: <code>${connectedWallet}</code></li>
+                                <li>Contact support immediately</li>
+                            </ol>
+                        </div>
+                        <p class="refund-timeline">⏱️ Refunds are typically processed within 24 hours.</p>
+                    </div>
+                `;
+
+                // Show urgent alert
+                alert(`⚠️ IMPORTANT\n\nAutomatic refund failed. Your refund will be processed manually within 24 hours.\n\nPlease contact support if you don't receive it.\n\nWallet: ${connectedWallet}`);
+
+            } else {
+                // NORMAL ERROR CASE: Payment was never taken
+                logError('join-game', data);
+
+                const errorMessage = typeof data === 'string' ? data :
+                               data.error || data.message || 'Failed to join game';
+
+                waitingMessage.innerHTML = `
+                    <div class="error-notification">
+                        <div class="error-icon">❌</div>
+                        <p>${errorMessage}</p>
+                    </div>
+                `;
+
+                // Only show alert if not a user rejection
+                if (!errorMessage.includes('User rejected') && !errorMessage.includes('rejected')) {
+                    alert(`Error: ${errorMessage}`);
+                }
+            }
+
+            // Reset UI for retry
+            resetJoinUI();
+            joinGameBtn.disabled = false;
+        });
+
+        socket.on('matchmakingError', (error) => {
+            logError('matchmaking', error);  // ✅ Safe logging
+            resetUIAfterError();
+            alert(getErrorMessage(error));  // ✅ User-friendly message
+            joinGameBtn.disabled = false;
+        });
+
+        submitAnswerBtn.addEventListener('click', async () => {
+            const selectedOption = document.querySelector('input[name="answer"]:checked');
+            if (!selectedOption) {
+                alert('Please select an answer!');
+                return;
+            }
+            
+            const selectedAnswer = parseInt(selectedOption.value);
+            
+            console.log('Submitting answer:', {
+                roomId: currentRoomId,
+                questionId: currentQuestionId,
+                answer: selectedAnswer,
+            });
+            
+            socket.emit('submitAnswer', { 
+                roomId: currentRoomId, 
+                questionId: currentQuestionId, 
+                answer: selectedAnswer
+            });
+            
+            submitAnswerBtn.disabled = true;
+            waitingMessage.textContent = 'Waiting for other player to answer...';
+        });
+
+        socket.on('botGameReady', (data) => {
+            waitingMessage.textContent = `Playing against ${data.botName} 🤖 (${data.difficulty})`;
+            document.body.classList.add('playing-bot');
+            
+            // If there's a bot animation or sound, play it here
+            if (typeof playBotSound === 'function') {
+                playBotSound('start');
+            }
+        });
+
+        socket.on('playerJoined', (username) => {
+            // Clear any waiting timeout
+            if (waitingTimeout) {
+                clearTimeout(waitingTimeout);
+            }
+            
+            waitingMessage.textContent = `${username} joined. Game is starting...`;
+            
+            // Play sound if available
+            const joinSound = document.getElementById('joinSound');
+            if (joinSound) {
+                joinSound.play();
+            }
+        });
+
+        socket.on('gameStart', ({ players, questionCount, singlePlayerMode, botOpponent }) => {
+            if (botOpponent) {
+                waitingMessage.textContent = `Playing against ${botOpponent} 🤖`;
+                document.body.classList.add('playing-bot');
+                playBotSound('start');
+            } else {
+                waitingMessage.textContent = singlePlayerMode ? 
+                    'No other players found. Starting single player mode...' : 
+                    'Game started!';
+                document.body.classList.remove('playing-bot');
+            }
+            updatePlayerUI(players);
+        });
+
+        socket.on('nextQuestion', ({ questionId, question, options, questionNumber, totalQuestions, questionEndsAt }) => {
+            currentQuestionId = questionId;
+            waitingMessage.innerHTML = ''; 
+
+            displayQuestion(question, options, questionNumber, totalQuestions);
+            submitAnswerBtn.disabled = false;
+            submitAnswerBtn.style.display = 'block';
+                        
+            // 1. Calculate the actual milliseconds remaining
+            const clientEndTime = questionEndsAt - serverTimeOffset;
+            const now = Date.now();
+            
+            // Use Math.max to ensure we don't get a negative number if the packet is extremely late
+            const msRemaining = Math.max(0, clientEndTime - now);
+            
+            // 2. UX Fix: If we are within 1.5s of the start, force the display to "10"
+            let displaySeconds = Math.ceil(msRemaining / 1000);
+            if (msRemaining > 8500 && msRemaining <= 10000) {
+                displaySeconds = 10;
+            }
+
+            // 3. Clear any existing timer
+            if (questionTimer) clearTimeout(questionTimer);
+
+            // 4. Start visual countdown with dynamic tick timing
+            // This will handle both the display AND the button disabling
+            startVisualCountdown(displaySeconds, msRemaining);
+        });
+
+        socket.on('scoreUpdate', (players) => {
+            updatePlayers(players);
+            /*
+            if (questionTimer) {
+                clearTimeout(questionTimer);
+            }
+            */
+        });
+
+        socket.on('gameOver', (data) => {
+            console.log('Received game over data:', data);
+            const { players, winner, singlePlayerMode, botOpponent, error, gameMode, tournamentId, prizeAmount } = data;
+
+            // Clear timers
+            if (questionTimer) clearTimeout(questionTimer);
+            if (window.syncTimeout) clearTimeout(window.syncTimeout);
+            if (countdownInterval) clearInterval(countdownInterval);
+            questionTimer = null;
+            countdownInterval = null;
+
+            // Update UI
+            questionDiv.textContent = 'Game Over!';
+            submitAnswerBtn.style.display = 'none';
+            countdownTimer.style.display = 'none';
+            optionsDiv.innerHTML = '';
+
+            if (error) {
+                waitingMessage.textContent = `Game Over! Error: ${error}`;
+                setTimeout(() => { resetGame(); }, 5000);
+                return;
+            }
+
+            // Display scores
+            const scoresHtml = players.map(p =>
+                `<p>${p.username}${p.isBot ? ' 🤖' : ''}: ${p.score} (Total response time: ${p.totalResponseTime || 0}ms)</p>`
+            ).join('');
+            playersDiv.innerHTML = '<h2>Final Scores:</h2>' + scoresHtml;
+
+            const clientIsWinner = winner === connectedWallet;
+            const isTournament = (gameMode === 'tournament' || !!tournamentId);
+            let gameOverMessage = '';
+
+            if (botOpponent) {
+                const humanPlayer = players.find(p => p.username === connectedWallet && !p.isBot);
+                const botPlayer = players.find(p => p.isBot);
+                if (clientIsWinner) {
+                    gameOverMessage = `🎉 You defeated ${botPlayer ? botPlayer.username : 'the bot'} with ${humanPlayer ? humanPlayer.score : 0} correct answers!`;
+                    if (typeof celebrateWin === 'function') celebrateWin('bot_win');
+                } else {
+                    gameOverMessage = `Game Over! You got ${humanPlayer ? humanPlayer.score : 0} correct answers. Better luck next time!`;
+                }
+            } else if (isTournament) {
+                const clientPlayer = players.find(p => p.username === connectedWallet);
+                if (clientIsWinner) {
+                    gameOverMessage = `🏆 You won this tournament match with a score of ${clientPlayer ? clientPlayer.score : 0}!`;
+                    if (prizeAmount) {
+                        gameOverMessage += ` Prize of <strong>${prizeAmount} USDC</strong> will be sent to your wallet.`;
+                    }
+                    if (typeof celebrateWin === 'function') celebrateWin('normal');
+                } else if (winner) {
+                    const winnerPlayer = players.find(p => p.username === winner);
+                    gameOverMessage = `Tournament match over! ${winner} wins with a score of ${winnerPlayer ? winnerPlayer.score : 0}. Keep competing!`;
+                } else {
+                    gameOverMessage = "Tournament match is a draw!";
+                }
+                if (tournamentId) {
+                    gameOverMessage += ` <a href="/tournaments.html">View tournament standings</a>`;
+                }
+            } else {
+                // Practice mode
+                const clientPlayer = players.find(p => p.username === connectedWallet);
+                if (clientIsWinner) {
+                    gameOverMessage = `🎉 You won with a score of ${clientPlayer ? clientPlayer.score : 0}! Great job!`;
+                    gameOverMessage += ` <em>Want to play for real prizes? <a href="/subscription.html">Upgrade to Premium</a> for tournament access.</em>`;
+                    if (typeof celebrateWin === 'function') celebrateWin('normal');
+                } else if (winner) {
+                    const winnerPlayer = players.find(p => p.username === winner);
+                    gameOverMessage = `Game Over! ${winner} wins with a score of ${winnerPlayer ? winnerPlayer.score : 0}. Better luck next time!`;
+                } else {
+                    gameOverMessage = "Game Over! It's a draw!";
+                }
+            }
+
+            waitingMessage.innerHTML = gameOverMessage;
+
+            setTimeout(() => { resetGame(); }, 7000);
+        });
+
+        socket.on('playerLeft', (username) => {
+            console.log(`Player ${username} left the game`);
+            waitingMessage.textContent = `${username} left the game. Waiting for game resolution...`;
+        });
+
+
+        socket.on('gameOverForfeit', (data) => {
+            console.log('Forfeit game over:', data);
+            const { winner, disconnectedPlayer, message, gameMode, tournamentId, prizeAmount } = data;
+
+            resetGame();
+
+            const clientIsWinner = winner === connectedWallet;
+            const isTournament = (gameMode === 'tournament' || !!tournamentId);
+            let forfeitMessage = message;
+
+            if (clientIsWinner) {
+                if (isTournament && prizeAmount) {
+                    forfeitMessage += ` You win this match! Prize of <strong>${prizeAmount} USDC</strong> will be sent to your wallet.`;
+                } else if (isTournament) {
+                    forfeitMessage += ` You win this tournament match!`;
+                } else {
+                    forfeitMessage += ` You win this practice match! Well played.`;
+                }
+                if (typeof celebrateWin === 'function') celebrateWin('forfeit');
+            }
+
+            waitingMessage.innerHTML = forfeitMessage;
+
+            setTimeout(() => {
+                playersDiv.innerHTML = `<h2>Game Ended Early</h2>
+            <div class="forfeit-message">
+                <p>${disconnectedPlayer} left the game.</p>
+                <p>${winner} is the winner.</p>
+            </div>`;
+                joinGameBtn.style.display = 'inline-block';
+            }, 7000);
+        });
+
+        socket.on('gameError', (error) => {
+            logError('game', error);  // ✅ Safe logging
+            alert(getErrorMessage(error));  // ✅ User-friendly message
+            resetGame();
+        });
+
+        socket.on('clearQuestionUI', () => {
+            // Only clear if no correct answer is being displayed
+            if (!waitingMessage.innerHTML.includes('Correct Answer')) {
+                questionDiv.innerHTML = '';
+                optionsDiv.innerHTML = '';
+                waitingMessage.innerHTML = '';
+            }
+        });
+
+        socket.on('disconnect', () => {
+            console.log('Disconnected from server');
+
+            // Check if player is in active game
+            if (currentRoomId !== null) {
+                // Player was in a game - attempt reconnection
+                console.log('Disconnected during active game. Attempting to reconnect...');
+                isReconnecting = true;
+                reconnectAttempts++;
+                hasGameToRestore = true;
+                showReconnectingOverlay();
+                updateReconnectAttemptDisplay();
+                // Do NOT call resetGame() - we want to preserve state for restoration
+            } else {
+                // Player was not in a game - show simple message
+                alert('You have been disconnected from the game server. Please refresh the page to reconnect.');
+                resetGame();
+            }
+        });
+
+        // Game state restoration handler for reconnection
+        socket.on('gameStateRestore', (data) => {
+            console.log('Received gameStateRestore:', data);
+
+            // Clear any pending reconnect timeout
+            if (window.reconnectTimeoutRef) {
+                clearTimeout(window.reconnectTimeoutRef);
+                window.reconnectTimeoutRef = null;
+            }
+
+            // Hide reconnecting overlay
+            hideReconnectingOverlay();
+
+            // Validate data
+            if (!data || !data.roomId || !Array.isArray(data.players)) {
+                console.error('Invalid gameStateRestore data:', data);
+                showNotification('Failed to restore game state. Starting fresh.', 'error');
+                isReconnecting = false;
+                hasGameToRestore = false;
+                reconnectAttempts = 0;
+                resetGame();
+                return;
+            }
+
+            // Restore game state
+            currentRoomId = data.roomId;
+            currentBetAmount = data.betAmount || currentBetAmount;
+
+            console.log('Restoring game state:', {
+                roomId: currentRoomId,
+                gameMode: currentGameMode,
+                tournamentId: currentTournamentId,
+                gameStarted: data.gameStarted,
+                playerCount: data.players.length
+            });
+
+            if (data.gameStarted) {
+                // Game is in progress - show game screen
+                joinGameBtn.style.display = 'none';
+                // (bet selector removed — subscription model)
+
+                // Update players display
+                updatePlayerUI(data.players);
+
+                // Handle active question if present (player can still answer)
+                if (data.activeQuestion) {
+                    // Jump directly to the current question content
+                    displayQuestion(
+                        data.activeQuestion.question,
+                        data.activeQuestion.options,
+                        data.activeQuestion.questionNumber,
+                        data.activeQuestion.totalQuestions
+                    );
+                    currentQuestionId = data.activeQuestion.questionId;
+                    submitAnswerBtn.style.display = 'block';
+                    submitAnswerBtn.disabled = false;
+                    waitingMessage.innerHTML = ''; // Clear "Round Results" or "Joined" messages
+
+                    // Calculate remaining time synced with server
+                    const msRemaining = Math.max(0, (data.activeQuestion.questionEndsAt - serverTimeOffset) - Date.now());
+                    startVisualCountdown(Math.ceil(msRemaining / 1000));
+
+                    // Set up timeout for remaining time
+                    if (questionTimer) {
+                        clearTimeout(questionTimer);
+                    }
+                    questionTimer = setTimeout(() => {
+                        submitAnswerBtn.disabled = true;
+                        waitingMessage.textContent = 'Time\'s up!';
+                    }, msRemaining);
+                } else if (data.currentQuestion) {
+                    // Between questions or question already ended
+                    questionDiv.innerHTML = `<h2>Question ${data.currentQuestion.questionNumber} of ${data.currentQuestion.totalQuestions}</h2>`;
+                    waitingMessage.textContent = 'Reconnected! Waiting for next question...';
+                } else {
+                    waitingMessage.textContent = 'Reconnected! Game in progress...';
+                }
+
+                // Handle bot game indicator
+                if (data.botOpponent) {
+                    document.body.classList.add('playing-bot');
+                }
+            } else {
+                // Game hasn't started yet - show waiting room
+                joinGameBtn.style.display = 'none';
+                // (bet selector removed — subscription model)
+
+                // Update player list
+                playersDiv.innerHTML = '<h2>Players:</h2>' + data.players.map(p =>
+                    `<p>${p.username}${p.isBot ? ' 🤖' : ''}: Ready</p>`
+                ).join('');
+
+                waitingMessage.textContent = 'Reconnected! Waiting for game to start...';
+            }
+
+            // Reset reconnection state
+            isReconnecting = false;
+            hasGameToRestore = false;
+            reconnectAttempts = 0;
+
+            // Show success notification
+            showNotification('Successfully reconnected to game!', 'success');
+
+            // Log restoration details
+            console.log('Game state restored successfully:', {
+                roomId: currentRoomId,
+                gameMode: currentGameMode,
+                tournamentId: currentTournamentId,
+                players: data.players.map(p => p.username),
+                gameStarted: data.gameStarted
+            });
+        });
+
+        const forfeitStyles = document.createElement('style');
+        forfeitStyles.textContent = `
+            .loading-spinner {
+                display: inline-block;
+                animation: spin 2s infinite linear;
+                margin-left: 10px;
+                font-size: 20px;
+            }
+            
+            @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+            
+            .forfeit-message {
+                background-color: rgba(255, 152, 0, 0.2);
+                border-left: 4px solid #ff9800;
+                padding: 10px 15px;
+                margin: 15px 0;
+                border-radius: 4px;
+            }
+            
+            .dark-theme .forfeit-message {
+                background-color: rgba(255, 152, 0, 0.1);
+            }
+        `;
+        document.head.appendChild(forfeitStyles);
+
+        // Optional celebration effect
+        function celebrateWin(type) {
+            // Simple confetti effect for win celebration
+            const confettiContainer = document.createElement('div');
+            confettiContainer.className = 'confetti-container';
+            document.body.appendChild(confettiContainer);
+            
+            // Create 50 confetti pieces
+            for (let i = 0; i < 50; i++) {
+                const confetti = document.createElement('div');
+                confetti.className = 'confetti';
+                confetti.style.left = `${Math.random() * 100}%`;
+                confetti.style.animationDelay = `${Math.random() * 3}s`;
+                confetti.style.backgroundColor = `hsl(${Math.random() * 360}, 80%, 60%)`;
+                confettiContainer.appendChild(confetti);
+            }
+            
+            // Remove confetti after animation completes
+            setTimeout(() => {
+                confettiContainer.remove();
+            }, 6000);
+        }
+
+    // Add the confetti CSS
+        const confettiStyles = document.createElement('style');
+        confettiStyles.textContent = `
+            .confetti-container {
+                position: fixed;
+                width: 100%;
+                height: 100%;
+                top: 0;
+                left: 0;
+                pointer-events: none;
+                z-index: 9999;
+            }
+            
+            .confetti {
+                position: absolute;
+                width: 10px;
+                height: 10px;
+                background-color: #f00;
+                top: -10px;
+                animation: confetti-fall 5s linear forwards;
+            }
+            
+            @keyframes confetti-fall {
+                0% {
+                    transform: translateY(0) rotate(0deg);
+                    opacity: 1;
+                }
+                80% {
+                    opacity: 1;
+                }
+                100% {
+                    transform: translateY(100vh) rotate(720deg);
+                    opacity: 0;
+                }
+            }
+        `;
+        document.head.appendChild(confettiStyles);
+
+        socket.on('updateScores', (players) => {
+            updatePlayers(players);
+        });
+
+        function displayQuestion(question, options, questionNumber, totalQuestions) {
+            questionDiv.innerHTML = `<h2>Question ${questionNumber} of ${totalQuestions}</h2><p>${question}</p>`;
+            optionsDiv.innerHTML = options.map((option, index) => `
+                <div>
+                    <input type="radio" id="option${index}" name="answer" value="${index}">
+                    <label for="option${index}">${option}</label>
+                </div>
+            `).join('');
+        }
+
+        function startVisualCountdown(startTimeInSeconds, actualMsRemaining) {
+            let timeRemaining = startTimeInSeconds;
+            
+            // Clear any existing intervals or timeouts to prevent "doubling up"
+            clearInterval(countdownInterval);
+            if (window.syncTimeout) clearTimeout(window.syncTimeout);
+            if (questionTimer) clearTimeout(questionTimer);
+            
+            // Render the starting number immediately
+            countdownTimer.textContent = `Time remaining: ${timeRemaining} seconds`;
+            countdownTimer.style.display = 'block';
+            
+            // OPTION 2: Dynamic interval timing
+            // Calculate the time per tick to fit all numbers into actual remaining time
+            // Example: If we have 9800ms and need to show 10 numbers,
+            // each tick should be 9800/10 = 980ms instead of 1000ms
+            const tickInterval = actualMsRemaining / timeRemaining;
+            
+            // Helper function to handle countdown tick
+            const tickDown = () => {
+                timeRemaining--;
+                
+                if (timeRemaining <= 0) {
+                    // Countdown complete - show time's up and disable button
+                    countdownTimer.textContent = "Time's up!";
+                    submitAnswerBtn.disabled = true;
+                    if (countdownInterval) clearInterval(countdownInterval);
+                    if (window.syncTimeout) clearTimeout(window.syncTimeout);
+                } else {
+                    // Update display with remaining time
+                    countdownTimer.textContent = `Time remaining: ${timeRemaining} seconds`;
+                }
+            };
+            
+            // Start first tick at the calculated interval
+            window.syncTimeout = setTimeout(() => {
+                tickDown();
+                
+                // If there's still time remaining, continue with regular intervals
+                if (timeRemaining > 0) {
+                    countdownInterval = setInterval(tickDown, tickInterval);
+                }
+            }, tickInterval);
+            
+            // Safety net: Force time's up at the exact moment actual time expires
+            // This ensures button is disabled even if intervals drift slightly
+            questionTimer = setTimeout(() => {
+                if (timeRemaining > 0) {
+                    timeRemaining = 0;
+                    countdownTimer.textContent = "Time's up!";
+                    submitAnswerBtn.disabled = true;
+                    if (countdownInterval) clearInterval(countdownInterval);
+                    if (window.syncTimeout) clearTimeout(window.syncTimeout);
+                }
+            }, actualMsRemaining);
+        }
+
+        function updatePlayerUI(players) {
+            playersDiv.innerHTML = '<h2>Players:</h2>' + players.map(p => {
+                const botClass = p.isBot ? ' class="bot-player"' : '';
+                const botIcon = p.isBot ? ' 🤖' : '';
+                const difficultyBadge = p.isBot && p.difficulty ? 
+                    `<span class="difficulty-badge ${p.difficulty.toLowerCase()}">${p.difficulty}</span>` : '';
+                return `
+                    <p${botClass}>
+                        ${p.username}${botIcon}${difficultyBadge}: ${p.score || 0} 
+                        <span class="response-time">(Response time: ${p.totalResponseTime || 0}ms)</span>
+                    </p>`;
+            }).join('');
+        }
+
+        function updatePlayers(players) {
+            updatePlayerUI(players);
+        }
+
+        function resetGame() {
+            // Skip reset if we're in the middle of reconnecting
+            if (isReconnecting) {
+                console.log('Skipping resetGame() - reconnection in progress');
+                return;
+            }
+            
+            currentRoomId = null;
+            playersDiv.innerHTML = '';
+            questionDiv.innerHTML = '';
+            optionsDiv.innerHTML = '';
+            submitAnswerBtn.style.display = 'none';
+            waitingMessage.textContent = '';
+            joinGameBtn.style.display = 'block';
+            joinGameBtn.disabled = false;
+            // (bet selector removed)
+
+            document.body.classList.remove('playing-bot');
+
+            if (questionTimer) {
+                clearTimeout(questionTimer);
+                questionTimer = null;
+            }
+
+            if (window.syncTimeout) clearTimeout(window.syncTimeout);
+
+            if (countdownInterval) {
+                clearInterval(countdownInterval);
+                countdownInterval = null;
+            }
+            countdownTimer.style.display = 'none';
+            countdownTimer.textContent = '';
+
+            const modal = document.getElementById('gameChoiceModal');
+            if (modal && modal.style.display === 'flex') {
+                modal.style.display = 'none';
+            }
+            if (waitingTimeout) {
+                clearTimeout(waitingTimeout);
+                waitingTimeout = null;
+            }
+            
+            currentQuestionId = null;
+            
+            console.log('Game UI reset.');
+        }
+
+        // Reconnection helper functions
+        function showReconnectingOverlay() {
+            const overlay = document.getElementById('reconnectingOverlay');
+            if (overlay) {
+                overlay.style.display = 'flex';
+            }
+        }
+
+        function hideReconnectingOverlay() {
+            const overlay = document.getElementById('reconnectingOverlay');
+            if (overlay) {
+                overlay.style.display = 'none';
+            }
+        }
+
+        function updateReconnectAttemptDisplay() {
+            const attemptCounter = document.getElementById('reconnectAttemptCount');
+            if (attemptCounter) {
+                attemptCounter.textContent = `Attempt ${reconnectAttempts} of ${MAX_RECONNECT_ATTEMPTS}`;
+            }
+        }
+
+        function showNotification(message, type) {
+            const notification = document.getElementById('notification');
+            if (notification) {
+                notification.textContent = message;
+                notification.style.display = 'block';
+
+                // Style based on type
+                if (type === 'success') {
+                    notification.style.backgroundColor = '#d4edda';
+                    notification.style.color = '#155724';
+                    notification.style.border = '1px solid #c3e6cb';
+                } else if (type === 'error') {
+                    notification.style.backgroundColor = '#f8d7da';
+                    notification.style.color = '#721c24';
+                    notification.style.border = '1px solid #f5c6cb';
+                } else {
+                    notification.style.backgroundColor = '#f0f0f0';
+                    notification.style.color = '#333';
+                    notification.style.border = '1px solid #ddd';
+                }
+
+                // Auto-hide after 5 seconds
+                setTimeout(() => {
+                    notification.style.display = 'none';
+                }, 5000);
+            }
+        }
+
+        async function getRecaptchaToken(action) {
+            console.log('getRecaptchaToken called for:', action);
+            
+            if (!window.recaptchaEnabled || !window.grecaptcha || !window.recaptchaSiteKey) {
+                if (window.recaptchaEnabled) {
+                    throw new Error('reCAPTCHA not ready - please refresh the page');
+                }
+                return null;  // Only skip if truly disabled
+            }
+
+            try {
+                // Correct Promise wrapper for grecaptcha.ready()
+                const token = await new Promise((resolve, reject) => {
+                    grecaptcha.ready(() => {
+                        grecaptcha.execute(window.recaptchaSiteKey, { action: action })
+                            .then((token) => {
+                                if (!token) {
+                                    reject(new Error('Empty reCAPTCHA token'));
+                                } else {
+                                    resolve(token);
+                                }
+                            })
+                            .catch(reject);
+                    });
+                });
+                
+                return token;
+            } catch (error) {
+                logError('reCAPTCHA-token-generation', error);
+                throw new Error('Verification failed. Please try again.');
+            }
+        }
+
+
+        function showGameChoiceModal() {
+            console.log('Showing game choice modal');
+            const modal = document.getElementById('gameChoiceModal');
+            modal.style.display = 'flex';
+
+            const botBtn = document.getElementById('playAgainstBotBtn');
+            if (botBtn) botBtn.style.display = isPremium ? 'none' : '';
+
+            document.getElementById('waitForPlayerBtn').onclick = async function() {
+                if (isProcessingBet) return;
+                isProcessingBet = true;
+                try {
+                    modal.style.display = 'none';
+                    if (!connectedWallet) throw new Error('Wallet disconnected. Please reconnect.');
+
+                    this.disabled = true;
+                    this.textContent = 'Joining...';
+
+                    if (currentGameMode === 'tournament' && currentTournamentId) {
+                        waitingMessage.textContent = 'Joining tournament matchmaking...';
+                        socket.emit('joinTournamentGame', {
+                            walletAddress: connectedWallet,
+                            tournamentId: currentTournamentId
+                        });
+                    } else if (isPremium) {
+                        waitingMessage.textContent = 'Looking for a ranked opponent...';
+                        socket.emit('joinHumanMatchmaking', {
+                            walletAddress: connectedWallet,
+                            betAmount: 0
+                        });
+                    } else {
+                        waitingMessage.textContent = 'Looking for another player...';
+                        socket.emit('joinPracticeGame', {
+                            walletAddress: connectedWallet,
+                            gameMode: 'human'
+                        });
+                    }
+                    joinGameBtn.disabled = true;
+                } catch (error) {
+                    logError('human-matchmaking', error);
+                    alert('Error: ' + error.message);
+                    waitingMessage.textContent = 'Error joining game. Please try again.';
+                    resetUIAfterError();
+                } finally {
+                    isProcessingBet = false;
+                    this.disabled = false;
+                    this.textContent = 'Play vs Human';
+                }
+            };
+
+            document.getElementById('playAgainstBotBtn').onclick = async function() {
+                if (isProcessingBet) return;
+                isProcessingBet = true;
+                try {
+                    modal.style.display = 'none';
+                    if (!connectedWallet) throw new Error('Wallet disconnected. Please reconnect.');
+
+                    this.disabled = true;
+                    this.textContent = 'Creating game...';
+                    waitingMessage.textContent = 'Starting bot game...';
+
+                    socket.emit('joinPracticeGame', {
+                        walletAddress: connectedWallet,
+                        gameMode: 'bot'
+                    });
+                    joinGameBtn.disabled = true;
+                } catch (error) {
+                    logError('bot-game', error);
+                    alert('Error: ' + error.message);
+                    waitingMessage.textContent = 'Error starting bot game. Please try again.';
+                    resetUIAfterError();
+                } finally {
+                    isProcessingBet = false;
+                    this.disabled = false;
+                    this.textContent = 'Play Against Bot';
+                }
+            };
+        }
+
+
+        function switchToBotMode() {
+            console.log('Switching to bot mode');
+            waitingForPlayer = false;
+            if (waitingTimeout) {
+                clearTimeout(waitingTimeout);
+            }
+            
+            const modal = document.getElementById('gameChoiceModal');
+            if (modal.style.display === 'flex') {
+                modal.style.display = 'none';
+            }
+            
+            waitingMessage.textContent = 'Starting game against bot...';
+            
+            // Send message to server to start bot game in the current room
+            if (currentRoomId) {
+                console.log('Requesting bot for room:', currentRoomId);
+                socket.emit('requestBotGame', { roomId: currentRoomId });
+            } else {
+                console.error('No room ID available when trying to switch to bot mode');
+                waitingMessage.textContent = 'Error starting bot game. Please try again.';
+                resetJoinUI();
+            }
+        }
+
+        const joinSound = document.getElementById('joinSound');
+        const notification = document.getElementById('notification');
+
+        socket.on('playerJoined', (username) => {
+            console.log(`Player ${username} joined the game`);
+            
+            // Clear any waiting timeout
+            if (waitingTimeout) {
+                clearTimeout(waitingTimeout);
+            }
+            
+            // Make sure game choice modal is closed
+            const modal = document.getElementById('gameChoiceModal');
+            if (modal.style.display === 'flex') {
+                modal.style.display = 'none';
+            }
+            
+            waitingMessage.textContent = `${username} joined. Game is starting...`;
+            
+            // Play sound if available
+            const joinSound = document.getElementById('joinSound');
+            if (joinSound) {
+                joinSound.play();
+            }
+            
+            // Show notification
+            notification.textContent = `${username} has joined the lobby!`;
+            notification.style.display = 'block';
+            joinSound.play();
+            setTimeout(() => {
+                notification.style.display = 'none';
+            }, 3000);
+        });
+
+
+        questionDiv.addEventListener('contextmenu', (event) => {
+            event.preventDefault();
+        });
+
+        socket.on('answerResult', (data) => {
+            const { username, isCorrect, questionId } = data;
+            try {
+                if (username === connectedWallet && questionId === currentQuestionId) {
+                    const selectedOption = document.querySelector(`input[name="answer"][value="${data.selectedAnswer}"]`);
+                    if (selectedOption && selectedOption.parentElement) {
+                        selectedOption.parentElement.classList.add(isCorrect ? 'correct' : 'incorrect');
+                    }
+                }
+            } catch (error) {
+                logError('update-answer-UI', error);
+            }
+        });
+
+        socket.on('playerAnswered', (data) => {
+            if (typeof data === 'string') {
+                waitingMessage.textContent = `${data} has submitted their answer`;
+                return;
+            }
+            
+            const { username, isBot, responseTime, timedOut } = data;
+            if (username !== connectedWallet) {
+                if (isBot) {
+                    waitingMessage.innerHTML = `
+                        <div class="bot-answer">
+                            ${username} 🤖 has answered in ${responseTime}ms
+                            <span class="bot-thinking"></span>
+                        </div>`;
+                    playBotSound('answer');
+                } else {
+                    const responseText = timedOut ? 
+                        `${username} ran out of time!` : 
+                        `${username} has submitted their answer${responseTime ? ` (${responseTime}ms)` : ''}`;
+                    waitingMessage.textContent = responseText;
+                }
+            }
+        });
+
+        socket.on('joinedRoom', (data) => {
+            console.log('Joined room:', data);
+            currentRoomId = data.roomId;
+        });
+
+        socket.on('botRoomCreated', (data) => {
+            console.log('Bot room created:', data);
+            currentRoomId = data.roomId;
+
+            // Now request the bot game in this dedicated room
+            switchToBotMode();
+        });
+
+        socket.on('leftRoom', (data) => {
+            console.log(`Left room ${data.roomId}`);
+            // Reset the current room ID if it matches the one we left
+            if (currentRoomId === data.roomId) {
+                currentRoomId = null;
+            }
+        });
+
+        socket.on('matchmakingJoined', (data) => {
+            console.log('Joined matchmaking pool:', data);
+            currentRoomId = data.waitingRoomId;
+            waitingMessage.textContent = 'Waiting for another player...';
+            
+            // Start a timeout for bot suggestion
+            if (waitingTimeout) {
+                clearTimeout(waitingTimeout);
+            }
+            
+            waitingTimeout = setTimeout(() => {
+                if (currentRoomId) {
+                    waitingMessage.textContent = 'No players found. Would you like to play against a bot instead?';
+                    const playBotBtn = document.createElement('button');
+                    playBotBtn.textContent = 'Play Against Bot';
+                    playBotBtn.className = 'bot-option-btn';
+                    playBotBtn.onclick = () => {
+                        socket.emit('switchToBot', { roomId: currentRoomId });
+                        waitingMessage.textContent = 'Starting game against bot...';
+                    };
+                    waitingMessage.appendChild(document.createElement('br'));
+                    waitingMessage.appendChild(playBotBtn);
+                    
+                    const keepWaitingBtn = document.createElement('button');
+                    keepWaitingBtn.textContent = 'Keep Waiting';
+                    keepWaitingBtn.className = 'bot-option-btn';
+                    keepWaitingBtn.onclick = () => {
+                        waitingMessage.textContent = 'Continuing to wait for another player...';
+                        // Reset the timeout
+                        waitingTimeout = setTimeout(() => {
+                            keepWaitingBtn.onclick();
+                        }, WAITING_TIMEOUT_DURATION);
+                    };
+                    waitingMessage.appendChild(document.createTextNode(' '));
+                    waitingMessage.appendChild(keepWaitingBtn);
+                }
+            }, WAITING_TIMEOUT_DURATION);
+        });
+
+        socket.on('matchFound', async (data) => {
+            console.log('Match found:', data);
+            currentRoomId = data.roomId || data.gameRoomId;
+            waitingMessage.textContent = 'Match found! Game is starting...';
+
+            if (waitingTimeout) {
+                clearTimeout(waitingTimeout);
+                waitingTimeout = null;
+            }
+
+            // Get reCAPTCHA token for playerReady
+            const recaptchaToken = await getRecaptchaToken('player_ready');
+            socket.emit('playerReady', { 
+                roomId: currentRoomId, 
+                preferredMode: 'human',
+                recaptchaToken
+            });
+        });
+
+        socket.on('botGameCreated', async (data) => {
+            console.log('Bot game created:', data);
+            currentRoomId = data.roomId || data.gameRoomId;
+            waitingMessage.textContent = `Starting game against ${data.botName}...`;
+
+            // Get reCAPTCHA token for playerReady
+            const recaptchaToken = await getRecaptchaToken('player_ready');
+            socket.emit('playerReady', { 
+                roomId: currentRoomId, 
+                preferredMode: 'bot',
+                recaptchaToken
+            });
+        });
+
+        socket.on('roundComplete', (data) => {
+            const { questionId, playerResults, correctAnswerText } = data;
+            try {
+                if (questionId !== currentQuestionId) {
+                    console.warn('Received roundComplete for incorrect question ID:', questionId);
+                    return;
+                }
+
+                // Disable further interactions
+                submitAnswerBtn.disabled = true;
+                submitAnswerBtn.style.display = 'none';
+                if (window.syncTimeout) { clearTimeout(window.syncTimeout); window.syncTimeout = null; }
+                if (countdownInterval) { clearInterval(countdownInterval); countdownTimer.textContent = ''; countdownTimer.style.display = 'none'; }
+
+                // Find this player's result
+                const myResult = playerResults.find(r => r.username === connectedWallet);
+
+                // Color the answer options
+                const normalizeText = (text) => text.trim().toLowerCase().replace(/\s+/g, ' ');
+                const optionDivs = document.querySelectorAll('#options div');
+                optionDivs.forEach((div) => {
+                    const label = div.querySelector('label');
+                    const input = div.querySelector('input');
+                    if (!label || !input) return;
+
+                    const optionIndex = parseInt(input.value);
+                    const isCorrectOption = normalizeText(label.textContent) === normalizeText(correctAnswerText);
+                    const isMyAnswer = myResult && optionIndex === myResult.answer;
+
+                    if (isCorrectOption) {
+                        div.classList.add('correct');           // always green the right answer
+                    } else if (isMyAnswer && !myResult.isCorrect) {
+                        div.classList.add('wrong');             // red only MY wrong pick
+                    }
+                });
+
+                // Round results text
+                const resultsHtml = playerResults.map(result => {
+                    const status = result.isCorrect ? '✓ Correct' : result.answer === -1 ? '⏰ Timed Out' : '✗ Incorrect';
+                    const botLabel = result.isBot ? ' 🤖' : '';
+                    return `<p>${status} ${result.username}${botLabel}: ${result.responseTime}ms</p>`;
+                }).join('');
+                playersDiv.innerHTML = `<h2>Round Results:</h2>${resultsHtml}`;
+
+                waitingMessage.innerHTML = `<p class="correct-answer">Correct Answer: ${correctAnswerText}</p>`;
+
+            } catch (error) {
+                logError('roundComplete', error);
+                waitingMessage.innerHTML = `<p class="error-message">Error displaying round results</p>`;
+            }
+        });
+   
+        // Add bot-related CSS
+        const botStyles = document.createElement('style');
+        botStyles.textContent = `
+            .bot-player {
+                color: #0078ff;
+                font-weight: bold;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+            
+            .playing-bot .container {
+                border: 2px solid #0078ff;
+                animation: bot-glow 2s infinite alternate;
+            }
+            
+            .difficulty-badge {
+                font-size: 0.8em;
+                padding: 2px 6px;
+                border-radius: 12px;
+                margin-left: 4px;
+            }
+            
+            .difficulty-badge.easy { background: #4CAF50; color: white; }
+            .difficulty-badge.medium { background: #FFC107; color: black; }
+            .difficulty-badge.hard { background: #F44336; color: white; }
+            
+            .response-time {
+                font-size: 0.9em;
+                opacity: 0.8;
+            }
+            
+            @keyframes bot-glow {
+                from { box-shadow: 0 0 5px rgba(0, 120, 255, 0.5); }
+                to { box-shadow: 0 0 15px rgba(0, 120, 255, 0.8); }
+            }
+            
+            .bot-thinking {
+                display: inline-block;
+                margin-left: 5px;
+                font-size: 12px;
+                color: #0078ff;
+                animation: thinking 1.5s infinite;
+            }
+            
+            @keyframes thinking {
+                0% { content: '.'; }
+                33% { content: '..'; }
+                66% { content: '...'; }
+                100% { content: ''; }
+            }
+            
+            .bot-answer {
+                border-left: 3px solid #0078ff;
+                padding-left: 8px;
+                margin: 4px 0;
+            }
+        `;
+        document.head.appendChild(botStyles);
+
+        // Add bot sound effects (optional)
+        function playBotSound(type) {
+            const sounds = {
+                start: 'bot-start.mp3',
+                answer: 'bot-answer.mp3',
+                win: 'bot-win.mp3',
+                lose: 'bot-lose.mp3'
+            };
+            
+            const sound = sounds[type];
+            if (sound && window.playSound) {
+                window.playSound(sound);
+            }
+        }

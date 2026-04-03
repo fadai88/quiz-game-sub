@@ -16,6 +16,7 @@ const BotDetector     = require('../botDetector');
 const User            = require('../models/User');
 const GameSession     = require('../models/GameSession');
 const { issueChallenge, consumeChallenge } = require('../utils/challengeStore');
+const { getClientIpFromSocket } = require('../middleware/trustedProxy');
 
 const redisService = require('../services/redisService');
 const { SecurityLogger, AuditLogger }  = require('../utils/securityLogger');
@@ -132,7 +133,7 @@ function registerConnectionHandler(io) {
         logger.info('New client connected:', socket.id);
 
         const connectionData = {
-            ip: socket.handshake.headers['x-forwarded-for'] || socket.handshake.address,
+            ip: getClientIpFromSocket(socket),
             userAgent: socket.handshake.headers['user-agent'],
             timestamp: new Date(),
             sessionId: socket.id,
@@ -195,8 +196,7 @@ function registerConnectionHandler(io) {
         //       The server reconstructs it from the stored challenge (H3 fix).
         socket.on('walletLogin', async ({ walletAddress, signature, nonce, recaptchaToken, clientData }) => {
             try {
-                const clientIP = socket.handshake.headers['x-forwarded-for']?.split(',')[0]?.trim()
-                    || socket.handshake.address;
+                const clientIP = getClientIpFromSocket(socket);
 
                 // ── Blocklist checks ──────────────────────────────────────────
                 const isWalletBlocked = await context.redisClient.get(`blocklist:wallet:${walletAddress}`);
@@ -503,7 +503,7 @@ async function handleGameEvent(socket, event, args) {
         const { error } = joinPracticeGameSchema.validate(data);
         if (error) { socket.emit('joinGameFailure', 'Invalid input format'); return; }
         const { walletAddress, gameMode = 'bot' } = data;
-        const clientIP = socket.handshake.headers['x-forwarded-for'] || socket.handshake.address;
+        const clientIP = getClientIpFromSocket(socket);
         await rateLimitEvent(walletAddress, 'joinPracticeGame', clientIP, socket);
 
         if (await isBlockedFn(walletAddress) || await isBlockedFn(clientIP)) {
@@ -580,7 +580,7 @@ async function handleGameEvent(socket, event, args) {
             socket.emit('joinGameFailure', 'Invalid input format'); return;
         }
         const { walletAddress, betAmount, transactionSignature, nonce, recaptchaToken } = data;
-        const clientIP = socket.handshake.headers['x-forwarded-for'] || socket.handshake.address;
+        const clientIP = getClientIpFromSocket(socket);
         await rateLimitEvent(walletAddress, 'joinGame', clientIP, socket);
 
         if (await isBlockedFn(walletAddress) || await isBlockedFn(clientIP)) {
@@ -644,7 +644,7 @@ async function handleGameEvent(socket, event, args) {
         const { error } = requestBotRoomSchema.validate(data);
         if (error) { socket.emit('requestBotRoomFailure', 'Invalid input format'); return; }
         const { walletAddress, betAmount } = data;
-        const clientIP = socket.handshake.headers['x-forwarded-for'] || socket.handshake.address;
+        const clientIP = getClientIpFromSocket(socket);
         await rateLimitEvent(walletAddress, 'requestBotRoom', clientIP, socket);
 
         const { generateRoomId } = require('../utils/helpers');
@@ -676,7 +676,7 @@ async function handleGameEvent(socket, event, args) {
         }
         const { roomId, questionId, answer } = data;
         const walletAddress = socket.user.walletAddress;
-        const clientIP      = socket.handshake.headers['x-forwarded-for'] || socket.handshake.address;
+        const clientIP      = getClientIpFromSocket(socket);
         await rateLimitEvent(walletAddress, 'submitAnswer', clientIP, socket);
 
         const room = await getGameRoom(roomId);
@@ -762,7 +762,7 @@ async function handleGameEvent(socket, event, args) {
         const { error } = joinHumanMatchmakingSchema.validate(data);
         if (error) { socket.emit('matchmakingError', 'Invalid input format'); return; }
         const { walletAddress, betAmount } = data;
-        const clientIP = socket.handshake.headers['x-forwarded-for'] || socket.handshake.address;
+        const clientIP = getClientIpFromSocket(socket);
         await rateLimitEvent(walletAddress, 'joinHumanMatchmaking', clientIP, socket);
 
         const matchUser = await User.findOne({ walletAddress });
