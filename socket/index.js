@@ -304,6 +304,13 @@ function registerConnectionHandler(io) {
         socket.on('walletReconnect', async (walletAddress) => {
             try {
                 logger.info(`Wallet reconnect attempt: ${walletAddress}`);
+
+                // Must already be authenticated and match the session wallet
+                if (!socket.user?.walletAddress || socket.user.walletAddress !== walletAddress) {
+                    socket.emit('reconnectFailure', 'Unauthorized');
+                    return;
+                }
+
                 const user = await User.findOne({ walletAddress });
                 if (!user) { socket.emit('reconnectFailure', 'User not found'); return; }
 

@@ -129,7 +129,26 @@ class SubscriptionService {
             throw new Error(`Transaction failed on-chain: ${JSON.stringify(transaction.meta.err)}`);
         }
 
-        // ── Step 4: Verify USDC payment to treasury ───────────────────────────
+        // ── Step 4: Verify transaction was signed by the authenticated wallet ──
+        const accountKeys = transaction.transaction.message.accountKeys;
+        const senderIndex = accountKeys.findIndex(k => k.toBase58() === walletAddress);
+        if (senderIndex === -1) {
+            await TransactionLog.findOneAndUpdate(
+                { signature: transactionSignature },
+                { status: 'failed', errorMessage: 'Transaction sender verification failed' }
+            ).catch(() => {});
+            throw new Error('Transaction sender verification failed');
+        }
+        const message = transaction.transaction.message;
+        if (senderIndex >= message.header.numRequiredSignatures) {
+            await TransactionLog.findOneAndUpdate(
+                { signature: transactionSignature },
+                { status: 'failed', errorMessage: 'Transaction not signed by expected sender' }
+            ).catch(() => {});
+            throw new Error('Transaction not signed by expected sender');
+        }
+
+        // ── Step 5: Verify USDC payment to treasury ───────────────────────────
         const { preTokenBalances, postTokenBalances } = transaction.meta;
         const usdcChanges = this._calculateTokenChanges(preTokenBalances, postTokenBalances);
 
@@ -156,7 +175,26 @@ class SubscriptionService {
             throw new Error(`Insufficient payment: expected ${expectedAmount} USDC, got ${paidAmount} USDC`);
         }
 
-        // ── Step 5: Cache in Redis (best-effort, 7 days) ──────────────────────
+        // ── Step 6: Transaction age check ─────────────────────────────────────
+        if (!transaction.blockTime) {
+            await TransactionLog.findOneAndUpdate(
+                { signature: transactionSignature },
+                { status: 'failed', errorMessage: 'Transaction missing timestamp' }
+            ).catch(() => {});
+            throw new Error('Transaction missing timestamp');
+        }
+        const SUB_TX_MAX_AGE = 300000; // 5 minutes
+        const txAge = Date.now() - (transaction.blockTime * 1000);
+        if (txAge > SUB_TX_MAX_AGE) {
+            await TransactionLog.findOneAndUpdate(
+                { signature: transactionSignature },
+                { status: 'failed', errorMessage: 'Transaction expired' }
+            ).catch(() => {});
+            throw new Error('Transaction expired — please resubmit with a recent transaction');
+        }
+        logger.info(`[SUB] ✅ Transaction age: ${Math.round(txAge / 1000)}s`);
+
+        // ── Step 7: Cache in Redis (best-effort, 7 days) ──────────────────────
         await safeRedisOp(async () => {
             await context.redisClient.set(redisKey, '1', 'EX', 604800);
         }, null, 'Redis subscription cache write');

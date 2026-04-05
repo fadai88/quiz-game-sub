@@ -18,8 +18,8 @@ async function verifyTransactionWithStatus(signature, maxRetries = 3, retryDelay
         logger.info(`🔍 Verification attempt ${i + 1}/${maxRetries} for ${signature}`);
         const statuses = await cfg.connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
         const status = statuses.value[0];
-        if (status?.confirmationStatus === 'confirmed') {
-            logger.info('✅ Transaction confirmed on blockchain');
+        if (status?.confirmationStatus === 'finalized') {
+            logger.info('✅ Transaction finalized on blockchain');
             return await cfg.connection.getTransaction(signature, { maxSupportedTransactionVersion: 0 });
         }
         if (i < maxRetries - 1) {
@@ -186,7 +186,7 @@ async function verifyAndValidateTransaction(
         await TransactionLog.findOneAndUpdate({ signature }, { status: 'failed', errorMessage: 'Transaction missing timestamp' });
         throw new Error('Transaction missing timestamp');
     }
-    const TX_MAX_AGE = 120000;
+    const TX_MAX_AGE = 300000;
     const txAge = Date.now() - (transaction.blockTime * 1000);
     if (txAge > TX_MAX_AGE) {
         await TransactionLog.findOneAndUpdate({ signature }, { status: 'failed', errorMessage: 'Transaction expired' });
