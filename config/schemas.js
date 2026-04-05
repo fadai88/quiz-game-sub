@@ -83,7 +83,7 @@ const joinPracticeGameSchema = Joi.object({
 
 const joinHumanMatchmakingSchema = Joi.object({
     walletAddress: solanaPublicKey,
-    betAmount:     Joi.number().integer().min(0).default(0).optional(),
+    betAmount:     Joi.number().integer().valid(...VALID_BET_AMOUNTS_ATOMIC).default(0).optional(),
 });
 
 const joinTournamentGameSchema = Joi.object({

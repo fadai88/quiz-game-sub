@@ -75,7 +75,7 @@ router.get('/virtual-balance/:walletAddress', authenticate, async (req, res) => 
 
 // ─── GET /api/payment/:paymentId (unchanged) ─────────────────────────────────
 
-router.get('/payment/:paymentId', async (req, res) => {
+router.get('/payment/:paymentId', authenticate, async (req, res) => {
     try {
         const { error, value } = paymentIdParamSchema.validate(req.params, { abortEarly: false, stripUnknown: true });
         if (error) {

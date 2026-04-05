@@ -502,7 +502,8 @@ async function handleGameEvent(socket, event, args) {
     if (event === 'joinPracticeGame') {
         const { error } = joinPracticeGameSchema.validate(data);
         if (error) { socket.emit('joinGameFailure', 'Invalid input format'); return; }
-        const { walletAddress, gameMode = 'bot' } = data;
+        const walletAddress = socket.user.walletAddress;
+        const { gameMode = 'bot' } = data;
         const clientIP = getClientIpFromSocket(socket);
         await rateLimitEvent(walletAddress, 'joinPracticeGame', clientIP, socket);
 
@@ -643,7 +644,8 @@ async function handleGameEvent(socket, event, args) {
     if (event === 'requestBotRoom') {
         const { error } = requestBotRoomSchema.validate(data);
         if (error) { socket.emit('requestBotRoomFailure', 'Invalid input format'); return; }
-        const { walletAddress, betAmount } = data;
+        const walletAddress = socket.user.walletAddress;
+        const { betAmount } = data;
         const clientIP = getClientIpFromSocket(socket);
         await rateLimitEvent(walletAddress, 'requestBotRoom', clientIP, socket);
 
@@ -761,7 +763,8 @@ async function handleGameEvent(socket, event, args) {
     if (event === 'joinHumanMatchmaking') {
         const { error } = joinHumanMatchmakingSchema.validate(data);
         if (error) { socket.emit('matchmakingError', 'Invalid input format'); return; }
-        const { walletAddress, betAmount } = data;
+        const walletAddress = socket.user.walletAddress;
+        const { betAmount } = data;
         const clientIP = getClientIpFromSocket(socket);
         await rateLimitEvent(walletAddress, 'joinHumanMatchmaking', clientIP, socket);
 
