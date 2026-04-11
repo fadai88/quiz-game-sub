@@ -10,7 +10,7 @@ const TransactionLog = mongoose.model('TransactionLog', new mongoose.Schema({
     walletAddress: String,
     betAmount:     Number,
     verifiedAt:    { type: Date, default: Date.now },
-    status:        { type: String, enum: ['verified', 'replayed', 'failed'] },
+    status:        { type: String, enum: ['pending', 'verified', 'replayed', 'failed'] },
 }));
 
 module.exports = TransactionLog;

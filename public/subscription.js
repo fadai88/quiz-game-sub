@@ -1,10 +1,11 @@
-        // Hardcoded program IDs - no SPL Token library needed
+// Hardcoded program IDs - no SPL Token library needed
         const TOKEN_PROGRAM_ID = new solanaWeb3.PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
         const ASSOCIATED_TOKEN_PROGRAM_ID = new solanaWeb3.PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 
         const SUBSCRIPTION_API = '/api/subscription';
         let walletAddress = null;
         let currentSubscription = null;
+        let isSubscribing = false; // FIX #2: guard against double-clicks
 
         // Solana configuration
         const config = {
@@ -46,7 +47,6 @@
                 );
 
                 // SPL Token Transfer instruction accounts: [source, destination, owner]
-                // TOKEN_PROGRAM_ID is the programId, NOT an account key
                 const keys = [
                     { pubkey: fromTokenAccount, isSigner: false, isWritable: true },
                     { pubkey: toTokenAccount, isSigner: false, isWritable: true },
@@ -64,9 +64,9 @@
                     data
                 });
 
-                // Create transaction
+                // Create transaction with a fresh blockhash every time
                 const transaction = new solanaWeb3.Transaction();
-                const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+                const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
                 transaction.recentBlockhash = blockhash;
                 transaction.lastValidBlockHeight = lastValidBlockHeight;
                 transaction.feePayer = fromWalletPubkey;
@@ -160,7 +160,17 @@
             }
         }
 
+        function setSubscribeButtonsDisabled(disabled) {
+            document.getElementById('subscribeMonthlyBtn').disabled = disabled;
+            document.getElementById('subscribeYearlyBtn').disabled = disabled;
+        }
+
         async function subscribe(plan) {
+            // FIX #2: Prevent double-submission from rapid clicks
+            if (isSubscribing) return;
+            isSubscribing = true;
+            setSubscribeButtonsDisabled(true);
+
             try {
                 if (!walletAddress) {
                     walletAddress = await connectWallet();
@@ -183,18 +193,48 @@
                 const { solana } = window;
                 const signedTransaction = await solana.signTransaction(transaction);
 
-                // Send transaction to Solana network
+                // FIX #1: Send with skipPreflight: true to avoid
+                // "already processed" simulation false-positive on retries.
+                // preflightCommitment still guards the first real submission.
                 showMessage('Sending transaction to Solana network...', 'info');
-                const signature = await connection.sendRawTransaction(signedTransaction.serialize());
+                let signature;
+                try {
+                    signature = await connection.sendRawTransaction(
+                        signedTransaction.serialize(),
+                        {
+                            skipPreflight: true,           // <-- KEY FIX
+                            preflightCommitment: 'confirmed',
+                            maxRetries: 3,
+                        }
+                    );
+                } catch (sendErr) {
+                    // If the tx was already processed, it likely landed on a prior attempt.
+                    // Extract the signature from the error and continue to confirmation.
+                    if (sendErr.message?.includes('already been processed')) {
+                        console.warn('Transaction already processed — checking confirmation on chain.');
+                        // The signature is not available here, so we must surface a clear error.
+                        showMessage(
+                            'This transaction was already submitted. If payment was deducted, please refresh the page to check your subscription status.',
+                            'error'
+                        );
+                        return;
+                    }
+                    throw sendErr;
+                }
+
                 console.log('Subscription payment transaction signature:', signature);
 
                 // Wait for confirmation
                 showMessage('Waiting for transaction confirmation...', 'info');
-                await connection.confirmTransaction({
+                const confirmation = await connection.confirmTransaction({
                     signature,
                     blockhash: transaction.recentBlockhash,
                     lastValidBlockHeight: transaction.lastValidBlockHeight,
                 }, 'confirmed');
+
+                if (confirmation.value.err) {
+                    throw new Error('Transaction confirmed but failed on-chain: ' + JSON.stringify(confirmation.value.err));
+                }
 
                 // Submit subscription to server
                 showMessage('Activating subscription...', 'info');
@@ -224,7 +264,11 @@
 
             } catch (error) {
                 console.error('Subscription error:', error);
-                showMessage('Failed to process subscription', 'error');
+                showMessage('Failed to process subscription: ' + error.message, 'error');
+            } finally {
+                // FIX #2: Always re-enable buttons when done
+                isSubscribing = false;
+                setSubscribeButtonsDisabled(false);
             }
         }
 

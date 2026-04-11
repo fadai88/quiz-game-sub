@@ -40,85 +40,103 @@ class SubscriptionService {
     async verifySubscriptionPayment(transactionSignature, walletAddress, expectedAmount) {
         logger.info(`[SUB] Verifying subscription payment: ${transactionSignature} from ${walletAddress}`);
 
-        // ── Step 1: Replay prevention — MongoDB atomic upsert (H2 fix) ───────
-        // findOneAndUpdate with upsert:true, new:false returns the *pre-existing*
-        // document if one was found, or null if this is the first insert.
-        // A duplicate-key error (11000) means a concurrent request beat us to it.
+        // ── Step 1: Replay prevention — MongoDB atomic upsert ────────────────
+        // We use 'pending' status here and only promote to 'verified' after the
+        // full on-chain check succeeds (Step 3+).  This prevents a failed
+        // blockchain lookup from permanently "burning" a valid signature.
+        //
+        // Allowed transitions:
+        //   null       → insert as 'pending'   (first attempt)
+        //   'pending'  → allow retry            (previous attempt failed on-chain)
+        //   'failed'   → allow retry            (previous attempt failed on-chain)
+        //   'verified' → reject                 (genuine replay attack)
+        const redisKey = `tx:${transactionSignature}`;
         try {
-            const existing = await TransactionLog.findOneAndUpdate(
-                { signature: transactionSignature },
-                {
-                    $setOnInsert: {
-                        signature:     transactionSignature,
-                        walletAddress,
-                        betAmount:     expectedAmount,    // reusing field for USDC amount
-                        verifiedAt:    new Date(),
-                        status:        'verified',
-                    },
-                },
-                { upsert: true, new: false, runValidators: true }
-            );
+            const existing = await TransactionLog.findOne({ signature: transactionSignature });
 
             if (existing !== null) {
-                // Document already existed → this signature was used before.
-                logger.error(`[SUB] ❌ REPLAY ATTACK: signature ${transactionSignature} already in TransactionLog`);
-                SecurityLogger.log('subscription_replay_attack', {
-                    transactionSignature,
+                if (existing.status === 'verified') {
+                    // This signature was already successfully processed.
+                    logger.error(`[SUB] ❌ REPLAY ATTACK: signature ${transactionSignature} already verified in TransactionLog`);
+                    SecurityLogger.log('subscription_replay_attack', {
+                        transactionSignature,
+                        walletAddress,
+                        existingStatus: existing.status,
+                    });
+                    throw new Error('Transaction already processed — replay attack prevented');
+                }
+                // 'pending' or 'failed' — a prior attempt did not complete successfully.
+                // Allow this request to proceed; it will overwrite status on success.
+                logger.info(`[SUB] ℹ️  Retrying previously ${existing.status} signature ${transactionSignature}`);
+            } else {
+                // First time we've seen this signature — insert a 'pending' sentinel
+                // so concurrent requests are blocked by the unique index (code 11000).
+                await TransactionLog.create({
+                    signature:     transactionSignature,
                     walletAddress,
-                    existingStatus: existing.status,
+                    betAmount:     expectedAmount,
+                    verifiedAt:    new Date(),
+                    status:        'pending',
                 });
-                throw new Error('Transaction already processed — replay attack prevented');
+                logger.info(`[SUB] ✅ Replay check passed — signature recorded as pending`);
             }
-
-            logger.info(`[SUB] ✅ Replay check passed — signature recorded in TransactionLog`);
         } catch (dbErr) {
             if (dbErr.code === 11000) {
-                // Race condition: two concurrent requests, other won.
+                // Race condition: concurrent request inserted the sentinel first.
+                // Treat like a verified replay to be safe.
                 logger.error(`[SUB] ❌ RACE / REPLAY: duplicate key for ${transactionSignature}`);
                 throw new Error('Transaction already processed');
             }
             if (dbErr.message.includes('replay') || dbErr.message.includes('already processed')) {
-                throw dbErr; // Re-throw our own errors from above.
+                throw dbErr;
             }
             logger.error('[SUB] ❌ MongoDB audit write failed:', { error: dbErr.message });
             throw new Error('Audit service unavailable — cannot process subscription');
         }
 
-        // ── Step 2: Redis cache check — fast second layer (H2 fix) ───────────
-        const redisKey = `tx:${transactionSignature}`;
+        // ── Step 2: Redis cache check — fast second layer ─────────────────────
         await safeRedisOp(async () => {
             const cached = await context.redisClient.get(redisKey);
             if (cached) {
-                // MongoDB already blocked the true replay above; this branch only
-                // fires if Redis is ahead of Mongo (edge case).  Log and continue —
-                // Mongo is the authoritative store.
                 logger.warn(`[SUB] ⚠️  Redis cache hit for ${redisKey} (Mongo is authoritative)`);
             }
         }, null, 'Redis subscription signature check');
 
         // ── Step 3: Fetch & validate the on-chain transaction ─────────────────
-        let transaction;
-        try {
-            transaction = await this.connection.getTransaction(transactionSignature, {
-                commitment: 'finalized',          // H1 fix: must be finalized, not confirmed
-                maxSupportedTransactionVersion: 0,
-            });
-        } catch (rpcErr) {
-            // Mark the TransactionLog entry as failed so a legitimate retry is possible.
-            await TransactionLog.findOneAndUpdate(
-                { signature: transactionSignature },
-                { status: 'failed', errorMessage: rpcErr.message }
-            ).catch(() => {});
-            logger.error('[SUB] ❌ RPC fetch failed:', { error: rpcErr.message });
-            throw new Error('Failed to fetch transaction from blockchain — please try again');
+        // Solana `finalized` commitment can take ~15–32 slots after broadcast.
+        // Poll with backoff instead of failing immediately when null is returned.
+        const TX_POLL_ATTEMPTS  = 10;
+        const TX_POLL_INTERVAL  = 3000; // ms between attempts
+        let transaction = null;
+        for (let attempt = 1; attempt <= TX_POLL_ATTEMPTS; attempt++) {
+            try {
+                transaction = await this.connection.getTransaction(transactionSignature, {
+                    commitment: 'finalized',
+                    maxSupportedTransactionVersion: 0,
+                });
+            } catch (rpcErr) {
+                await TransactionLog.findOneAndUpdate(
+                    { signature: transactionSignature },
+                    { status: 'failed', errorMessage: rpcErr.message }
+                ).catch(() => {});
+                logger.error('[SUB] ❌ RPC fetch failed:', { error: rpcErr.message });
+                throw new Error('Failed to fetch transaction from blockchain — please try again');
+            }
+
+            if (transaction !== null) break;
+
+            if (attempt < TX_POLL_ATTEMPTS) {
+                logger.info(`[SUB] ⏳ Transaction not yet finalized, waiting (attempt ${attempt}/${TX_POLL_ATTEMPTS})…`);
+                await new Promise(resolve => setTimeout(resolve, TX_POLL_INTERVAL));
+            }
         }
 
         if (!transaction) {
             await TransactionLog.findOneAndUpdate(
                 { signature: transactionSignature },
-                { status: 'failed', errorMessage: 'Transaction not found' }
+                { status: 'failed', errorMessage: 'Transaction not found after polling' }
             ).catch(() => {});
-            throw new Error('Transaction not found on blockchain');
+            throw new Error('Transaction not found on blockchain — it may not be finalized yet, please retry in a moment');
         }
 
         if (transaction.meta.err) {
@@ -194,7 +212,15 @@ class SubscriptionService {
         }
         logger.info(`[SUB] ✅ Transaction age: ${Math.round(txAge / 1000)}s`);
 
-        // ── Step 7: Cache in Redis (best-effort, 7 days) ──────────────────────
+        // ── Step 7: Promote TransactionLog status to 'verified' ──────────
+        // Only now — after all checks pass — do we mark the signature as fully
+        // verified. Replay protection for future requests relies on this status.
+        await TransactionLog.findOneAndUpdate(
+            { signature: transactionSignature },
+            { status: 'verified', verifiedAt: new Date() }
+        ).catch(err => logger.error('[SUB] ❌ Failed to promote TransactionLog to verified:', { error: err.message }));
+
+        // ── Step 8: Cache in Redis (best-effort, 7 days) ──────────────────────
         await safeRedisOp(async () => {
             await context.redisClient.set(redisKey, '1', 'EX', 604800);
         }, null, 'Redis subscription cache write');

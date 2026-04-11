@@ -47,6 +47,7 @@ require('dotenv').config();
 const { ENVIRONMENT }       = require('./config/constants');
 const context               = require('./context');
 const logger                = require('./logger');
+const { authenticate, requireAdmin } = require('./middleware/authenticate');
 const { httpRequestLogger, socketLogger, errorHandler } = require('./middleware/requestLogger');
 const securityHeaders       = require('./middleware/securityHeaders');
 const { getCachedTreasurySecretKey } = require('./aws-secrets-integration');
@@ -105,6 +106,9 @@ app.get('/game.html', (req, res) => {
         window.recaptchaSiteKey = "${siteKey}";
     </script></head>`);
     res.send(html);
+});
+app.get('/admin-tournaments.html', authenticate, requireAdmin, (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'admin-tournaments.html'));
 });
 app.use(express.static(path.join(__dirname, 'public')));
 

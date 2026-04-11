@@ -1,5 +1,3 @@
-// Update models/User.js to also fix the email field issue:
-
 const mongoose = require('mongoose');
 
 const UserSchema = new mongoose.Schema({
