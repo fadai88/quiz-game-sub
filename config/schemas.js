@@ -68,7 +68,6 @@ const playerReadySchema = Joi.object({
 
 const switchToBotSchema     = Joi.object({ roomId: roomIdSchema });
 const requestBotRoomSchema  = Joi.object({
-    walletAddress: solanaPublicKey,
     betAmount:     Joi.number().integer().valid(...VALID_BET_AMOUNTS_ATOMIC).required(),
     nonce:         nonceSchema.optional(),
 });
@@ -77,12 +76,10 @@ const leaveRoomSchema       = Joi.object({ roomId: roomIdSchema });
 const matchFoundSchema      = Joi.object({ newRoomId: roomIdSchema });
 
 const joinPracticeGameSchema = Joi.object({
-    walletAddress: solanaPublicKey,
     gameMode:      Joi.string().valid('bot', 'human').optional().default('bot'),
 });
 
 const joinHumanMatchmakingSchema = Joi.object({
-    walletAddress: solanaPublicKey,
     betAmount:     Joi.number().integer().valid(...VALID_BET_AMOUNTS_ATOMIC).default(0).optional(),
 });
 

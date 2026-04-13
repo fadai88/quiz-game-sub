@@ -67,7 +67,7 @@ function registerSocketAuthMiddleware(io) {
             }
 
             const incomingEvent = socket.handshake.auth?.event || '';
-            if (incomingEvent === 'walletLogin' || incomingEvent === 'walletReconnect') {
+            if (incomingEvent === 'walletLogin') {
                 return next();
             }
 
@@ -113,13 +113,15 @@ async function validateSocketSession(socket, eventName) {
 
     const { walletAddress } = socket.user;
     try {
-        const sessionToken = socket.user.sessionToken;
+        const currentToken = await context.redisClient.get(`session:wallet:${walletAddress}`);
+        /*
         if (!sessionToken) {
             socket.emit('error', { message: 'Session expired: Please login again', code: 'SESSION_EXPIRED' });
             socket.disconnect(true);
             return false;
         }
-        const session = await context.redisClient.get(`session:${sessionToken}`);
+        */
+        const session = currentToken ? await context.redisClient.get(`session:${currentToken}`) : null;
         if (!session) {
             socket.emit('error', { message: 'Session expired: Please login again', code: 'SESSION_EXPIRED' });
             socket.disconnect(true);
@@ -492,6 +494,55 @@ function registerConnectionHandler(io) {
                 socket.roomId = null;
             }
         });
+
+        socket.on('requestGameRestore', async () => {
+            try {
+                // walletAddress comes from the authenticated session only
+                const walletAddress = socket.user?.walletAddress;
+                if (!walletAddress) {
+                    socket.emit('gameRestoreFailed', 'Unauthorized');
+                    return;
+                }
+
+                const activeGame = await findPlayerActiveRoom(walletAddress);
+                if (!activeGame) {
+                    socket.emit('gameRestoreFailed', 'No active game found');
+                    return;
+                }
+
+                const { roomId, room } = activeGame;
+                socket.roomId = roomId;
+                await socket.join(roomId);
+
+                const playerIndex = room.players.findIndex(p => p.username === walletAddress);
+                if (playerIndex !== -1) {
+                    room.players[playerIndex].socketId = socket.id;
+                    await updateGameRoom(roomId, room);
+                }
+
+                const currentQ = room.gameStarted && room.questions.length > 0
+                    ? room.questions[Math.max(0, room.currentQuestionIndex)] : null;
+
+                socket.emit('gameStateRestore', {
+                    roomId,
+                    players: room.players,
+                    currentQuestionIndex: room.currentQuestionIndex,
+                    gameStarted: room.gameStarted,
+                    currentQuestion: currentQ ? {
+                        questionId: currentQ.tempId,
+                        question:   currentQ.question,
+                        options:    currentQ.shuffledOptions,
+                        questionNumber: room.currentQuestionIndex + 1,
+                        totalQuestions: room.questions.length,
+                    } : null,
+                });
+
+                logger.info(`[RESTORE] Game restored for ${walletAddress} in room ${roomId}`);
+            } catch (error) {
+                logger.error('[RESTORE] Error restoring game:', { error: error.message });
+                socket.emit('gameRestoreFailed', 'Restore failed');
+            }
+        });
     });
 }
 
@@ -584,10 +635,11 @@ async function handleGameEvent(socket, event, args) {
     if (event === 'joinGame') {
         const { error } = transactionSchema.validate(data);
         if (error) {
-            trackValidationFailure(data?.walletAddress || socket.handshake.address, 'joinGame', error.message);
+            trackValidationFailure(socket.user?.walletAddress || socket.handshake.address, 'joinGame', error.message);
             socket.emit('joinGameFailure', 'Invalid input format'); return;
         }
-        const { walletAddress, betAmount, transactionSignature, nonce, recaptchaToken } = data;
+        const walletAddress = socket.user.walletAddress;
+        const { betAmount, transactionSignature, nonce, recaptchaToken } = data;
         const clientIP = getClientIpFromSocket(socket);
         await rateLimitEvent(walletAddress, 'joinGame', clientIP, socket);
 

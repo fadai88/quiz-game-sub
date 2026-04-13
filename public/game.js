@@ -127,7 +127,6 @@
                         } else {
                             // Try to restore via explicit request
                             socket.emit('requestGameRestore', {
-                                walletAddress: connectedWallet,
                                 roomId: currentRoomId
                             });
                         }
@@ -1328,6 +1327,15 @@
                 players: data.players.map(p => p.username),
                 gameStarted: data.gameStarted
             });
+        });
+
+        socket.on('gameRestoreFailed', () => {
+            hideReconnectingOverlay();
+            isReconnecting = false;
+            hasGameToRestore = false;
+            reconnectAttempts = 0;
+            resetGame();
+            showNotification('Unable to restore game session. Please start a new game.', 'error');
         });
 
         const forfeitStyles = document.createElement('style');
