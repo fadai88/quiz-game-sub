@@ -836,7 +836,7 @@
         
         joinGameBtn.addEventListener('click', async () => {
             try {
-                if (!connectedWallet || !window.solana?.isConnected) {
+                if (!connectedWallet) {
                     alert('Please connect your wallet first');
                     return;
                 }

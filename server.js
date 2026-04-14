@@ -99,11 +99,12 @@ app.use(httpRequestLogger);
 app.get('/game.html', (req, res) => {
     let html = fs.readFileSync(path.join(__dirname, 'public', 'game.html'), 'utf8');
     const enabled = process.env.ENABLE_RECAPTCHA === 'true';
-    const siteKey = process.env.RECAPTCHA_SITE_KEY || '';
-    html = html.replace(/YOUR_SITE_KEY/g, siteKey);
-    html = html.replace('</head>', `<script>
+    const safeSiteKey = (process.env.RECAPTCHA_SITE_KEY || '').replace(/[^a-zA-Z0-9_\-]/g, '');
+    const nonce = res.locals.cspNonce;
+    html = html.replace(/YOUR_SITE_KEY/g, safeSiteKey);
+    html = html.replace('</head>', `<script nonce="${nonce}">
         window.recaptchaEnabled = ${enabled};
-        window.recaptchaSiteKey = "${siteKey}";
+        window.recaptchaSiteKey = "${safeSiteKey}";
     </script></head>`);
     res.send(html);
 });

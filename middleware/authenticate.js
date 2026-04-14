@@ -3,11 +3,9 @@
  * Session-based HTTP authentication and admin guard.
  */
 
-const crypto  = require('crypto');
 const logger  = require('../logger');
 const context = require('../context');
 const User    = require('../models/User');
-const { COOKIE_OPTIONS } = require('../config/constants');
 
 async function authenticate(req, res, next) {
     try {
@@ -24,13 +22,12 @@ async function authenticate(req, res, next) {
         const user        = await User.findOne({ walletAddress: sessionData.walletAddress });
         if (!user) return res.status(401).json({ success: false, error: 'User not found' });
 
-        // Rotate session token to limit the window of a leaked token
-        const newToken = crypto.randomBytes(32).toString('hex');
-        const ttl      = 86400; // 24 h
-        await context.redisClient.set(`session:${newToken}`, sessionDataStr, 'EX', ttl);
-        await context.redisClient.set(`session:wallet:${sessionData.walletAddress}`, newToken, 'EX', ttl);
-        await context.redisClient.del(`session:${sessionToken}`);
-        res.cookie('sessionToken', newToken, COOKIE_OPTIONS);
+        // Extend TTL on each use without rotating the token — rotation on every
+        // request causes a race condition where the socket auth middleware (which
+        // validated the old token at handshake time) sees it deleted mid-flight.
+        // Token rotation happens only at login (routes/auth.js).
+        await context.redisClient.expire(`session:${sessionToken}`, 86400);
+        await context.redisClient.expire(`session:wallet:${sessionData.walletAddress}`, 86400);
 
         req.user = { id: user._id, walletAddress: sessionData.walletAddress };
         next();
