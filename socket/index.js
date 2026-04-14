@@ -129,7 +129,7 @@ async function validateSocketSession(socket, eventName) {
         }
         const sessionData = JSON.parse(session);
         if (Date.now() - sessionData.timestamp > 24 * 60 * 60 * 1000) {
-            await context.redisClient.del(`session:${sessionToken}`);
+            await context.redisClient.del(`session:${currentToken}`);
             socket.emit('error', { message: 'Session expired: Please login again', code: 'SESSION_EXPIRED' });
             socket.disconnect(true);
             return false;

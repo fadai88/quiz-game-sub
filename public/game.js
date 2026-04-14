@@ -223,6 +223,8 @@
         let isReconnecting = false;
         let reconnectAttempts = 0;
         let hasGameToRestore = false;
+        let inMatchmakingQueue = false;
+        let waitingRoomId = null;
         const MAX_RECONNECT_ATTEMPTS = 5;
         let serverTimeOffset = 0;
 
@@ -753,8 +755,6 @@
         }
 
 
-        window.addEventListener('load', initializeFromSession);
-
         window.solana?.on('disconnect', async () => {
             console.log('Wallet disconnected');
             if (balanceUpdateInterval) {
@@ -1067,6 +1067,12 @@
             console.log('Received game over data:', data);
             const { players, winner, singlePlayerMode, botOpponent, error, gameMode, tournamentId, prizeAmount } = data;
 
+            // Clear currentRoomId immediately so a socket drop during the results
+            // display window does not trigger the reconnect overlay
+            currentRoomId = null;
+            inMatchmakingQueue = false;
+            waitingRoomId = null;
+
             // Clear timers
             if (questionTimer) clearTimeout(questionTimer);
             if (window.syncTimeout) clearTimeout(window.syncTimeout);
@@ -1210,8 +1216,7 @@
                 updateReconnectAttemptDisplay();
                 // Do NOT call resetGame() - we want to preserve state for restoration
             } else {
-                // Player was not in a game - show simple message
-                alert('You have been disconnected from the game server. Please refresh the page to reconnect.');
+                // Not in a game — silent reset, Socket.IO will auto-reconnect
                 resetGame();
             }
         });
@@ -1517,13 +1522,14 @@
         }
 
         function resetGame() {
-            // Skip reset if we're in the middle of reconnecting
-            if (isReconnecting) {
-                console.log('Skipping resetGame() - reconnection in progress');
-                return;
-            }
-            
+            // Clear reconnection state first — never block cleanup
+            isReconnecting = false;
+            hasGameToRestore = false;
+            hideReconnectingOverlay();
+
             currentRoomId = null;
+            inMatchmakingQueue = false;
+            waitingRoomId = null;
             playersDiv.innerHTML = '';
             questionDiv.innerHTML = '';
             optionsDiv.innerHTML = '';
@@ -1852,22 +1858,24 @@
 
         socket.on('matchmakingJoined', (data) => {
             console.log('Joined matchmaking pool:', data);
-            currentRoomId = data.waitingRoomId;
+            inMatchmakingQueue = true;
+            waitingRoomId = data.waitingRoomId;
+            // Do NOT set currentRoomId — waitingRoomId is a queue placeholder, not a real room
             waitingMessage.textContent = 'Waiting for another player...';
-            
+
             // Start a timeout for bot suggestion
             if (waitingTimeout) {
                 clearTimeout(waitingTimeout);
             }
-            
+
             waitingTimeout = setTimeout(() => {
-                if (currentRoomId) {
+                if (inMatchmakingQueue) {
                     waitingMessage.textContent = 'No players found. Would you like to play against a bot instead?';
                     const playBotBtn = document.createElement('button');
                     playBotBtn.textContent = 'Play Against Bot';
                     playBotBtn.className = 'bot-option-btn';
                     playBotBtn.onclick = () => {
-                        socket.emit('switchToBot', { roomId: currentRoomId });
+                        socket.emit('switchToBot', { roomId: waitingRoomId });
                         waitingMessage.textContent = 'Starting game against bot...';
                     };
                     waitingMessage.appendChild(document.createElement('br'));
@@ -1891,6 +1899,8 @@
 
         socket.on('matchFound', async (data) => {
             console.log('Match found:', data);
+            inMatchmakingQueue = false;
+            waitingRoomId = null;
             currentRoomId = data.roomId || data.gameRoomId;
             waitingMessage.textContent = 'Match found! Game is starting...';
 
