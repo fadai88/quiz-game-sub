@@ -80,7 +80,7 @@ const joinPracticeGameSchema = Joi.object({
 });
 
 const joinHumanMatchmakingSchema = Joi.object({
-    betAmount:     Joi.number().integer().valid(...VALID_BET_AMOUNTS_ATOMIC).default(0).optional(),
+    betAmount:     Joi.number().integer().valid(0, ...VALID_BET_AMOUNTS_ATOMIC).default(0).optional(),
 });
 
 const joinTournamentGameSchema = Joi.object({

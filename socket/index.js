@@ -114,26 +114,14 @@ async function validateSocketSession(socket, eventName) {
     const { walletAddress } = socket.user;
     try {
         const currentToken = await context.redisClient.get(`session:wallet:${walletAddress}`);
-        /*
-        if (!sessionToken) {
-            socket.emit('error', { message: 'Session expired: Please login again', code: 'SESSION_EXPIRED' });
-            socket.disconnect(true);
-            return false;
-        }
-        */
         const session = currentToken ? await context.redisClient.get(`session:${currentToken}`) : null;
         if (!session) {
             socket.emit('error', { message: 'Session expired: Please login again', code: 'SESSION_EXPIRED' });
             socket.disconnect(true);
             return false;
         }
-        const sessionData = JSON.parse(session);
-        if (Date.now() - sessionData.timestamp > 24 * 60 * 60 * 1000) {
-            await context.redisClient.del(`session:${currentToken}`);
-            socket.emit('error', { message: 'Session expired: Please login again', code: 'SESSION_EXPIRED' });
-            socket.disconnect(true);
-            return false;
-        }
+        // Redis TTL (set at login, slid by authenticate middleware) is the
+        // authoritative expiry — no manual timestamp check needed here.
         return true;
     } catch (error) {
         socket.emit('error', { message: 'Authentication error occurred', code: 'AUTH_ERROR' });
@@ -724,6 +712,10 @@ async function handleGameEvent(socket, event, args) {
     if (event === 'requestBotGame') {
         const { error } = requestBotGameSchema.validate(data);
         if (error) { socket.emit('gameError', 'Invalid room ID'); return; }
+        if (socket.roomId !== data.roomId) {
+            socket.emit('gameError', 'Unauthorized room access');
+            return;
+        }
         await startSinglePlayerGame(data.roomId);
         return;
     }
@@ -900,6 +892,101 @@ async function handleGameEvent(socket, event, args) {
         const allReady = room.players.filter(p => !p.isBot).every(p => p.ready);
         if (allReady && room.players.filter(p => !p.isBot).length >= 1) {
             await startGame(roomId);
+        }
+        return;
+    }
+
+    // ── joinTournamentGame ─────────────────────────────────────────────────────
+    if (event === 'joinTournamentGame') {
+        const { error } = joinTournamentGameSchema.validate(data);
+        if (error) { socket.emit('joinGameFailure', 'Invalid input format'); return; }
+
+        const walletAddress = socket.user.walletAddress;
+        const { tournamentId } = data;
+        const clientIP = getClientIpFromSocket(socket);
+        await rateLimitEvent(walletAddress, 'joinTournamentGame', clientIP, socket);
+
+        try {
+            const user = await User.findOne({ walletAddress });
+            if (!user) { socket.emit('joinGameFailure', 'User not found'); return; }
+            if (!user.hasPremiumAccess()) { socket.emit('joinGameFailure', 'Premium subscription required'); return; }
+
+            const ts = context.tournamentService;
+            const tournament = await ts.getTournament(tournamentId);
+            if (!tournament) { socket.emit('joinGameFailure', 'Tournament not found'); return; }
+
+            const isRegistered = tournament.participants.some(
+                p => p.userId.toString() === user._id.toString()
+            );
+            if (!isRegistered) { socket.emit('joinGameFailure', 'Not registered for this tournament'); return; }
+
+            // Leave any existing room
+            if (socket.roomId) {
+                const oldRoomId = socket.roomId;
+                try {
+                    const result = await atomicRoomUpdate(oldRoomId, async (r) => {
+                        const idx = r.players.findIndex(p => p.username === walletAddress);
+                        if (idx === -1) throw new Error('Player not in room');
+                        r.players.splice(idx, 1);
+                        r._isEmpty = r.players.length === 0;
+                        return r;
+                    });
+                    socket.leave(oldRoomId);
+                    socket.roomId = null;
+                    if (result._isEmpty) await deleteGameRoom(oldRoomId);
+                } catch (cleanupErr) {
+                    if (!cleanupErr.message.includes('not found') && cleanupErr.message !== 'Player not in room') throw cleanupErr;
+                }
+            }
+
+            const { generateRoomId } = require('../utils/helpers');
+            const redisClient = context.redisClient;
+            const queueKey = `matchmaking:tournament:${tournamentId}`;
+
+            // Check for a waiting opponent first
+            const opponentJson = await redisClient.lpop(queueKey);
+
+            if (opponentJson) {
+                const opponent = JSON.parse(opponentJson);
+                const roomId = generateRoomId();
+                const room = await createGameRoom(roomId, 0, 'human', { gameMode: 'tournament', tournamentId, isPractice: false });
+
+                room.players.push(
+                    { id: socket.id,       username: walletAddress,          score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false },
+                    { id: opponent.socketId, username: opponent.walletAddress, score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false }
+                );
+                await updateGameRoom(roomId, room);
+
+                socket.join(roomId);
+                socket.roomId = roomId;
+
+                const opponentSocket = context.io.sockets.sockets.get(opponent.socketId);
+                if (opponentSocket) { opponentSocket.join(roomId); opponentSocket.roomId = roomId; }
+
+                context.io.to(roomId).emit('matchFound', {
+                    gameRoomId: roomId, players: [walletAddress, opponent.walletAddress],
+                    mode: 'tournament', tournamentId,
+                });
+                await startGame(roomId);
+            } else {
+                // No opponent yet — create room and join queue
+                const roomId = generateRoomId();
+                const room = await createGameRoom(roomId, 0, 'human', { gameMode: 'tournament', tournamentId, isPractice: false });
+                room.players.push({ id: socket.id, username: walletAddress, score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false });
+                await updateGameRoom(roomId, room);
+                socket.join(roomId);
+                socket.roomId = roomId;
+
+                await redisClient.lpush(queueKey, JSON.stringify({ socketId: socket.id, walletAddress, joinTime: Date.now() }));
+                await redisClient.expire(queueKey, 600); // 10-minute queue TTL
+
+                socket.emit('matchmakingJoined', { waitingRoomId: `tournament-${tournamentId}`, mode: 'tournament', tournamentId });
+            }
+
+            await logGameRoomsState();
+        } catch (err) {
+            logger.error('[joinTournamentGame] Error:', { error: err.message });
+            socket.emit('joinGameFailure', 'Failed to join tournament game');
         }
         return;
     }

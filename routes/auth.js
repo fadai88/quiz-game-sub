@@ -83,9 +83,14 @@ router.post('/login', async (req, res) => {
 
 // ─── POST /api/auth/logout ────────────────────────────────────────────────────
 
-router.post('/logout', (req, res) => {
+router.post('/logout', async (req, res) => {
     const { sessionToken } = req.signedCookies;
-    if (sessionToken) context.redisClient.del(`session:${sessionToken}`).catch(console.error);
+    if (sessionToken) {
+        const raw = await context.redisClient.get(`session:${sessionToken}`).catch(() => null);
+        const walletAddress = raw ? JSON.parse(raw).walletAddress : null;
+        await context.redisClient.del(`session:${sessionToken}`).catch(console.error);
+        if (walletAddress) await context.redisClient.del(`session:wallet:${walletAddress}`).catch(console.error);
+    }
     res.clearCookie('sessionToken');
     res.json({ success: true });
 });

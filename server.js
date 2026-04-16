@@ -48,6 +48,7 @@ const { ENVIRONMENT }       = require('./config/constants');
 const context               = require('./context');
 const logger                = require('./logger');
 const { authenticate, requireAdmin } = require('./middleware/authenticate');
+const { getClientIpFromRequest }    = require('./middleware/trustedProxy');
 const { httpRequestLogger, socketLogger, errorHandler } = require('./middleware/requestLogger');
 const securityHeaders       = require('./middleware/securityHeaders');
 const { getCachedTreasurySecretKey } = require('./aws-secrets-integration');
@@ -95,18 +96,27 @@ app.use(express.json());
 app.use(cookieParser(SESSION_SECRET));
 app.use(httpRequestLogger);
 
-// ─── game.html — inject reCAPTCHA config ─────────────────────────────────────
+// ─── HTML templates — read once at startup, inject nonce per request ─────────
+const recaptchaEnabled = process.env.ENABLE_RECAPTCHA === 'true';
+const safeSiteKey      = (process.env.RECAPTCHA_SITE_KEY || '').replace(/[^a-zA-Z0-9_\-]/g, '');
+const gameHtmlTemplate  = fs.readFileSync(path.join(__dirname, 'public', 'game.html'),  'utf8')
+    .replace(/YOUR_SITE_KEY/g, safeSiteKey);
+const loginHtmlTemplate = fs.readFileSync(path.join(__dirname, 'public', 'login.html'), 'utf8')
+    .replace(/YOUR_SITE_KEY/g, safeSiteKey);
+
 app.get('/game.html', (req, res) => {
-    let html = fs.readFileSync(path.join(__dirname, 'public', 'game.html'), 'utf8');
-    const enabled = process.env.ENABLE_RECAPTCHA === 'true';
-    const safeSiteKey = (process.env.RECAPTCHA_SITE_KEY || '').replace(/[^a-zA-Z0-9_\-]/g, '');
     const nonce = res.locals.cspNonce;
-    html = html.replace(/YOUR_SITE_KEY/g, safeSiteKey);
-    html = html.replace('</head>', `<script nonce="${nonce}">
-        window.recaptchaEnabled = ${enabled};
+    res.send(gameHtmlTemplate.replace('</head>', `<script nonce="${nonce}">
+        window.recaptchaEnabled = ${recaptchaEnabled};
         window.recaptchaSiteKey = "${safeSiteKey}";
-    </script></head>`);
-    res.send(html);
+    </script></head>`));
+});
+app.get('/login.html', (req, res) => {
+    const nonce = res.locals.cspNonce;
+    res.send(loginHtmlTemplate.replace('</head>', `<script nonce="${nonce}">
+        window.recaptchaEnabled = ${recaptchaEnabled};
+        window.recaptchaSiteKey = "${safeSiteKey}";
+    </script></head>`));
 });
 app.get('/admin-tournaments.html', authenticate, requireAdmin, (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'admin-tournaments.html'));
@@ -122,7 +132,7 @@ app.use('/api/admin/tournaments', adminTournamentRouter);
 
 // ─── Admin honeypot ───────────────────────────────────────────────────────────
 app.get('/admin', (req, res) => {
-    const clientIP = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    const clientIP = getClientIpFromRequest(req);
     logger.warn(`Potential bot detected accessing admin honeypot: ${clientIP}`);
     if (context.redisClient) context.redisClient.set(`blocklist:${clientIP}`, 1, 'EX', 86400).catch(() => {});
     res.redirect('/');

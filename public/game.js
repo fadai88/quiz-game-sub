@@ -1680,7 +1680,6 @@
                     } else if (isPremium) {
                         waitingMessage.textContent = 'Looking for a ranked opponent...';
                         socket.emit('joinHumanMatchmaking', {
-                            walletAddress: connectedWallet,
                             betAmount: 0
                         });
                     } else {
