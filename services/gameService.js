@@ -47,15 +47,22 @@ async function abortGameWithRefund(roomId, reason) {
 async function startGame(roomId) {
     const io = context.io;
     logger.info(`Attempting to start game in room ${roomId}`);
-    let room = await getGameRoom(roomId);
-    if (!room || room.gameStarted) {
-        if (room?.gameStarted) logger.info(`Game already started in room ${roomId}, skipping`);
+
+    // Atomically claim the game start — prevents duplicate startGame calls
+    // (e.g. one from matchmaking and one from playerReady firing concurrently)
+    const claimedRoom = await atomicRoomUpdate(roomId, async (latest) => {
+        if (!latest || latest.gameStarted) { latest._alreadyStarted = true; return latest; }
+        latest.gameStarted = true;
+        latest.players.forEach(p => (p.score = 0));
+        return latest;
+    });
+
+    if (!claimedRoom || claimedRoom._alreadyStarted) {
+        if (claimedRoom?._alreadyStarted) logger.info(`Game already started in room ${roomId}, skipping`);
         return;
     }
 
-    room.players.forEach(p => (p.score = 0));
-    await updateGameRoom(roomId, room);
-
+    let room = claimedRoom;
     try {
         const humanPlayer = room.players.find(p => !p.isBot);
         let matchStage = [];

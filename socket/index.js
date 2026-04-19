@@ -722,6 +722,8 @@ async function handleGameEvent(socket, event, args) {
 
     // ── submitAnswer ───────────────────────────────────────────────────────────
     if (event === 'submitAnswer') {
+        const arrivalTime = Date.now();
+
         const { error } = submitAnswerSchema.validate(data);
         if (error) {
             trackValidationFailure(socket.user?.walletAddress, 'submitAnswer', error.message);
@@ -741,20 +743,22 @@ async function handleGameEvent(socket, event, args) {
         const player = room.players.find(p => p.username === walletAddress);
         if (!player || player.answered) { socket.emit('answerError', player?.answered ? 'Already answered' : 'Player not found'); return; }
 
-        const isCorrect     = answer === questionData.shuffledCorrectAnswer;
-        const responseTime  = Date.now() - (room.questionStartTime || Date.now());
-
+        let finalResponseTime = 0;
         await atomicRoomUpdate(roomId, async (r) => {
             const p = r.players.find(pl => pl.username === walletAddress);
             if (p) {
+                const responseTime = arrivalTime - (r.questionStartTime || arrivalTime);
+                finalResponseTime = responseTime;
+                const isCorrect = answer === questionData.shuffledCorrectAnswer;
                 p.answered = true; p.lastAnswer = answer; p.lastResponseTime = responseTime;
-                if (isCorrect) { p.score++; p.totalResponseTime = (p.totalResponseTime || 0) + responseTime; }
+                p.totalResponseTime = (p.totalResponseTime || 0) + responseTime;
+                if (isCorrect) { p.score++; }
             }
             r.answersReceived++;
             return r;
         });
 
-        io.to(roomId).emit('playerAnswered', { username: walletAddress, isBot: false, timedOut: false, responseTime });
+        io.to(roomId).emit('playerAnswered', { username: walletAddress, isBot: false, timedOut: false, responseTime: finalResponseTime });
 
         const updatedRoom = await getGameRoom(roomId);
         const totalPlayers = updatedRoom.players.length;

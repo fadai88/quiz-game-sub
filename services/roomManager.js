@@ -193,7 +193,7 @@ async function getGameRoom(roomId) {
             betAmount:            parseInt(roomData.betAmount)            || 0,
             questions,
             questionIdMap,
-            currentQuestionIndex: parseInt(roomData.currentQuestionIndex) || 0,
+            currentQuestionIndex: roomData.currentQuestionIndex !== undefined ? parseInt(roomData.currentQuestionIndex) : -1,
             answersReceived:      parseInt(roomData.answersReceived)       || 0,
             gameStarted:          roomData.gameStarted === 'true',
             roomMode:             roomData.roomMode || null,
