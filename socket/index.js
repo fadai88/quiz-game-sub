@@ -120,8 +120,13 @@ async function validateSocketSession(socket, eventName) {
             socket.disconnect(true);
             return false;
         }
-        // Redis TTL (set at login, slid by authenticate middleware) is the
-        // authoritative expiry — no manual timestamp check needed here.
+        // If this socket's session token no longer matches the active token for
+        // the wallet (e.g. the user logged in on another device), kick it.
+        if (socket.user.sessionToken && currentToken !== socket.user.sessionToken) {
+            socket.emit('error', { message: 'Session superseded by a newer login. Please log in again.', code: 'SESSION_SUPERSEDED' });
+            socket.disconnect(true);
+            return false;
+        }
         return true;
     } catch (error) {
         socket.emit('error', { message: 'Authentication error occurred', code: 'AUTH_ERROR' });
@@ -197,13 +202,16 @@ function registerConnectionHandler(io) {
 
                 // ── Login rate limit ──────────────────────────────────────────
                 const loginLimitKey = `login:${clientIP}`;
-                const loginAttempts = await context.redisClient.get(loginLimitKey) || 0;
-                if (parseInt(loginAttempts) >= 5) {
+                const loginAttempts = await context.redisClient.incr(loginLimitKey);
+                if (loginAttempts === 1) {
+                    // First attempt — set the expiry (INCR on a new key has no TTL)
+                    await context.redisClient.expire(loginLimitKey, 60);
+                }
+                if (loginAttempts > 5) {
                     SecurityLogger.rateLimitExceeded(clientIP, 'login', 5, '1 minute');
                     trackRateLimitViolation(clientIP, { eventName: 'login' });
                     return socket.emit('loginFailure', 'Too many login attempts. Please try again later.');
                 }
-                await context.redisClient.set(loginLimitKey, parseInt(loginAttempts) + 1, 'EX', 60);
 
                 // ── reCAPTCHA ─────────────────────────────────────────────────
                 let recaptchaResult;
@@ -646,14 +654,19 @@ async function handleGameEvent(socket, event, args) {
         const waitingRoomId = await getWaitingRoom(betAmount);
 
         if (waitingRoomId) {
-            const existingRoom = await getGameRoom(waitingRoomId);
-            if (existingRoom && !existingRoom.gameStarted && existingRoom.players.length === 1) {
-                existingRoom.players.push({ id: socket.id, username: walletAddress, score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false });
-                existingRoom.roomMode = 'multiplayer';
-                await updateGameRoom(waitingRoomId, existingRoom);
+            const joinedRoom = await atomicRoomUpdate(waitingRoomId, async (r) => {
+                if (!r || r.gameStarted || r.players.length !== 1) {
+                    r._joinRejected = true; return r;
+                }
+                r.players.push({ id: socket.id, username: walletAddress, score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false });
+                r.roomMode = 'multiplayer';
+                return r;
+            });
+
+            if (joinedRoom && !joinedRoom._joinRejected) {
                 await removeWaitingRoom(betAmount, waitingRoomId);
                 socket.join(waitingRoomId); socket.roomId = waitingRoomId;
-                io.to(waitingRoomId).emit('playerJoined', { players: existingRoom.players });
+                io.to(waitingRoomId).emit('playerJoined', { players: joinedRoom.players });
                 await startGame(waitingRoomId);
                 await logGameRoomsState();
                 return;
@@ -692,9 +705,21 @@ async function handleGameEvent(socket, event, args) {
         const { error } = requestBotRoomSchema.validate(data);
         if (error) { socket.emit('requestBotRoomFailure', 'Invalid input format'); return; }
         const walletAddress = socket.user.walletAddress;
-        const { betAmount } = data;
+        const { betAmount, transactionSignature, nonce, recaptchaToken } = data;
         const clientIP = getClientIpFromSocket(socket);
         await rateLimitEvent(walletAddress, 'requestBotRoom', clientIP, socket);
+
+        if (betAmount > 0) {
+            if (await isBlockedFn(walletAddress) || await isBlockedFn(clientIP)) {
+                socket.emit('requestBotRoomFailure', 'Access denied'); return;
+            }
+            try {
+                await verifyAndValidateTransaction(transactionSignature, betAmount, walletAddress, context.config.TREASURY_WALLET.toBase58(), nonce);
+            } catch (txError) {
+                trackFailedTransaction(walletAddress, { error: txError.message, betAmount, transactionSignature });
+                socket.emit('requestBotRoomFailure', txError.message); return;
+            }
+        }
 
         const { generateRoomId } = require('../utils/helpers');
         const roomId = generateRoomId();
@@ -733,6 +758,10 @@ async function handleGameEvent(socket, event, args) {
         const walletAddress = socket.user.walletAddress;
         const clientIP      = getClientIpFromSocket(socket);
         await rateLimitEvent(walletAddress, 'submitAnswer', clientIP, socket);
+
+        if (socket.roomId !== roomId) {
+            socket.emit('answerError', 'Unauthorized room access'); return;
+        }
 
         const room = await getGameRoom(roomId);
         if (!room || room.isDeleted) { socket.emit('answerError', 'Room not found'); return; }
@@ -776,17 +805,58 @@ async function handleGameEvent(socket, event, args) {
         const { roomId } = data;
         await rateLimitEvent(socket.user.walletAddress, 'leaveRoom', null, socket);
 
-        const room = await getGameRoom(roomId);
-        if (!room) return;
-
-        const playerIdx = room.players.findIndex(p => p.username === socket.user.walletAddress);
-        if (playerIdx !== -1) {
-            room.players.splice(playerIdx, 1);
-            room.playerLeft = true;
+        if (socket.roomId !== roomId) {
+            socket.emit('leaveRoomError', 'Unauthorized room access'); return;
         }
-        await updateGameRoom(roomId, room);
+
+        let room;
+        let leavingPlayer;
+        try {
+            room = await atomicRoomUpdate(roomId, async (r) => {
+                const idx = r.players.findIndex(p => p.username === socket.user.walletAddress);
+                if (idx === -1) throw new Error('Player not in room');
+                leavingPlayer = r.players[idx];
+                if (r.questionTimeout) { clearTimeout(r.questionTimeout); r.questionTimeout = null; }
+                r.players.splice(idx, 1);
+                r.playerLeft = true;
+                if (r.gameStarted) r.isDeleted = true;
+                return r;
+            });
+        } catch (err) {
+            if (err.message === 'Player not in room') return;
+            throw err;
+        }
+
         socket.leave(roomId); socket.roomId = null;
-        io.to(roomId).emit('playerLeft', socket.user.walletAddress);
+        if (leavingPlayer) io.to(roomId).emit('playerLeft', socket.user.walletAddress);
+
+        if (!room.gameStarted || !leavingPlayer) {
+            await logGameRoomsState();
+            return;
+        }
+
+        // Game was in progress — settle immediately so the remaining player
+        // gets their forfeit win regardless of where we are in the question cycle.
+        if (room.roomMode === 'bot') {
+            const botPlayer = room.players.find(p => p.isBot);
+            if (botPlayer) {
+                await updatePlayerStats([
+                    { username: leavingPlayer.username, score: leavingPlayer.score || 0, totalResponseTime: leavingPlayer.totalResponseTime || 0, isBot: false },
+                    { username: botPlayer.username, score: botPlayer.score || 0, totalResponseTime: botPlayer.totalResponseTime || 0, isBot: true },
+                ], { winner: botPlayer.username, botOpponent: true, betAmount: room.betAmount });
+                io.to(roomId).emit('gameOverForfeit', { winner: botPlayer.username, disconnectedPlayer: leavingPlayer.username, betAmount: room.betAmount, botOpponent: true, message: `${leavingPlayer.username} left. ${botPlayer.username} wins.` });
+            }
+            await deleteGameRoom(roomId);
+        } else if (room.players.length === 1 && !room.players[0].isBot) {
+            const remainingPlayer = room.players[0];
+            const allPlayers = [
+                { username: remainingPlayer.username, score: remainingPlayer.score || 0, totalResponseTime: remainingPlayer.totalResponseTime || 0, isBot: false },
+                { username: leavingPlayer.username,   score: leavingPlayer.score   || 0, totalResponseTime: leavingPlayer.totalResponseTime   || 0, isBot: false },
+            ];
+            await handlePlayerLeftWin(roomId, remainingPlayer, leavingPlayer, room.betAmount, false, allPlayers);
+        } else {
+            await deleteGameRoom(roomId);
+        }
         await logGameRoomsState();
         return;
     }
@@ -797,6 +867,10 @@ async function handleGameEvent(socket, event, args) {
         if (error) { socket.emit('gameError', 'Invalid room ID'); return; }
         const { roomId } = data;
         await rateLimitEvent(socket.user.walletAddress, 'switchToBot', null, socket);
+
+        if (socket.roomId !== roomId) {
+            socket.emit('gameError', 'Unauthorized room access'); return;
+        }
 
         const room = await getGameRoom(roomId);
         if (!room) { socket.emit('gameError', 'Room not found'); return; }
@@ -886,6 +960,10 @@ async function handleGameEvent(socket, event, args) {
         const { roomId } = data;
         await rateLimitEvent(socket.user.walletAddress, 'playerReady', null, socket);
 
+        if (socket.roomId !== roomId) {
+            socket.emit('gameError', 'Unauthorized room access'); return;
+        }
+
         const room = await getGameRoom(roomId);
         if (!room) { socket.emit('gameError', 'Room not found'); return; }
 
@@ -947,25 +1025,35 @@ async function handleGameEvent(socket, event, args) {
             const redisClient = context.redisClient;
             const queueKey = `matchmaking:tournament:${tournamentId}`;
 
-            // Check for a waiting opponent first
-            const opponentJson = await redisClient.lpop(queueKey);
+            // Check for a waiting opponent — skip stale entries from disconnected players
+            let opponent = null;
+            let opponentSocket = null;
+            while (true) {
+                const opponentJson = await redisClient.lpop(queueKey);
+                if (!opponentJson) break;
+                const candidate = JSON.parse(opponentJson);
+                const candidateSocket = context.io.sockets.sockets.get(candidate.socketId);
+                if (candidateSocket) {
+                    opponent = candidate;
+                    opponentSocket = candidateSocket;
+                    break;
+                }
+                logger.info(`[joinTournamentGame] Skipping stale queue entry for disconnected player ${candidate.walletAddress}`);
+            }
 
-            if (opponentJson) {
-                const opponent = JSON.parse(opponentJson);
+            if (opponent && opponentSocket) {
                 const roomId = generateRoomId();
                 const room = await createGameRoom(roomId, 0, 'human', { gameMode: 'tournament', tournamentId, isPractice: false });
 
                 room.players.push(
-                    { id: socket.id,       username: walletAddress,          score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false },
-                    { id: opponent.socketId, username: opponent.walletAddress, score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false }
+                    { id: socket.id,           username: walletAddress,            score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false },
+                    { id: opponent.socketId,   username: opponent.walletAddress,   score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false }
                 );
                 await updateGameRoom(roomId, room);
 
                 socket.join(roomId);
                 socket.roomId = roomId;
-
-                const opponentSocket = context.io.sockets.sockets.get(opponent.socketId);
-                if (opponentSocket) { opponentSocket.join(roomId); opponentSocket.roomId = roomId; }
+                opponentSocket.join(roomId); opponentSocket.roomId = roomId;
 
                 context.io.to(roomId).emit('matchFound', {
                     gameRoomId: roomId, players: [walletAddress, opponent.walletAddress],

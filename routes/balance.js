@@ -23,6 +23,7 @@ const PaymentQueue  = require('../models/PaymentQueue');
 const PrizeCycle    = require('../models/PrizeCycle');
 const { walletParamSchema, paymentIdParamSchema } = require('../config/schemas');
 const { authenticate, requireAdmin } = require('../middleware/authenticate');
+const { getClientIpFromRequest } = require('../middleware/trustedProxy');
 const { SecurityLogger }     = require('../utils/securityLogger');
 const { trackValidationFailure } = require('../config/alerts');
 
@@ -243,7 +244,7 @@ router.get('/admin/cycles/:cycleId/awards', authenticate, requireAdmin, async (r
 // ─── GET /api/tokens.json (honeypot — unchanged) ─────────────────────────────
 
 router.get('/tokens.json', async (req, res) => {
-    const clientIP = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    const clientIP = getClientIpFromRequest(req);
     logger.warn(`Potential bot detected accessing honeypot: ${clientIP}`);
     await context.redisClient.set(`blocklist:${clientIP}`, 1, 'EX', 86400);
     res.json({ status: 'success', data: { tokens: [] } });

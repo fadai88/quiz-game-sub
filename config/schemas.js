@@ -68,8 +68,10 @@ const playerReadySchema = Joi.object({
 
 const switchToBotSchema     = Joi.object({ roomId: roomIdSchema });
 const requestBotRoomSchema  = Joi.object({
-    betAmount:     Joi.number().integer().valid(...VALID_BET_AMOUNTS_ATOMIC).required(),
-    nonce:         nonceSchema.optional(),
+    betAmount:            Joi.number().integer().valid(...VALID_BET_AMOUNTS_ATOMIC).required(),
+    transactionSignature: Joi.when('betAmount', { is: Joi.number().greater(0), then: Joi.string().required(), otherwise: Joi.string().optional() }),
+    nonce:                Joi.when('betAmount', { is: Joi.number().greater(0), then: nonceSchema,             otherwise: nonceSchema.optional() }),
+    recaptchaToken:       Joi.string().optional(),
 });
 const requestBotGameSchema  = Joi.object({ roomId: roomIdSchema });
 const leaveRoomSchema       = Joi.object({ roomId: roomIdSchema });
@@ -84,8 +86,7 @@ const joinHumanMatchmakingSchema = Joi.object({
 });
 
 const joinTournamentGameSchema = Joi.object({
-    walletAddress: solanaPublicKey,
-    tournamentId:  Joi.string().pattern(/^[a-f0-9]{24}$/).required()
+    tournamentId: Joi.string().pattern(/^[a-f0-9]{24}$/).required()
         .messages({ 'string.pattern.base': 'Invalid tournament ID format' }),
 });
 
@@ -100,7 +101,9 @@ const subscribeSchema = Joi.object({
 const loginSchema = Joi.object({
     walletAddress:  solanaPublicKey,
     verifyToken:    Joi.string().required(),
-    recaptchaToken: Joi.string().optional(),
+    recaptchaToken: process.env.ENABLE_RECAPTCHA === 'true'
+        ? Joi.string().required()
+        : Joi.string().optional(),
     clientData:     Joi.object().optional(),
 });
 
