@@ -19,11 +19,10 @@ const { issueChallenge, consumeChallenge } = require('../utils/challengeStore');
 const { getClientIpFromSocket } = require('../middleware/trustedProxy');
 
 const redisService = require('../services/redisService');
-const { SecurityLogger, AuditLogger }  = require('../utils/securityLogger');
-const { sanitizeForLog }               = require('../utils/sanitize');
+const { SecurityLogger } = require('../utils/securityLogger');
 const { verifyRecaptcha }              = require('../utils/helpers');
 const { orphanedPlayerMetrics }        = require('../utils/idempotency');
-const { alertManager, trackValidationFailure, trackRateLimitViolation, trackBotSuspicion, trackRecaptchaFailure, trackFailedTransaction, trackFailedLogin } = require('../config/alerts');
+const { alertManager, trackValidationFailure, trackRateLimitViolation, trackFailedTransaction, trackFailedLogin } = require('../config/alerts');
 
 const {
     transactionSchema, submitAnswerSchema, playerReadySchema,
@@ -35,17 +34,22 @@ const {
     createGameRoom, getGameRoom, updateGameRoom, deleteGameRoom,
     atomicRoomUpdate, addToMatchmakingPool, removeFromMatchmakingPool,
     getMatchmakingPool, addWaitingRoom, getWaitingRoom, removeWaitingRoom,
-    getAllMatchmakingPools, logGameRoomsState, logMatchmakingState,
+    logGameRoomsState, logMatchmakingState,
 } = require('../services/roomManager');
 
-const { startGame, startSinglePlayerGame, completeQuestion, abortGameWithRefund } = require('../services/gameService');
-const { updatePlayerStats, refundToVirtualBalance, findPlayerActiveRoom, handlePlayerLeftWin } = require('../services/playerService');
+const { startGame, startSinglePlayerGame, completeQuestion } = require('../services/gameService');
+const { updatePlayerStats, findPlayerActiveRoom, handlePlayerLeftWin } = require('../services/playerService');
 const { verifyAndValidateTransaction } = require('../services/transactionVerifier');
 const { rateLimitEvent, rateLimitFailedRecaptcha, isBlocked: isBlockedFn } = require('../services/rateLimitService');
 
 const SESSION_SECRET = process.env.SESSION_SECRET;
 
 const botDetector = new BotDetector();
+
+// Grace-period timers: walletAddress → NodeJS.Timeout
+// Cancelled when the player reconnects within DISCONNECT_GRACE_MS.
+const disconnectTimers = new Map();
+const DISCONNECT_GRACE_MS = 12_000;
 
 // ─── Socket.IO auth middleware ────────────────────────────────────────────────
 
@@ -287,7 +291,8 @@ function registerConnectionHandler(io) {
                 // ── Issue one-time verify token for HTTP /api/auth/login ──────
                 const { v4: uuidv4 } = require('uuid');
                 const verifyToken = uuidv4();
-                await context.redisClient.set(`verify:${walletAddress}`, verifyToken, 'EX', 300);
+                // Key embeds the token so HTTP login can atomically consume it via DEL
+                await context.redisClient.set(`verify:${walletAddress}:${verifyToken}`, '1', 'EX', 300);
 
                 SecurityLogger.loginSuccess(walletAddress, { sessionId: verifyToken, fingerprint: clientData?.userAgent }, socket.handshake);
                 socket.emit('loginSuccess', { walletAddress, verifyToken, virtualBalance: user.virtualBalance || 0 });
@@ -307,6 +312,13 @@ function registerConnectionHandler(io) {
                 if (!socket.user?.walletAddress || socket.user.walletAddress !== walletAddress) {
                     socket.emit('reconnectFailure', 'Unauthorized');
                     return;
+                }
+
+                // Cancel any pending forfeit timer for this wallet
+                if (disconnectTimers.has(walletAddress)) {
+                    clearTimeout(disconnectTimers.get(walletAddress));
+                    disconnectTimers.delete(walletAddress);
+                    logger.info(`[DISCONNECT] Grace-period forfeit cancelled for ${walletAddress} (reconnected)`);
                 }
 
                 const user = await User.findOne({ walletAddress });
@@ -398,7 +410,8 @@ function registerConnectionHandler(io) {
                 }
             }
 
-            // 2. Handle active game room
+            // 2. Handle active game room — defer forfeit by DISCONNECT_GRACE_MS so brief
+            //    network blips don't immediately penalise the player.
             try {
                 let roomId = socket.roomId;
 
@@ -430,60 +443,79 @@ function registerConnectionHandler(io) {
                 if (!disconnectedPlayer) { socket.roomId = null; return; }
 
                 const walletAddress = disconnectedPlayer.username;
-                let room;
-                try {
-                    room = await atomicRoomUpdate(roomId, async (r) => {
-                        let idx = r.players.findIndex(p => p.id === socket.id);
-                        if (idx === -1) idx = r.players.findIndex(p => p.username === walletAddress);
-                        if (idx === -1) throw new Error('Player not in room');
-                        if (r.questionTimeout) { clearTimeout(r.questionTimeout); r.questionTimeout = null; }
-                        r.players.splice(idx, 1);
-                        r.playerLeft = true; r.isDeleted = true;
-                        return r;
-                    });
-                } catch (error) {
-                    if (error.message.includes('not found') || error.message === 'Player not in room') { socket.roomId = null; return; }
-                    throw error;
+
+                // Notify opponent and start grace timer — do NOT remove the player yet.
+                if (initialRoom.gameStarted) {
+                    io.to(roomId).emit('playerDisconnected', { walletAddress, gracePeriodMs: DISCONNECT_GRACE_MS });
                 }
 
-                // Bot game forfeit
-                if (room.roomMode === 'bot') {
-                    const botPlayer = room.players.find(p => p.isBot);
-                    if (botPlayer) {
-                        await updatePlayerStats([
-                            { username: disconnectedPlayer.username, score: disconnectedPlayer.score || 0, totalResponseTime: disconnectedPlayer.totalResponseTime || 0, isBot: false },
-                            { username: botPlayer.username, score: botPlayer.score || 0, totalResponseTime: botPlayer.totalResponseTime || 0, isBot: true },
-                        ], { winner: botPlayer.username, botOpponent: true, betAmount: room.betAmount });
-                        io.to(roomId).emit('gameOverForfeit', { winner: botPlayer.username, disconnectedPlayer: disconnectedPlayer.username, betAmount: room.betAmount, botOpponent: true, message: `${disconnectedPlayer.username} left. ${botPlayer.username} wins.` });
+                // Cancel any existing timer (e.g. repeated disconnect events)
+                if (disconnectTimers.has(walletAddress)) {
+                    clearTimeout(disconnectTimers.get(walletAddress));
+                }
+
+                const timer = setTimeout(async () => {
+                    disconnectTimers.delete(walletAddress);
+                    logger.info(`[DISCONNECT] Grace period expired for ${walletAddress}, forfeiting game in room ${roomId}`);
+
+                    let room;
+                    try {
+                        room = await atomicRoomUpdate(roomId, async (r) => {
+                            let idx = r.players.findIndex(p => p.id === socket.id);
+                            if (idx === -1) idx = r.players.findIndex(p => p.username === walletAddress);
+                            if (idx === -1) throw new Error('Player not in room');
+                            if (r.questionTimeout) { clearTimeout(r.questionTimeout); r.questionTimeout = null; }
+                            r.players.splice(idx, 1);
+                            r.playerLeft = true; r.isDeleted = true;
+                            return r;
+                        });
+                    } catch (error) {
+                        if (error.message.includes('not found') || error.message === 'Player not in room') return;
+                        logger.error('Error in deferred disconnect cleanup', { error: error.message });
+                        return;
                     }
-                    await deleteGameRoom(roomId);
-                    await redisClient.del(`room:${roomId}`);
-                    await logGameRoomsState();
-                    socket.roomId = null; return;
-                }
 
-                // Human vs human forfeit
-                if (room.players.length === 1 && !room.players[0].isBot) {
-                    const remainingPlayer = room.players[0];
-                    const allPlayers = [
-                        { username: remainingPlayer.username,    score: remainingPlayer.score    || 0, totalResponseTime: remainingPlayer.totalResponseTime    || 0, isBot: false },
-                        { username: disconnectedPlayer.username, score: disconnectedPlayer.score || 0, totalResponseTime: disconnectedPlayer.totalResponseTime || 0, isBot: false },
-                    ];
-                    await handlePlayerLeftWin(roomId, remainingPlayer, disconnectedPlayer, room.betAmount, false, allPlayers);
-                    await redisClient.del(`room:${roomId}`);
-                    await logGameRoomsState();
-                    socket.roomId = null; return;
-                }
+                    // Bot game forfeit
+                    if (room.roomMode === 'bot') {
+                        const botPlayer = room.players.find(p => p.isBot);
+                        if (botPlayer) {
+                            await updatePlayerStats([
+                                { username: disconnectedPlayer.username, score: disconnectedPlayer.score || 0, totalResponseTime: disconnectedPlayer.totalResponseTime || 0, isBot: false },
+                                { username: botPlayer.username, score: botPlayer.score || 0, totalResponseTime: botPlayer.totalResponseTime || 0, isBot: true },
+                            ], { winner: botPlayer.username, botOpponent: true, betAmount: room.betAmount });
+                            io.to(roomId).emit('gameOverForfeit', { winner: botPlayer.username, disconnectedPlayer: disconnectedPlayer.username, betAmount: room.betAmount, botOpponent: true, message: `${disconnectedPlayer.username} left. ${botPlayer.username} wins.` });
+                        }
+                        await deleteGameRoom(roomId);
+                        await redisClient.del(`room:${roomId}`);
+                        await logGameRoomsState();
+                        return;
+                    }
 
-                // Room empty
-                if (room.players.length === 0) {
-                    await deleteGameRoom(roomId);
-                    await redisClient.del(`room:${roomId}`);
-                    await logGameRoomsState();
-                    socket.roomId = null; return;
-                }
+                    // Human vs human forfeit
+                    if (room.players.length === 1 && !room.players[0].isBot) {
+                        const remainingPlayer = room.players[0];
+                        const allPlayers = [
+                            { username: remainingPlayer.username,    score: remainingPlayer.score    || 0, totalResponseTime: remainingPlayer.totalResponseTime    || 0, isBot: false },
+                            { username: disconnectedPlayer.username, score: disconnectedPlayer.score || 0, totalResponseTime: disconnectedPlayer.totalResponseTime || 0, isBot: false },
+                        ];
+                        await handlePlayerLeftWin(roomId, remainingPlayer, disconnectedPlayer, room.betAmount, false, allPlayers);
+                        await redisClient.del(`room:${roomId}`);
+                        await logGameRoomsState();
+                        return;
+                    }
 
-                if (!room.gameStarted) io.to(roomId).emit('playerLeft', disconnectedPlayer.username);
+                    // Room empty
+                    if (room.players.length === 0) {
+                        await deleteGameRoom(roomId);
+                        await redisClient.del(`room:${roomId}`);
+                        await logGameRoomsState();
+                        return;
+                    }
+
+                    if (!room.gameStarted) io.to(roomId).emit('playerLeft', disconnectedPlayer.username);
+                }, DISCONNECT_GRACE_MS);
+
+                disconnectTimers.set(walletAddress, timer);
                 socket.roomId = null;
             } catch (error) {
                 logger.error('Error cleaning up game rooms', { socketId: socket.id, error: error.message });
@@ -913,13 +945,19 @@ async function handleGameEvent(socket, event, args) {
         const fullPool = await getMatchmakingPool(betAmount);
         const premiumPool = [];
         for (const entry of fullPool) {
+            // Remove stale entries from server restarts or ungraceful disconnects
+            const entrySocket = io.sockets.sockets.get(entry.socketId);
+            if (!entrySocket) {
+                await removeFromMatchmakingPool(betAmount, entry.socketId);
+                logger.info(`[matchmaking] Removed stale entry for disconnected player ${entry.walletAddress}`);
+                continue;
+            }
             const entryUser = await User.findOne({ walletAddress: entry.walletAddress });
             if (entryUser && entryUser.hasPremiumAccess()) {
                 premiumPool.push(entry);
             } else {
                 await removeFromMatchmakingPool(betAmount, entry.socketId);
-                const expiredSocket = io.sockets.sockets.get(entry.socketId);
-                if (expiredSocket) expiredSocket.emit('matchmakingError', 'Your subscription has expired. Please renew to continue playing ranked games.');
+                entrySocket.emit('matchmakingError', 'Your subscription has expired. Please renew to continue playing ranked games.');
             }
         }
 
@@ -927,6 +965,25 @@ async function handleGameEvent(socket, event, args) {
             const p1 = premiumPool[0]; const p2 = premiumPool[1];
             await removeFromMatchmakingPool(betAmount, p1.socketId);
             await removeFromMatchmakingPool(betAmount, p2.socketId);
+
+            // Re-check liveness after removal — a socket can die in the gap
+            const p1Socket = io.sockets.sockets.get(p1.socketId);
+            const p2Socket = io.sockets.sockets.get(p2.socketId);
+            if (!p1Socket || !p2Socket) {
+                // Put the live one back in the queue and bail out
+                if (p1Socket) {
+                    await addToMatchmakingPool(betAmount, p1);
+                    p1Socket.matchmakingPool = betAmount;
+                    p1Socket.emit('matchmakingJoined', { waitingRoomId: 'ranked-queue', position: 1, mode: 'ranked' });
+                }
+                if (p2Socket) {
+                    await addToMatchmakingPool(betAmount, p2);
+                    p2Socket.matchmakingPool = betAmount;
+                    p2Socket.emit('matchmakingJoined', { waitingRoomId: 'ranked-queue', position: 1, mode: 'ranked' });
+                }
+                await logMatchmakingState();
+                return;
+            }
 
             const { generateRoomId } = require('../utils/helpers');
             const roomId = generateRoomId();
@@ -937,10 +994,8 @@ async function handleGameEvent(socket, event, args) {
             );
             await updateGameRoom(roomId, room);
 
-            const p1Socket = io.sockets.sockets.get(p1.socketId);
-            const p2Socket = io.sockets.sockets.get(p2.socketId);
-            if (p1Socket) { p1Socket.join(roomId); p1Socket.roomId = roomId; p1Socket.matchmakingPool = null; }
-            if (p2Socket) { p2Socket.join(roomId); p2Socket.roomId = roomId; p2Socket.matchmakingPool = null; }
+            p1Socket.join(roomId); p1Socket.roomId = roomId; p1Socket.matchmakingPool = null;
+            p2Socket.join(roomId); p2Socket.roomId = roomId; p2Socket.matchmakingPool = null;
 
             io.to(p1.socketId).emit('matchFound', { roomId, opponent: p2.walletAddress, betAmount });
             io.to(p2.socketId).emit('matchFound', { roomId, opponent: p1.walletAddress, betAmount });

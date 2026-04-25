@@ -5,6 +5,7 @@
 
 const https  = require('https');
 const axios  = require('axios');
+const crypto = require('crypto');
 const logger = require('../logger');
 
 /**
@@ -12,17 +13,17 @@ const logger = require('../logger');
  */
 function shuffleArray(array) {
     for (let i = array.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
+        const j = crypto.randomInt(0, i + 1);
         [array[i], array[j]] = [array[j], array[i]];
     }
     return array;
 }
 
 /**
- * Generate a short random room ID (base-36, 7 chars).
+ * Generate a short random room ID (8 hex chars).
  */
 function generateRoomId() {
-    return Math.random().toString(36).substring(2, 9);
+    return crypto.randomBytes(4).toString('hex');
 }
 
 /**

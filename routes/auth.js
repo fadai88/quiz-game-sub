@@ -30,13 +30,13 @@ router.post('/login', async (req, res) => {
         const { walletAddress, verifyToken, recaptchaToken, clientData } = value;
         const redisClient = context.redisClient;
 
-        // Validate verification token (proves Socket.IO already verified the signature)
-        const storedToken = await redisClient.get(`verify:${walletAddress}`);
-        if (!storedToken || storedToken !== verifyToken) {
+        // Atomically consume the one-time verify token. DEL returns 1 only if the key
+        // existed; concurrent requests with the same token all get 0 after the first.
+        const deletedCount = await redisClient.del(`verify:${walletAddress}:${verifyToken}`);
+        if (deletedCount === 0) {
             SecurityLogger.invalidToken(walletAddress, 'expired_or_invalid');
             return res.status(401).json({ success: false, error: 'Invalid verification. Please try logging in again.' });
         }
-        await redisClient.del(`verify:${walletAddress}`);
         logger.auth(`Verification token validated for ${walletAddress}`);
 
         // reCAPTCHA (if enabled)

@@ -67,6 +67,7 @@ const balanceRoutes       = require('./routes/balance');
 const subscriptionRoutes  = require('./routes/subscriptions');
 const { tournamentRouter, adminTournamentRouter } = require('./routes/tournaments');
 const { registerCronJobs } = require('./jobs/cronJobs');
+const { RateLimiterRedis, RateLimiterMemory } = require('rate-limiter-flexible');
 
 // ─── Session secret ───────────────────────────────────────────────────────────
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
@@ -123,11 +124,32 @@ app.get('/admin-tournaments.html', authenticate, requireAdmin, (req, res) => {
 });
 app.use(express.static(path.join(__dirname, 'public')));
 
+// ─── HTTP rate limiting ───────────────────────────────────────────────────────
+// Built lazily so the limiter is created after Redis is ready.
+let _httpLimiter = null;
+function getHttpLimiter() {
+    if (_httpLimiter) return _httpLimiter;
+    const client = context.redisClient;
+    _httpLimiter = client
+        ? new RateLimiterRedis({ storeClient: client, points: 60, duration: 60, keyPrefix: 'http' })
+        : new RateLimiterMemory({ points: 60, duration: 60 });
+    return _httpLimiter;
+}
+
+async function httpRateLimit(req, res, next) {
+    try {
+        await getHttpLimiter().consume(req.ip);
+        next();
+    } catch {
+        res.status(429).json({ success: false, error: 'Too many requests. Please slow down.' });
+    }
+}
+
 // ─── API routes ───────────────────────────────────────────────────────────────
-app.use('/api/auth',         authRoutes);
-app.use('/api',              balanceRoutes);
-app.use('/api/subscription', subscriptionRoutes);
-app.use('/api/tournaments',       tournamentRouter);
+app.use('/api/auth',         httpRateLimit, authRoutes);
+app.use('/api',              httpRateLimit, balanceRoutes);
+app.use('/api/subscription', httpRateLimit, subscriptionRoutes);
+app.use('/api/tournaments',       httpRateLimit, tournamentRouter);
 app.use('/api/admin/tournaments', adminTournamentRouter);
 
 // ─── Admin honeypot ───────────────────────────────────────────────────────────
