@@ -115,6 +115,8 @@ async function handlePlayerLeftWin(roomId, remainingPlayer, disconnectedPlayer, 
             disconnectedPlayer:  disconnectedPlayer.username,
             betAmount,
             botOpponent,
+            gameMode:    room?.gameMode    || null,
+            tournamentId: room?.tournamentId || null,
             message: `${disconnectedPlayer.username} left the game. ${remainingPlayer.username} wins by forfeit!`,
         });
 

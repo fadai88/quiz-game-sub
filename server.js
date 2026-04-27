@@ -61,7 +61,7 @@ const SubscriptionService = require('./services/SubscriptionService');
 const TournamentService   = require('./services/TournamentService');
 
 // ─── Socket & routes ──────────────────────────────────────────────────────────
-const { registerSocketHandlers } = require('./socket/index');
+const { registerSocketHandlers, botDetector } = require('./socket/index');
 const authRoutes          = require('./routes/auth');
 const balanceRoutes       = require('./routes/balance');
 const subscriptionRoutes  = require('./routes/subscriptions');
@@ -153,10 +153,11 @@ app.use('/api/tournaments',       httpRateLimit, tournamentRouter);
 app.use('/api/admin/tournaments', adminTournamentRouter);
 
 // ─── Admin honeypot ───────────────────────────────────────────────────────────
+// Log only — do NOT auto-block. Auto-blocking on a single GET lets an attacker
+// DoS legitimate users by spoofing their IP in a request to this path.
 app.get('/admin', (req, res) => {
     const clientIP = getClientIpFromRequest(req);
-    logger.warn(`Potential bot detected accessing admin honeypot: ${clientIP}`);
-    if (context.redisClient) context.redisClient.set(`blocklist:${clientIP}`, 1, 'EX', 86400).catch(() => {});
+    logger.warn(`Admin honeypot accessed from ${clientIP}`);
     res.redirect('/');
 });
 
@@ -240,7 +241,7 @@ async function startServer() {
 
         server.listen(PORT, () => {
             logger.info(`🚀 Server is running on port ${PORT}`);
-            registerCronJobs();
+            registerCronJobs(botDetector);
         });
     } catch (error) {
         logger.error('❌ Failed to start server:', { error });

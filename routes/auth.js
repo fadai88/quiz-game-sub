@@ -27,7 +27,7 @@ router.post('/login', async (req, res) => {
             return res.status(400).json({ success: false, error: 'Invalid input data' });
         }
 
-        const { walletAddress, verifyToken, recaptchaToken, clientData } = value;
+        const { walletAddress, verifyToken, recaptchaToken } = value;
         const redisClient = context.redisClient;
 
         // Atomically consume the one-time verify token. DEL returns 1 only if the key
@@ -62,7 +62,10 @@ router.post('/login', async (req, res) => {
             await user.save();
         }
 
-        const fingerprint = crypto.createHash('sha256').update(JSON.stringify(clientData || {})).digest('hex');
+        // Fingerprint is derived from server-observed data only — never trust client-provided values.
+        const fingerprint = crypto.createHash('sha256')
+            .update(`${connectionData.ip}:${connectionData.userAgent}`)
+            .digest('hex');
         user.deviceFingerprint = fingerprint;
         await user.save();
 

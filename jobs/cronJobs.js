@@ -16,7 +16,7 @@ const { refundToVirtualBalance } = require('../services/playerService');
 /**
  * Register all cron jobs. Call this inside `server.listen()` callback.
  */
-function registerCronJobs() {
+function registerCronJobs(botDetector = null) {
 
     // ── Safety net: refund stuck games every 5 minutes ────────────────────────
     // (unchanged)
@@ -62,6 +62,19 @@ function registerCronJobs() {
         }
     });
     logger.info('📅 Subscription expiry cron job initialized (runs every hour)');
+
+    // ── BotDetector memory cleanup: every hour ────────────────────────────────
+    if (botDetector) {
+        cron.schedule('0 * * * *', () => {
+            try {
+                const cleaned = botDetector.cleanup();
+                if (cleaned > 0) logger.info(`BotDetector: cleaned ${cleaned} stale records`);
+            } catch (error) {
+                logger.error('BotDetector cleanup failed:', error);
+            }
+        });
+        logger.info('🤖 BotDetector cleanup cron initialized (runs every hour)');
+    }
 
     // ── Tournament starts: every 5 minutes ───────────────────────────────────
     // (unchanged)

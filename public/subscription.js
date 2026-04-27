@@ -9,7 +9,8 @@
 
         // Solana configuration
         const config = {
-            USDC_MINT: new solanaWeb3.PublicKey('Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr'), // Devnet USDC mint
+            // USDC_MINT: new solanaWeb3.PublicKey('Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr'), // Devnet USDC mint
+            USDC_MINT: new solanaWeb3.PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'),    // 'Mainnet USDC mint'
             TREASURY_WALLET: new solanaWeb3.PublicKey('NoyR3nErDpw4fWDyHQ3CCURAe4TjTf9TkHZ7vhuDTp4'),
         };
 

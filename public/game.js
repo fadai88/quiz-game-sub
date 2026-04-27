@@ -1150,18 +1150,31 @@
 
         socket.on('playerLeft', (username) => {
             console.log(`Player ${username} left the game`);
-            waitingMessage.textContent = `${username} left the game. Waiting for game resolution...`;
+            questionDiv.innerHTML = `<p style="text-align:center;color:#f59e0b;">⚠️ ${username} left the game. Determining winner...</p>`;
+            optionsDiv.innerHTML = '';
+            submitAnswerBtn.style.display = 'none';
+            if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
+            countdownTimer.style.display = 'none';
         });
 
+        socket.on('playerDisconnected', ({ walletAddress }) => {
+            console.log(`Player ${walletAddress} disconnected`);
+            questionDiv.innerHTML = `<p style="text-align:center;color:#f59e0b;">⚠️ ${walletAddress} disconnected. Waiting for reconnection or forfeit...</p>`;
+            optionsDiv.innerHTML = '';
+            submitAnswerBtn.style.display = 'none';
+            if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
+            countdownTimer.style.display = 'none';
+        });
 
         socket.on('gameOverForfeit', (data) => {
             console.log('Forfeit game over:', data);
-            const { winner, disconnectedPlayer, message, gameMode, tournamentId, prizeAmount } = data;
+            const { winner, disconnectedPlayer, message, gameMode, tournamentId, prizeAmount, betAmount } = data;
 
             resetGame();
 
             const clientIsWinner = winner === connectedWallet;
             const isTournament = (gameMode === 'tournament' || !!tournamentId);
+            const isRanked = !isTournament && betAmount > 0;
             let forfeitMessage = message;
 
             if (clientIsWinner) {
@@ -1169,12 +1182,15 @@
                     forfeitMessage += ` You win this match! Prize of <strong>${prizeAmount} USDC</strong> will be sent to your wallet.`;
                 } else if (isTournament) {
                     forfeitMessage += ` You win this tournament match!`;
+                } else if (isRanked) {
+                    forfeitMessage += ` You win this ranked match!`;
                 } else {
                     forfeitMessage += ` You win this practice match! Well played.`;
                 }
                 if (typeof celebrateWin === 'function') celebrateWin('forfeit');
             }
 
+            questionDiv.innerHTML = `<p style="text-align:center;font-size:1.2em;">${forfeitMessage}</p>`;
             waitingMessage.innerHTML = forfeitMessage;
 
             setTimeout(() => {

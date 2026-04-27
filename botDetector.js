@@ -102,16 +102,23 @@ class BotDetector {
         }
 
         // Check for suspicious fast answers
-        if (eventType === 'answer_submitted' && metadata.responseTime < 500) {
-            console.warn(`Suspicious fast answer from ${username}: ${metadata.responseTime}ms`);
-            this.flagUser(username, 'fast_answer');
+        if (eventType === 'answer_submitted') {
+            const rt = Number(metadata.responseTime);
+            if (isNaN(rt) || rt < 0 || rt > 60000) return; // reject invalid timings
+            if (rt < 500) {
+                console.warn(`Suspicious fast answer from ${username}: ${rt}ms`);
+                this.flagUser(username, 'fast_answer');
+            }
         }
-        
+
         // Check for extremely consistent response times (bot pattern)
         if (eventType === 'answer_submitted') {
-            const answerEvents = recentEvents.filter(e => e.eventType === 'answer_submitted');
+            const answerEvents = recentEvents.filter(e => {
+                const t = Number(e.metadata.responseTime);
+                return e.eventType === 'answer_submitted' && !isNaN(t) && t >= 0 && t <= 60000;
+            });
             if (answerEvents.length >= 5) {
-                const times = answerEvents.map(e => e.metadata.responseTime);
+                const times = answerEvents.map(e => Number(e.metadata.responseTime));
                 const variance = this.calculateVariance(times);
                 
                 if (variance < 50000) { // Very low variance = robotic
@@ -122,19 +129,15 @@ class BotDetector {
         }
 
         // Record answer for stats if it's an answer event
-        if (eventType === 'answer_submitted' && 
-            metadata.isCorrect !== undefined && 
-            metadata.responseTime !== undefined) {
-            this.recordAnswer(
-                username, 
-                metadata.isCorrect, 
-                metadata.responseTime, 
-                metadata.questionDifficulty || 'medium'
-            );
+        if (eventType === 'answer_submitted' && metadata.isCorrect !== undefined) {
+            const rt = Number(metadata.responseTime);
+            if (!isNaN(rt) && rt >= 0 && rt <= 60000) {
+                this.recordAnswer(username, metadata.isCorrect, rt);
+            }
         }
     }
 
-    recordAnswer(username, isCorrect, responseTime, questionDifficulty = 'medium') {
+    recordAnswer(username, isCorrect, responseTime) {
         if (!this.playerStats.has(username)) {
             this.playerStats.set(username, {
                 answers: [],
@@ -146,12 +149,11 @@ class BotDetector {
 
         const stats = this.playerStats.get(username);
         const now = Date.now();
-        
+
         stats.answers.push({
             isCorrect,
             responseTime,
             timestamp: now,
-            difficulty: questionDifficulty
         });
 
         // Keep only last 50 answers
@@ -218,24 +220,14 @@ class BotDetector {
             flags.push(`consistent_timing(var:${variance.toFixed(0)})`);
         }
         
-        // 4. Perfect answers on difficult questions
-        const hardQuestions = recent.filter(a => a.difficulty === 'hard');
-        if (hardQuestions.length >= 3) {
-            const hardAccuracy = hardQuestions.filter(a => a.isCorrect).length / hardQuestions.length;
-            if (hardAccuracy > 0.8) {
-                suspicion += 25;
-                flags.push(`hard_question_ace(${(hardAccuracy * 100).toFixed(0)}%)`);
-            }
-        }
-        
-        // 5. NEW: Check for impossibly fast start (answering before question fully loads)
+        // 4. Check for impossibly fast start (answering before question fully loads)
         const veryFast = recent.filter(a => a.responseTime < 1000).length;
         if (veryFast >= 3) {
             suspicion += 20;
             flags.push(`too_fast(${veryFast}x<1s)`);
         }
         
-        // 6. NEW: Perfect accuracy with fast times (strongest bot signal)
+        // 5. Perfect accuracy with fast times (strongest bot signal)
         if (accuracy >= 1.0 && avgResponseTime < 3000) {
             suspicion += 30;
             flags.push('perfect_and_fast');

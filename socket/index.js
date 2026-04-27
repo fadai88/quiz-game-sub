@@ -483,7 +483,7 @@ function registerConnectionHandler(io) {
                                 { username: disconnectedPlayer.username, score: disconnectedPlayer.score || 0, totalResponseTime: disconnectedPlayer.totalResponseTime || 0, isBot: false },
                                 { username: botPlayer.username, score: botPlayer.score || 0, totalResponseTime: botPlayer.totalResponseTime || 0, isBot: true },
                             ], { winner: botPlayer.username, botOpponent: true, betAmount: room.betAmount });
-                            io.to(roomId).emit('gameOverForfeit', { winner: botPlayer.username, disconnectedPlayer: disconnectedPlayer.username, betAmount: room.betAmount, botOpponent: true, message: `${disconnectedPlayer.username} left. ${botPlayer.username} wins.` });
+                            io.to(roomId).emit('gameOverForfeit', { winner: botPlayer.username, disconnectedPlayer: disconnectedPlayer.username, betAmount: room.betAmount, botOpponent: true, gameMode: room.gameMode || null, tournamentId: room.tournamentId || null, message: `${disconnectedPlayer.username} left. ${botPlayer.username} wins.` });
                         }
                         await deleteGameRoom(roomId);
                         await redisClient.del(`room:${roomId}`);
@@ -876,7 +876,7 @@ async function handleGameEvent(socket, event, args) {
                     { username: leavingPlayer.username, score: leavingPlayer.score || 0, totalResponseTime: leavingPlayer.totalResponseTime || 0, isBot: false },
                     { username: botPlayer.username, score: botPlayer.score || 0, totalResponseTime: botPlayer.totalResponseTime || 0, isBot: true },
                 ], { winner: botPlayer.username, botOpponent: true, betAmount: room.betAmount });
-                io.to(roomId).emit('gameOverForfeit', { winner: botPlayer.username, disconnectedPlayer: leavingPlayer.username, betAmount: room.betAmount, botOpponent: true, message: `${leavingPlayer.username} left. ${botPlayer.username} wins.` });
+                io.to(roomId).emit('gameOverForfeit', { winner: botPlayer.username, disconnectedPlayer: leavingPlayer.username, betAmount: room.betAmount, botOpponent: true, gameMode: room.gameMode || null, tournamentId: room.tournamentId || null, message: `${leavingPlayer.username} left. ${botPlayer.username} wins.` });
             }
             await deleteGameRoom(roomId);
         } else if (room.players.length === 1 && !room.players[0].isBot) {
@@ -1148,4 +1148,4 @@ function registerSocketHandlers(io) {
     registerConnectionHandler(io);
 }
 
-module.exports = { registerSocketHandlers };
+module.exports = { registerSocketHandlers, botDetector };
