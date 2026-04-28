@@ -193,7 +193,7 @@ function registerConnectionHandler(io) {
         // Accepts: { walletAddress, signature, nonce, recaptchaToken, clientData }
         // NOTE: `message` is no longer accepted from the client.
         //       The server reconstructs it from the stored challenge (H3 fix).
-        socket.on('walletLogin', async ({ walletAddress, signature, nonce, recaptchaToken, clientData }) => {
+        socket.on('walletLogin', async ({ walletAddress, signature, nonce, recaptchaToken, clientData, clientTime }) => {
             try {
                 const clientIP = getClientIpFromSocket(socket);
 
@@ -295,7 +295,7 @@ function registerConnectionHandler(io) {
                 await context.redisClient.set(`verify:${walletAddress}:${verifyToken}`, '1', 'EX', 300);
 
                 SecurityLogger.loginSuccess(walletAddress, { sessionId: verifyToken, fingerprint: clientData?.userAgent }, socket.handshake);
-                socket.emit('loginSuccess', { walletAddress, verifyToken, virtualBalance: user.virtualBalance || 0 });
+                socket.emit('loginSuccess', { walletAddress, verifyToken, virtualBalance: user.virtualBalance || 0, serverTime: Date.now(), clientTime: clientTime || null });
                 logger.info(`Wallet login success: ${walletAddress}`);
             } catch (error) {
                 logger.error('Error in walletLogin:', error);
@@ -804,20 +804,45 @@ async function handleGameEvent(socket, event, args) {
         const player = room.players.find(p => p.username === walletAddress);
         if (!player || player.answered) { socket.emit('answerError', player?.answered ? 'Already answered' : 'Player not found'); return; }
 
+        const QUESTION_DURATION_MS = 10_000;
+        const LATE_GRACE_MS = 200; // absorbs normal network jitter
+
         let finalResponseTime = 0;
-        await atomicRoomUpdate(roomId, async (r) => {
+        const atomicResult = await atomicRoomUpdate(roomId, async (r) => {
+            // questionStartTime is nulled by completeQuestion when a round ends.
+            // If it's already null, this round is over — silently discard.
+            if (!r.questionStartTime) {
+                r._answerRejected = 'question_expired';
+                return r;
+            }
+            // Deadline check lives inside the atomic block to prevent TOCTOU races.
+            const serverResponseTime = arrivalTime - r.questionStartTime;
+            if (serverResponseTime > QUESTION_DURATION_MS + LATE_GRACE_MS) {
+                r._answerRejected = 'late_answer';
+                r._serverResponseTime = serverResponseTime;
+                return r;
+            }
             const p = r.players.find(pl => pl.username === walletAddress);
             if (p) {
-                const responseTime = arrivalTime - (r.questionStartTime || arrivalTime);
-                finalResponseTime = responseTime;
+                finalResponseTime = serverResponseTime;
                 const isCorrect = answer === questionData.shuffledCorrectAnswer;
-                p.answered = true; p.lastAnswer = answer; p.lastResponseTime = responseTime;
-                p.totalResponseTime = (p.totalResponseTime || 0) + responseTime;
+                p.answered = true; p.lastAnswer = answer; p.lastResponseTime = serverResponseTime;
+                p.totalResponseTime = (p.totalResponseTime || 0) + serverResponseTime;
                 if (isCorrect) { p.score++; }
             }
             r.answersReceived++;
             return r;
         });
+
+        if (atomicResult._answerRejected === 'late_answer') {
+            logger.warn(`[SUBMIT] Late answer rejected for ${walletAddress} in room ${roomId} (${atomicResult._serverResponseTime}ms after question start)`);
+            socket.emit('answerError', 'Answer submitted after deadline');
+            return;
+        }
+        if (atomicResult._answerRejected === 'question_expired') {
+            logger.info(`[SUBMIT] Answer arrived after round completed for ${walletAddress} in room ${roomId}, ignoring`);
+            return;
+        }
 
         io.to(roomId).emit('playerAnswered', { username: walletAddress, isBot: false, timedOut: false, responseTime: finalResponseTime });
 

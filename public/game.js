@@ -144,7 +144,14 @@
         socket.on('loginSuccess', (data) => {
             // This runs when game.html reconnects to the socket using the session cookie
             if (data.serverTime) {
-                serverTimeOffset = data.serverTime - Date.now();
+                const now = Date.now();
+                if (data.clientTime) {
+                    // NTP-style: offset = serverTime - midpoint of client send/receive times.
+                    // Removes ~half-RTT bias from a simple serverTime - now calculation.
+                    serverTimeOffset = data.serverTime - (data.clientTime + now) / 2;
+                } else {
+                    serverTimeOffset = data.serverTime - now;
+                }
                 console.log('Clock synced in Game. Offset:', serverTimeOffset, 'ms');
             }
         });
@@ -725,6 +732,7 @@
                     signature,
                     message,
                     recaptchaToken,
+                    clientTime: Date.now(),
                     clientData: {
                         userAgent: navigator.userAgent,
                         language: navigator.language,
@@ -1297,7 +1305,7 @@
 
                     // Calculate remaining time synced with server
                     const msRemaining = Math.max(0, (data.activeQuestion.questionEndsAt - serverTimeOffset) - Date.now());
-                    startVisualCountdown(Math.ceil(msRemaining / 1000));
+                    startVisualCountdown(Math.ceil(msRemaining / 1000), msRemaining);
 
                     // Set up timeout for remaining time
                     if (questionTimer) {
