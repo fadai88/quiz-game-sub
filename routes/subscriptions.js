@@ -31,11 +31,13 @@ router.get('/status', authenticate, async (req, res) => {
     try {
         const user = await User.findById(req.user.id);
         let endDate = null;
+        let plan = null;
         if (user.subscriptionId) {
             const sub = await Subscription.findById(user.subscriptionId);
             endDate = sub?.endDate || null;
+            plan = sub?.metadata?.plan || null;
         }
-        res.json({ success: true, status: user.subscriptionStatus || 'none', tier: user.accountTier || 'free', endDate, subscription: user.subscriptionId || null });
+        res.json({ success: true, status: user.subscriptionStatus || 'none', tier: user.accountTier || 'free', endDate, plan, subscription: user.subscriptionId || null });
     } catch (error) {
         logger.error('[SUBSCRIPTION] Error checking status:', { error: error.message });
         res.status(500).json({ success: false, error: error.message });

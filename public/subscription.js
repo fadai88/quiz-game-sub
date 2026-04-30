@@ -9,8 +9,8 @@
 
         // Solana configuration
         const config = {
-            // USDC_MINT: new solanaWeb3.PublicKey('Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr'), // Devnet USDC mint
-            USDC_MINT: new solanaWeb3.PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'),    // 'Mainnet USDC mint'
+            USDC_MINT: new solanaWeb3.PublicKey('Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr'), // Devnet USDC mint
+            // USDC_MINT: new solanaWeb3.PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'), // Mainnet USDC mint
             TREASURY_WALLET: new solanaWeb3.PublicKey('NoyR3nErDpw4fWDyHQ3CCURAe4TjTf9TkHZ7vhuDTp4'),
         };
 
@@ -139,25 +139,54 @@
             const badge = document.getElementById('statusBadge');
             const details = document.getElementById('subscriptionDetails');
             const cancelBtn = document.getElementById('cancelBtn');
+            const freePlanBtn = document.getElementById('freePlanBtn');
+            const monthlyBtn = document.getElementById('subscribeMonthlyBtn');
+            const yearlyBtn = document.getElementById('subscribeYearlyBtn');
 
             container.style.display = 'block';
 
             if (currentSubscription.tier === 'premium' && currentSubscription.status === 'active') {
                 badge.textContent = 'Premium';
                 badge.className = 'status-badge active';
-                
+
                 const rawDate = currentSubscription.endDate;
                 const endDate = rawDate ? new Date(rawDate) : null;
                 details.textContent = endDate && !isNaN(endDate)
                     ? `Active until ${endDate.toLocaleDateString()}`
                     : 'Active';
-                
+
                 cancelBtn.style.display = 'inline-block';
+
+                // Free card: not the current plan
+                freePlanBtn.textContent = 'Free Tier';
+                freePlanBtn.disabled = true;
+
+                // Highlight the active plan; let user switch to the other
+                if (currentSubscription.plan === 'yearly') {
+                    monthlyBtn.textContent = 'Switch to Monthly';
+                    monthlyBtn.disabled = false;
+                    yearlyBtn.textContent = 'Current Plan';
+                    yearlyBtn.disabled = true;
+                } else {
+                    // monthly (or unknown — default to monthly)
+                    monthlyBtn.textContent = 'Current Plan';
+                    monthlyBtn.disabled = true;
+                    yearlyBtn.textContent = 'Switch to Yearly';
+                    yearlyBtn.disabled = false;
+                }
             } else {
                 badge.textContent = 'Free';
                 badge.className = 'status-badge free';
                 details.textContent = 'Upgrade to Premium for tournament access';
                 cancelBtn.style.display = 'none';
+
+                // Free card: this IS the current plan
+                freePlanBtn.textContent = 'Current Plan';
+                freePlanBtn.disabled = true;
+                monthlyBtn.textContent = 'Subscribe Monthly';
+                monthlyBtn.disabled = false;
+                yearlyBtn.textContent = 'Subscribe Yearly';
+                yearlyBtn.disabled = false;
             }
         }
 
