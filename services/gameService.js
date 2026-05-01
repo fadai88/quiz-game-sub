@@ -16,7 +16,7 @@ const {
 } = require('./roomManager');
 const { TriviaBot, chooseBotName, determineBotDifficulty } = require('./botService');
 const { updatePlayerStats, refundToVirtualBalance } = require('./playerService');
-const { acquireIdempotencyLock } = require('../utils/idempotency');
+const { acquireIdempotencyLock, releaseIdempotencyLock } = require('../utils/idempotency');
 
 // Quiz model is expected to be in models/Quiz — adjust path if different
 const Quiz = require('../models/Quiz');
@@ -375,6 +375,81 @@ async function startNextQuestion(roomId) {
     }
 }
 
+// ─── Restart current question after a player reconnects ───────────────────────
+
+async function restartCurrentQuestion(roomId) {
+    const io = context.io;
+
+    const room = await atomicRoomUpdate(roomId, async (r) => {
+        if (!r.disconnectGracePeriod) { r._skipRestart = true; return r; }
+        if (r.questionTimeout) { clearTimeout(r.questionTimeout); r.questionTimeout = null; }
+        r.disconnectGracePeriod = false;
+        r.questionStartTime = Date.now();
+        r.answersReceived = 0;
+        r.players.forEach(p => { p.answered = false; p.lastAnswer = null; p.lastResponseTime = null; });
+        return r;
+    });
+
+    if (!room || room._skipRestart) return;
+
+    // The prior completeQuestion call (which bailed out) may have left a stale
+    // lock — release it so the new timeout can call completeQuestion normally.
+    const lockKey = `completeQuestion:${roomId}:${room.currentQuestionIndex}`;
+    await releaseIdempotencyLock(lockKey);
+
+    const currentQuestion = room.questions[room.currentQuestionIndex];
+    if (!currentQuestion?.shuffledOptions) return;
+
+    const QUESTION_DURATION = 10000;
+    const questionEndsAt = room.questionStartTime + QUESTION_DURATION;
+    const timeoutForIndex = room.currentQuestionIndex;
+
+    io.to(roomId).emit('clearQuestionUI');
+    io.to(roomId).emit('nextQuestion', {
+        questionId:     currentQuestion.tempId,
+        question:       currentQuestion.question,
+        options:        currentQuestion.shuffledOptions,
+        questionNumber: room.currentQuestionIndex + 1,
+        totalQuestions: room.questions.length,
+        questionEndsAt,
+    });
+
+    room.questionTimeout = setTimeout(async () => {
+        try {
+            const exists = await getGameRoom(roomId);
+            if (!exists || exists.isDeleted) return;
+
+            const updatedRoom = await atomicRoomUpdate(roomId, async (latest) => {
+                if (!latest || latest.isDeleted) return latest;
+                if (latest.currentQuestionIndex !== timeoutForIndex) { latest._staleTimeout = true; return latest; }
+                if (latest.players.filter(p => !p.isBot).length === 0) { latest.isDeleted = true; latest._shouldStopGame = true; return latest; }
+                latest._timedOutPlayers = [];
+                latest.players.forEach(player => {
+                    if (!player.answered && !player.isBot) {
+                        player.answered = true; player.lastAnswer = -1;
+                        player.lastResponseTime = Date.now() - latest.questionStartTime;
+                        latest.answersReceived++;
+                        latest._timedOutPlayers.push({ username: player.username, responseTime: player.lastResponseTime });
+                    }
+                });
+                return latest;
+            });
+
+            if (updatedRoom._staleTimeout) return;
+            if (updatedRoom._shouldStopGame) { await deleteGameRoom(roomId); await logGameRoomsState(); return; }
+            updatedRoom._timedOutPlayers?.forEach(p => {
+                io.to(roomId).emit('playerAnswered', { username: p.username, isBot: false, timedOut: true, responseTime: p.responseTime });
+            });
+            await completeQuestion(roomId);
+        } catch (error) {
+            if (error.message.includes('not found')) { logger.info(`Room ${roomId} gone by restarted timeout, ignoring`); return; }
+            logger.error(`Error in restarted timeout handler for room ${roomId}:`, error);
+        }
+    }, QUESTION_DURATION);
+
+    await updateGameRoom(roomId, { ...room, questionTimeout: room.questionTimeout });
+}
+
 // ─── Round complete ───────────────────────────────────────────────────────────
 
 async function completeQuestion(roomId) {
@@ -400,6 +475,13 @@ async function completeQuestion(roomId) {
     // acquisition are visible in the roundComplete / scoreUpdate events.
     room = await getGameRoom(roomId);
     if (!room || room.isDeleted) return;
+
+    // A player disconnected and is in their grace period — game is paused.
+    // Release the lock immediately so restartCurrentQuestion can re-acquire it.
+    if (room.disconnectGracePeriod) {
+        await releaseIdempotencyLock(lockKey);
+        return;
+    }
 
     const humanPlayers = room.players.filter(p => !p.isBot);
     if (humanPlayers.length === 0) {
@@ -549,4 +631,4 @@ async function handleGameOver(room, roomId) {
     }
 }
 
-module.exports = { startGame, startSinglePlayerGame, startNextQuestion, completeQuestion, handleGameOver, abortGameWithRefund };
+module.exports = { startGame, startSinglePlayerGame, startNextQuestion, completeQuestion, handleGameOver, abortGameWithRefund, restartCurrentQuestion };

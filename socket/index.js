@@ -37,7 +37,7 @@ const {
     logGameRoomsState, logMatchmakingState,
 } = require('../services/roomManager');
 
-const { startGame, startSinglePlayerGame, completeQuestion } = require('../services/gameService');
+const { startGame, startSinglePlayerGame, completeQuestion, restartCurrentQuestion } = require('../services/gameService');
 const { updatePlayerStats, findPlayerActiveRoom, handlePlayerLeftWin } = require('../services/playerService');
 const { verifyAndValidateTransaction } = require('../services/transactionVerifier');
 const { rateLimitEvent, rateLimitFailedRecaptcha, isBlocked: isBlockedFn } = require('../services/rateLimitService');
@@ -339,6 +339,12 @@ function registerConnectionHandler(io) {
                         orphanedPlayerMetrics.totalRestored++;
                     }
 
+                    // If the question was paused during grace period, restart it
+                    // fresh for both players now that the disconnected player is back.
+                    if (room.disconnectGracePeriod) {
+                        await restartCurrentQuestion(roomId);
+                    }
+
                     const currentQ = room.gameStarted && room.questions.length > 0
                         ? room.questions[Math.max(0, room.currentQuestionIndex)] : null;
 
@@ -445,6 +451,17 @@ function registerConnectionHandler(io) {
 
                 // Notify opponent and start grace timer — do NOT remove the player yet.
                 if (initialRoom.gameStarted) {
+                    // Pause the active question so Player B doesn't see the correct
+                    // answer or advance while waiting for the grace period to resolve.
+                    try {
+                        await atomicRoomUpdate(roomId, async (r) => {
+                            if (r.questionTimeout) { clearTimeout(r.questionTimeout); r.questionTimeout = null; }
+                            r.disconnectGracePeriod = true;
+                            return r;
+                        });
+                    } catch (e) {
+                        logger.warn('[DISCONNECT] Could not pause question timer:', e.message);
+                    }
                     io.to(roomId).emit('playerDisconnected', { walletAddress, gracePeriodMs: DISCONNECT_GRACE_MS });
                 }
 
@@ -545,6 +562,11 @@ function registerConnectionHandler(io) {
                 if (playerIndex !== -1) {
                     room.players[playerIndex].socketId = socket.id;
                     await updateGameRoom(roomId, room);
+                }
+
+                // Restart the paused question if the player is reconnecting mid grace period.
+                if (room.disconnectGracePeriod) {
+                    await restartCurrentQuestion(roomId);
                 }
 
                 const currentQ = room.gameStarted && room.questions.length > 0
