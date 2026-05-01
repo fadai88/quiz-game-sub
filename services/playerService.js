@@ -49,7 +49,7 @@ async function updatePlayerStats(players, roomData) {
     logger.info('Updating stats for all players:', players);
     const { winner, gameMode } = roomData;
 
-    if (gameMode !== 'ranked' && gameMode !== 'tournament') {
+    if (gameMode !== GAME_MODES.RANKED && gameMode !== GAME_MODES.TOURNAMENT) {
         logger.info('Practice game — skipping leaderboard stat update');
         return;
     }

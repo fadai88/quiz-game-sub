@@ -150,7 +150,7 @@ app.use('/api/auth',         httpRateLimit, authRoutes);
 app.use('/api',              httpRateLimit, balanceRoutes);
 app.use('/api/subscription', httpRateLimit, subscriptionRoutes);
 app.use('/api/tournaments',       httpRateLimit, tournamentRouter);
-app.use('/api/admin/tournaments', adminTournamentRouter);
+app.use('/api/admin/tournaments', httpRateLimit, adminTournamentRouter);
 
 // ─── Admin honeypot ───────────────────────────────────────────────────────────
 // Log only — do NOT auto-block. Auto-blocking on a single GET lets an attacker

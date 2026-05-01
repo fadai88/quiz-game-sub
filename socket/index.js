@@ -369,9 +369,8 @@ function registerConnectionHandler(io) {
             }
         });
 
-        socket.on('connect', () => {
-            if (socket.user?.walletAddress) socket.join(`wallet:${socket.user.walletAddress}`);
-        });
+        // Socket is already connected at this point — join the per-wallet room directly.
+        if (socket.user?.walletAddress) socket.join(`wallet:${socket.user.walletAddress}`);
 
         // ── Authenticated game events ──────────────────────────────────────────
         const gameEvents = [
@@ -824,6 +823,8 @@ async function handleGameEvent(socket, event, args) {
             }
             const p = r.players.find(pl => pl.username === walletAddress);
             if (p) {
+                // Re-check inside the atomic block — the outer read may be stale
+                if (p.answered) { r._answerRejected = 'already_answered'; return r; }
                 finalResponseTime = serverResponseTime;
                 const isCorrect = answer === questionData.shuffledCorrectAnswer;
                 p.answered = true; p.lastAnswer = answer; p.lastResponseTime = serverResponseTime;
@@ -841,6 +842,10 @@ async function handleGameEvent(socket, event, args) {
         }
         if (atomicResult._answerRejected === 'question_expired') {
             logger.info(`[SUBMIT] Answer arrived after round completed for ${walletAddress} in room ${roomId}, ignoring`);
+            return;
+        }
+        if (atomicResult._answerRejected === 'already_answered') {
+            socket.emit('answerError', 'Already answered');
             return;
         }
 
@@ -1044,12 +1049,15 @@ async function handleGameEvent(socket, event, args) {
             socket.emit('gameError', 'Unauthorized room access'); return;
         }
 
-        const room = await getGameRoom(roomId);
+        const room = await atomicRoomUpdate(roomId, async (r) => {
+            const playerIdx = r.players.findIndex(p => p.username === socket.user.walletAddress);
+            if (playerIdx !== -1) { r.players[playerIdx].ready = true; }
+            return r;
+        }).catch(err => {
+            if (err.message.includes('not found')) return null;
+            throw err;
+        });
         if (!room) { socket.emit('gameError', 'Room not found'); return; }
-
-        const playerIdx = room.players.findIndex(p => p.username === socket.user.walletAddress);
-        if (playerIdx !== -1) { room.players[playerIdx].ready = true; }
-        await updateGameRoom(roomId, room);
 
         const allReady = room.players.filter(p => !p.isBot).every(p => p.ready);
         if (allReady && room.players.filter(p => !p.isBot).length >= 1) {

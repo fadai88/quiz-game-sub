@@ -325,6 +325,9 @@ async function startNextQuestion(roomId) {
     const botData = room.players.find(p => p.isBot);
     if (botData) {
         (async () => {
+            // Capture the question index before the bot's think delay so we can
+            // discard the answer if the question has already advanced.
+            const questionIndexAtStart = room.currentQuestionIndex;
             const bot = new TriviaBot(botData.username, botData.difficultyLevelString || 'MEDIUM');
             bot.score = botData.score || 0;
             bot.totalResponseTime   = botData.totalResponseTime   || 0;
@@ -332,20 +335,37 @@ async function startNextQuestion(roomId) {
             bot.answersGiven = botData.answersGiven || [];
             try {
                 const botAnswer = await bot.answerQuestion(currentQuestion.question, shuffledOptions, shuffledCorrectAnswer);
-                const freshRoom = await getGameRoom(roomId);
-                if (!freshRoom || freshRoom.isDeleted) return;
-                const botIndex = freshRoom.players.findIndex(p => p.isBot);
-                if (botIndex !== -1) {
-                    freshRoom.players[botIndex] = {
-                        ...freshRoom.players[botIndex], score: bot.score,
-                        totalResponseTime: bot.totalResponseTime, currentQuestionIndex: bot.currentQuestionIndex,
-                        answersGiven: bot.answersGiven, answered: true,
-                        lastAnswer: botAnswer.answer, lastResponseTime: botAnswer.responseTime,
+                const botResult = await atomicRoomUpdate(roomId, async (r) => {
+                    if (!r || r.isDeleted) return r;
+                    // Discard stale bot answer if question has already moved on
+                    if (r.currentQuestionIndex !== questionIndexAtStart) {
+                        r._staleBotAnswer = true; return r;
+                    }
+                    const botIndex = r.players.findIndex(p => p.isBot);
+                    if (botIndex === -1 || r.players[botIndex].answered) return r;
+                    r.players[botIndex] = {
+                        ...r.players[botIndex],
+                        score:                bot.score,
+                        totalResponseTime:    bot.totalResponseTime,
+                        currentQuestionIndex: bot.currentQuestionIndex,
+                        answersGiven:         bot.answersGiven,
+                        answered:             true,
+                        lastAnswer:           botAnswer.answer,
+                        lastResponseTime:     botAnswer.responseTime,
                     };
-                    freshRoom.answersReceived++;
-                    await updateGameRoom(roomId, freshRoom);
-                }
+                    r.answersReceived++;
+                    return r;
+                }).catch(err => {
+                    if (err.message.includes('not found')) return null;
+                    throw err;
+                });
+                if (!botResult || botResult.isDeleted || botResult._staleBotAnswer) return;
                 io.to(roomId).emit('playerAnswered', { username: bot.username, isBot: true, responseTime: botAnswer.responseTime, timedOut: false });
+                // If the human already answered, the bot completing last should end the round
+                const allAnswered = botResult.players.every(p => p.answered);
+                if (allAnswered || botResult.answersReceived >= botResult.players.length) {
+                    await completeQuestion(roomId);
+                }
             } catch (error) {
                 console.error(`Error processing bot answer in room ${roomId}:`, error);
                 io.to(roomId).emit('gameError', 'Error processing bot response. Game ended.');
@@ -375,6 +395,12 @@ async function completeQuestion(roomId) {
         return;
     }
 
+    // Re-read the room now that the lock is held so that any score writes
+    // (e.g. a bot answer) that landed between the initial read and lock
+    // acquisition are visible in the roundComplete / scoreUpdate events.
+    room = await getGameRoom(roomId);
+    if (!room || room.isDeleted) return;
+
     const humanPlayers = room.players.filter(p => !p.isBot);
     if (humanPlayers.length === 0) {
         if (room.questionTimeout) clearTimeout(room.questionTimeout);
@@ -384,6 +410,7 @@ async function completeQuestion(roomId) {
         await logGameRoomsState(); return;
     }
 
+    // Derive currentQuestion from the fresh room — not the pre-lock snapshot.
     const currentQuestion = room.questions[room.currentQuestionIndex];
     if (!currentQuestion?.shuffledOptions || currentQuestion.shuffledCorrectAnswer === undefined) {
         logger.error(`Invalid question data for room ${roomId}`);

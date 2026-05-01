@@ -6,8 +6,10 @@
 const ENVIRONMENT = process.env.NODE_ENV || 'development';
 
 const GAME_MODES = {
-    PRACTICE:   'practice',    // Free users only
-    TOURNAMENT: 'tournament',  // Premium users only
+    PRACTICE:   'practice',    // Free users — bot or single-player
+    RANKED:     'ranked',      // Premium users — human vs human with bet
+    BOT:        'bot',         // Bot game room mode
+    TOURNAMENT: 'tournament',  // Premium users — tournament bracket
 };
 
 // ─── Startup validation ──────────────────────────────────────────────────────
