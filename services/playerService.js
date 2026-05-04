@@ -7,6 +7,7 @@ const logger = require('../logger');
 const context = require('../context');
 const User = require('../models/User');
 const PrizeCycle = require('../models/PrizeCycle');
+const CycleStat = require('../models/CycleStat');
 const { fromAtomicUnits, formatUSDC } = require('../utils/usdcUtils');
 const { getCleanActiveRooms, getGameRoom, deleteGameRoom, logGameRoomsState } = require('./roomManager');
 const { alertManager } = require('../config/alerts');
@@ -71,10 +72,21 @@ async function updatePlayerStats(players, roomData) {
                     wins:           isWinner ? 1 : 0,
                     losses:         isWinner ? 0 : 1,
                 },
-                // Track which cycle this game belongs to (latest active)
                 $set: { lastActiveCycleId: cycle._id },
             },
             { upsert: true, new: true }
+        );
+
+        await CycleStat.findOneAndUpdate(
+            { walletAddress: player.username, cycleId: cycle._id },
+            {
+                $inc: {
+                    wins:        isWinner ? 1 : 0,
+                    losses:      isWinner ? 0 : 1,
+                    gamesPlayed: 1,
+                },
+            },
+            { upsert: true }
         );
         logger.info(`Stats updated: ${player.username} | winner=${isWinner} | cycle=${cycle._id}`);
     }

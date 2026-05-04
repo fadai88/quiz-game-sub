@@ -753,38 +753,38 @@ async function handleGameEvent(socket, event, args) {
         return;
     }
 
-    // ── requestBotRoom ─────────────────────────────────────────────────────────
-    if (event === 'requestBotRoom') {
-        const { error } = requestBotRoomSchema.validate(data);
-        if (error) { socket.emit('requestBotRoomFailure', 'Invalid input format'); return; }
-        const walletAddress = socket.user.walletAddress;
-        const { betAmount, transactionSignature, nonce, recaptchaToken } = data;
-        const clientIP = getClientIpFromSocket(socket);
-        await rateLimitEvent(walletAddress, 'requestBotRoom', clientIP, socket);
-
-        if (betAmount > 0) {
-            if (await isBlockedFn(walletAddress) || await isBlockedFn(clientIP)) {
-                socket.emit('requestBotRoomFailure', 'Access denied'); return;
-            }
-            try {
-                await verifyAndValidateTransaction(transactionSignature, betAmount, walletAddress, context.config.TREASURY_WALLET.toBase58(), nonce);
-            } catch (txError) {
-                trackFailedTransaction(walletAddress, { error: txError.message, betAmount, transactionSignature });
-                socket.emit('requestBotRoomFailure', txError.message); return;
-            }
-        }
-
-        const { generateRoomId } = require('../utils/helpers');
-        const roomId = generateRoomId();
-        const room   = await createGameRoom(roomId, betAmount, 'bot');
-        room.players.push({ id: socket.id, username: walletAddress, score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false });
-        await updateGameRoom(roomId, room);
-        socket.join(roomId); socket.roomId = roomId;
-
-        socket.emit('botRoomCreated', { roomId, betAmount });
-        await logGameRoomsState();
-        return;
-    }
+    // ── requestBotRoom (disabled — paid bot rooms not exposed in current UI) ───
+    // if (event === 'requestBotRoom') {
+    //     const { error } = requestBotRoomSchema.validate(data);
+    //     if (error) { socket.emit('requestBotRoomFailure', 'Invalid input format'); return; }
+    //     const walletAddress = socket.user.walletAddress;
+    //     const { betAmount, transactionSignature, nonce, recaptchaToken } = data;
+    //     const clientIP = getClientIpFromSocket(socket);
+    //     await rateLimitEvent(walletAddress, 'requestBotRoom', clientIP, socket);
+    //
+    //     if (betAmount > 0) {
+    //         if (await isBlockedFn(walletAddress) || await isBlockedFn(clientIP)) {
+    //             socket.emit('requestBotRoomFailure', 'Access denied'); return;
+    //         }
+    //         try {
+    //             await verifyAndValidateTransaction(transactionSignature, betAmount, walletAddress, context.config.TREASURY_WALLET.toBase58(), nonce);
+    //         } catch (txError) {
+    //             trackFailedTransaction(walletAddress, { error: txError.message, betAmount, transactionSignature });
+    //             socket.emit('requestBotRoomFailure', txError.message); return;
+    //         }
+    //     }
+    //
+    //     const { generateRoomId } = require('../utils/helpers');
+    //     const roomId = generateRoomId();
+    //     const room   = await createGameRoom(roomId, betAmount, 'bot');
+    //     room.players.push({ id: socket.id, username: walletAddress, score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false });
+    //     await updateGameRoom(roomId, room);
+    //     socket.join(roomId); socket.roomId = roomId;
+    //
+    //     socket.emit('botRoomCreated', { roomId, betAmount });
+    //     await logGameRoomsState();
+    //     return;
+    // }
 
     // ── requestBotGame ─────────────────────────────────────────────────────────
     if (event === 'requestBotGame') {

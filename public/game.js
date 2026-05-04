@@ -1893,29 +1893,7 @@
 
             waitingTimeout = setTimeout(() => {
                 if (inMatchmakingQueue) {
-                    waitingMessage.textContent = 'No players found. Would you like to play against a bot instead?';
-                    const playBotBtn = document.createElement('button');
-                    playBotBtn.textContent = 'Play Against Bot';
-                    playBotBtn.className = 'bot-option-btn';
-                    playBotBtn.onclick = () => {
-                        socket.emit('switchToBot', { roomId: waitingRoomId });
-                        waitingMessage.textContent = 'Starting game against bot...';
-                    };
-                    waitingMessage.appendChild(document.createElement('br'));
-                    waitingMessage.appendChild(playBotBtn);
-                    
-                    const keepWaitingBtn = document.createElement('button');
-                    keepWaitingBtn.textContent = 'Keep Waiting';
-                    keepWaitingBtn.className = 'bot-option-btn';
-                    keepWaitingBtn.onclick = () => {
-                        waitingMessage.textContent = 'Continuing to wait for another player...';
-                        // Reset the timeout
-                        waitingTimeout = setTimeout(() => {
-                            keepWaitingBtn.onclick();
-                        }, WAITING_TIMEOUT_DURATION);
-                    };
-                    waitingMessage.appendChild(document.createTextNode(' '));
-                    waitingMessage.appendChild(keepWaitingBtn);
+                    waitingMessage.textContent = 'Still looking for an opponent...';
                 }
             }, WAITING_TIMEOUT_DURATION);
         });

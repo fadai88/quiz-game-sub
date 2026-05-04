@@ -21,6 +21,7 @@ const context = require('../context');
 const User    = require('../models/User');
 const PaymentQueue  = require('../models/PaymentQueue');
 const PrizeCycle    = require('../models/PrizeCycle');
+const CycleStat     = require('../models/CycleStat');
 const { walletParamSchema, paymentIdParamSchema } = require('../config/schemas');
 const { authenticate, requireAdmin } = require('../middleware/authenticate');
 const { getClientIpFromRequest } = require('../middleware/trustedProxy');
@@ -105,20 +106,30 @@ router.get('/leaderboard', async (req, res) => {
     try {
         const cycle = await PrizeCycle.getOrCreateActive();
 
-        // Players who played at least one game in this cycle
-        // We rely on User.lastActiveCycleId to scope results.
-        // If a player played across multiple cycles their counter fields
-        // are cumulative, so we use the cycleId tag to filter only those
-        // who played this week, then surface their running totals for the cycle.
-        //
-        // For a clean per-cycle breakdown consider adding a CycleStats
-        // sub-document — but for the simple launch version this is sufficient.
-
-        const players = await User.find({ lastActiveCycleId: cycle._id, accountTier: 'premium', subscriptionStatus: 'active' })
-            .select('walletAddress wins losses gamesPlayed correctAnswers')
+        const stats = await CycleStat.find({ cycleId: cycle._id })
             .sort({ wins: -1, losses: 1, walletAddress: 1 })
             .limit(50)
             .lean();
+
+        // Filter to premium active subscribers only
+        const wallets = stats.map(s => s.walletAddress);
+        const premiumSet = new Set(
+            (await User.find({ walletAddress: { $in: wallets }, accountTier: 'premium', subscriptionStatus: 'active' })
+                .select('walletAddress').lean())
+                .map(u => u.walletAddress)
+        );
+        const rows = stats
+            .filter(s => premiumSet.has(s.walletAddress))
+            .map((s, i) => ({
+                rank:        i + 1,
+                username:    s.walletAddress,
+                wins:        s.wins        || 0,
+                losses:      s.losses      || 0,
+                gamesPlayed: s.gamesPlayed || 0,
+                winPct:      s.gamesPlayed > 0
+                    ? +((s.wins / s.gamesPlayed) * 100).toFixed(1)
+                    : 0,
+            }));
 
         res.json({
             cycle: {
@@ -127,16 +138,7 @@ router.get('/leaderboard', async (req, res) => {
                 status:    cycle.status,
                 startedAt: cycle.startedAt,
             },
-            rows: players.map((u, i) => ({
-                rank:       i + 1,
-                username:   u.walletAddress,
-                wins:       u.wins        || 0,
-                losses:     u.losses      || 0,
-                gamesPlayed: u.gamesPlayed || 0,
-                winPct:     u.gamesPlayed > 0
-                    ? +((u.wins / u.gamesPlayed) * 100).toFixed(1)
-                    : 0,
-            })),
+            rows,
         });
     } catch (error) {
         logger.error('Error fetching leaderboard:', { error });
@@ -168,22 +170,21 @@ router.get('/leaderboard/cycle/:cycleId', async (req, res) => {
         const cycle = await PrizeCycle.findById(req.params.cycleId).lean();
         if (!cycle) return res.status(404).json({ error: 'Cycle not found' });
 
-        const players = await User.find({ lastActiveCycleId: cycle._id })
-            .select('walletAddress wins losses gamesPlayed')
+        const stats = await CycleStat.find({ cycleId: cycle._id })
             .sort({ wins: -1, losses: 1, walletAddress: 1 })
             .limit(50)
             .lean();
 
         res.json({
             cycle,
-            rows: players.map((u, i) => ({
+            rows: stats.map((s, i) => ({
                 rank:        i + 1,
-                username:    u.walletAddress,
-                wins:        u.wins         || 0,
-                losses:      u.losses       || 0,
-                gamesPlayed: u.gamesPlayed  || 0,
-                winPct:      u.gamesPlayed > 0
-                    ? +((u.wins / u.gamesPlayed) * 100).toFixed(1)
+                username:    s.walletAddress,
+                wins:        s.wins        || 0,
+                losses:      s.losses      || 0,
+                gamesPlayed: s.gamesPlayed || 0,
+                winPct:      s.gamesPlayed > 0
+                    ? +((s.wins / s.gamesPlayed) * 100).toFixed(1)
                     : 0,
             })),
         });
