@@ -1203,15 +1203,7 @@ async function handleGameEvent(socket, event, args) {
                 });
                 await startGame(roomId);
             } else {
-                // No opponent yet — create room and join queue
-                const roomId = generateRoomId();
-                const room = await createGameRoom(roomId, 0, 'human', { gameMode: 'tournament', tournamentId, matchId: pendingMatch.matchId, isPractice: false });
-                room.players.push({ id: socket.id, username: walletAddress, score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false });
-                await updateGameRoom(roomId, room);
-                socket.join(roomId);
-                socket.roomId = roomId;
-
-                // Prevent duplicate queue entries for the same wallet
+                // Dedup check before creating any room — avoids orphaned rooms on duplicate joins
                 const existing = await redisClient.lrange(queueKey, 0, -1);
                 const alreadyQueued = existing.some(entry => {
                     try { return JSON.parse(entry).walletAddress === walletAddress; } catch { return false; }
@@ -1220,6 +1212,15 @@ async function handleGameEvent(socket, event, args) {
                     socket.emit('matchmakingJoined', { waitingRoomId: `tournament-${tournamentId}`, mode: 'tournament', tournamentId });
                     return;
                 }
+
+                // No opponent yet — create room and join queue
+                const roomId = generateRoomId();
+                const room = await createGameRoom(roomId, 0, 'human', { gameMode: 'tournament', tournamentId, matchId: pendingMatch.matchId, isPractice: false });
+                room.players.push({ id: socket.id, username: walletAddress, score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false });
+                await updateGameRoom(roomId, room);
+                socket.join(roomId);
+                socket.roomId = roomId;
+
                 await redisClient.lpush(queueKey, JSON.stringify({ socketId: socket.id, walletAddress, joinTime: Date.now() }));
                 await redisClient.expire(queueKey, 600); // 10-minute queue TTL
 

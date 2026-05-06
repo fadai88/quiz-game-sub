@@ -1101,64 +1101,87 @@
             }
 
             // Display scores
-            const scoresHtml = players.map(p =>
-                `<p>${p.username}${p.isBot ? ' 🤖' : ''}: ${p.score} (Total response time: ${p.totalResponseTime || 0}ms)</p>`
-            ).join('');
-            playersDiv.innerHTML = '<h2>Final Scores:</h2>' + scoresHtml;
+            playersDiv.textContent = '';
+            const finalScoresHeading = document.createElement('h2');
+            finalScoresHeading.textContent = 'Final Scores:';
+            playersDiv.appendChild(finalScoresHeading);
+            players.forEach(p => {
+                const row = document.createElement('p');
+                row.textContent = `${p.username}${p.isBot ? ' 🤖' : ''}: ${p.score} (Total response time: ${p.totalResponseTime || 0}ms)`;
+                playersDiv.appendChild(row);
+            });
 
             const clientIsWinner = winner === connectedWallet;
             const isTournament = (gameMode === 'tournament' || !!tournamentId);
-            let gameOverMessage = '';
 
+            waitingMessage.textContent = '';
             if (botOpponent) {
                 const humanPlayer = players.find(p => p.username === connectedWallet && !p.isBot);
                 const botPlayer = players.find(p => p.isBot);
                 if (clientIsWinner) {
-                    gameOverMessage = `🎉 You defeated ${botPlayer ? botPlayer.username : 'the bot'} with ${humanPlayer ? humanPlayer.score : 0} correct answers!`;
+                    waitingMessage.textContent = `🎉 You defeated ${botPlayer ? botPlayer.username : 'the bot'} with ${humanPlayer ? humanPlayer.score : 0} correct answers!`;
                     if (typeof celebrateWin === 'function') celebrateWin('bot_win');
                 } else {
-                    gameOverMessage = `Game Over! You got ${humanPlayer ? humanPlayer.score : 0} correct answers. Better luck next time!`;
+                    waitingMessage.textContent = `Game Over! You got ${humanPlayer ? humanPlayer.score : 0} correct answers. Better luck next time!`;
                 }
             } else if (isTournament) {
                 const clientPlayer = players.find(p => p.username === connectedWallet);
                 if (clientIsWinner) {
-                    gameOverMessage = `🏆 You won this tournament match with a score of ${clientPlayer ? clientPlayer.score : 0}!`;
+                    waitingMessage.appendChild(document.createTextNode(`🏆 You won this tournament match with a score of ${clientPlayer ? clientPlayer.score : 0}!`));
                     if (prizeAmount) {
-                        gameOverMessage += ` Prize of <strong>${prizeAmount} USDC</strong> will be sent to your wallet.`;
+                        waitingMessage.appendChild(document.createTextNode(' Prize of '));
+                        const strong = document.createElement('strong');
+                        strong.textContent = `${prizeAmount} USDC`;
+                        waitingMessage.appendChild(strong);
+                        waitingMessage.appendChild(document.createTextNode(' will be sent to your wallet.'));
                     }
                     if (typeof celebrateWin === 'function') celebrateWin('normal');
                 } else if (winner) {
                     const winnerPlayer = players.find(p => p.username === winner);
-                    gameOverMessage = `Tournament match over! ${winner} wins with a score of ${winnerPlayer ? winnerPlayer.score : 0}. Keep competing!`;
+                    waitingMessage.textContent = `Tournament match over! ${winner} wins with a score of ${winnerPlayer ? winnerPlayer.score : 0}. Keep competing!`;
                 } else {
-                    gameOverMessage = "Tournament match is a draw!";
+                    waitingMessage.textContent = 'Tournament match is a draw!';
                 }
                 if (tournamentId) {
-                    gameOverMessage += ` <a href="/tournaments.html">View tournament standings</a>`;
+                    waitingMessage.appendChild(document.createTextNode(' '));
+                    const standingsLink = document.createElement('a');
+                    standingsLink.href = '/tournaments.html';
+                    standingsLink.textContent = 'View tournament standings';
+                    waitingMessage.appendChild(standingsLink);
                 }
             } else {
                 // Practice mode
                 const clientPlayer = players.find(p => p.username === connectedWallet);
                 if (clientIsWinner) {
-                    gameOverMessage = `🎉 You won with a score of ${clientPlayer ? clientPlayer.score : 0}! Great job!`;
-                    gameOverMessage += ` <em>Want to play for real prizes? <a href="/subscription.html">Upgrade to Premium</a> for tournament access.</em>`;
+                    waitingMessage.appendChild(document.createTextNode(`🎉 You won with a score of ${clientPlayer ? clientPlayer.score : 0}! Great job! `));
+                    const em = document.createElement('em');
+                    em.appendChild(document.createTextNode('Want to play for real prizes? '));
+                    const upgradeLink = document.createElement('a');
+                    upgradeLink.href = '/subscription.html';
+                    upgradeLink.textContent = 'Upgrade to Premium';
+                    em.appendChild(upgradeLink);
+                    em.appendChild(document.createTextNode(' for tournament access.'));
+                    waitingMessage.appendChild(em);
                     if (typeof celebrateWin === 'function') celebrateWin('normal');
                 } else if (winner) {
                     const winnerPlayer = players.find(p => p.username === winner);
-                    gameOverMessage = `Game Over! ${winner} wins with a score of ${winnerPlayer ? winnerPlayer.score : 0}. Better luck next time!`;
+                    waitingMessage.textContent = `Game Over! ${winner} wins with a score of ${winnerPlayer ? winnerPlayer.score : 0}. Better luck next time!`;
                 } else {
-                    gameOverMessage = "Game Over! It's a draw!";
+                    waitingMessage.textContent = "Game Over! It's a draw!";
                 }
             }
-
-            waitingMessage.innerHTML = gameOverMessage;
 
             setTimeout(() => { resetGame(); }, 7000);
         });
 
         socket.on('playerLeft', (username) => {
             console.log(`Player ${username} left the game`);
-            questionDiv.innerHTML = `<p style="text-align:center;color:#f59e0b;">⚠️ ${username} left the game. Determining winner...</p>`;
+            questionDiv.textContent = '';
+            const leftMsg = document.createElement('p');
+            leftMsg.style.textAlign = 'center';
+            leftMsg.style.color = '#f59e0b';
+            leftMsg.textContent = `⚠️ ${username} left the game. Determining winner...`;
+            questionDiv.appendChild(leftMsg);
             optionsDiv.innerHTML = '';
             submitAnswerBtn.style.display = 'none';
             if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
@@ -1167,7 +1190,12 @@
 
         socket.on('playerDisconnected', ({ walletAddress }) => {
             console.log(`Player ${walletAddress} disconnected`);
-            questionDiv.innerHTML = `<p style="text-align:center;color:#f59e0b;">⚠️ ${walletAddress} disconnected. Waiting for reconnection or forfeit...</p>`;
+            questionDiv.textContent = '';
+            const disconnectMsg = document.createElement('p');
+            disconnectMsg.style.textAlign = 'center';
+            disconnectMsg.style.color = '#f59e0b';
+            disconnectMsg.textContent = `⚠️ ${walletAddress} disconnected. Waiting for reconnection or forfeit...`;
+            questionDiv.appendChild(disconnectMsg);
             optionsDiv.innerHTML = '';
             submitAnswerBtn.style.display = 'none';
             if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
@@ -1183,30 +1211,50 @@
             const clientIsWinner = winner === connectedWallet;
             const isTournament = (gameMode === 'tournament' || !!tournamentId);
             const isRanked = !isTournament && betAmount > 0;
-            let forfeitMessage = message;
-
-            if (clientIsWinner) {
-                if (isTournament && prizeAmount) {
-                    forfeitMessage += ` You win this match! Prize of <strong>${prizeAmount} USDC</strong> will be sent to your wallet.`;
-                } else if (isTournament) {
-                    forfeitMessage += ` You win this tournament match!`;
-                } else if (isRanked) {
-                    forfeitMessage += ` You win this ranked match!`;
-                } else {
-                    forfeitMessage += ` You win this practice match! Well played.`;
+            // Build forfeit message as DOM nodes — message contains wallet addresses from server
+            function buildForfeitNodes(target) {
+                target.textContent = '';
+                target.appendChild(document.createTextNode(message));
+                if (clientIsWinner) {
+                    if (isTournament && prizeAmount) {
+                        target.appendChild(document.createTextNode(' You win this match! Prize of '));
+                        const strong = document.createElement('strong');
+                        strong.textContent = `${prizeAmount} USDC`;
+                        target.appendChild(strong);
+                        target.appendChild(document.createTextNode(' will be sent to your wallet.'));
+                    } else if (isTournament) {
+                        target.appendChild(document.createTextNode(' You win this tournament match!'));
+                    } else if (isRanked) {
+                        target.appendChild(document.createTextNode(' You win this ranked match!'));
+                    } else {
+                        target.appendChild(document.createTextNode(' You win this practice match! Well played.'));
+                    }
                 }
-                if (typeof celebrateWin === 'function') celebrateWin('forfeit');
             }
 
-            questionDiv.innerHTML = `<p style="text-align:center;font-size:1.2em;">${forfeitMessage}</p>`;
-            waitingMessage.innerHTML = forfeitMessage;
+            questionDiv.textContent = '';
+            const forfeitP = document.createElement('p');
+            forfeitP.style.textAlign = 'center';
+            forfeitP.style.fontSize = '1.2em';
+            buildForfeitNodes(forfeitP);
+            questionDiv.appendChild(forfeitP);
+            buildForfeitNodes(waitingMessage);
+            if (clientIsWinner && typeof celebrateWin === 'function') celebrateWin('forfeit');
 
             setTimeout(() => {
-                playersDiv.innerHTML = `<h2>Game Ended Early</h2>
-            <div class="forfeit-message">
-                <p>${disconnectedPlayer} left the game.</p>
-                <p>${winner} is the winner.</p>
-            </div>`;
+                playersDiv.textContent = '';
+                const endHeading = document.createElement('h2');
+                endHeading.textContent = 'Game Ended Early';
+                const forfeitDiv = document.createElement('div');
+                forfeitDiv.className = 'forfeit-message';
+                const leftP = document.createElement('p');
+                leftP.textContent = `${disconnectedPlayer} left the game.`;
+                const winnerP = document.createElement('p');
+                winnerP.textContent = `${winner} is the winner.`;
+                forfeitDiv.appendChild(leftP);
+                forfeitDiv.appendChild(winnerP);
+                playersDiv.appendChild(endHeading);
+                playersDiv.appendChild(forfeitDiv);
                 joinGameBtn.style.display = 'inline-block';
             }, 7000);
         });
@@ -1317,7 +1365,10 @@
                     }, msRemaining);
                 } else if (data.currentQuestion) {
                     // Between questions or question already ended
-                    questionDiv.innerHTML = `<h2>Question ${data.currentQuestion.questionNumber} of ${data.currentQuestion.totalQuestions}</h2>`;
+                    questionDiv.textContent = '';
+                    const reconnectQHeading = document.createElement('h2');
+                    reconnectQHeading.textContent = `Question ${data.currentQuestion.questionNumber} of ${data.currentQuestion.totalQuestions}`;
+                    questionDiv.appendChild(reconnectQHeading);
                     waitingMessage.textContent = 'Reconnected! Waiting for next question...';
                 } else {
                     waitingMessage.textContent = 'Reconnected! Game in progress...';
@@ -1333,9 +1384,15 @@
                 // (bet selector removed — subscription model)
 
                 // Update player list
-                playersDiv.innerHTML = '<h2>Players:</h2>' + data.players.map(p =>
-                    `<p>${p.username}${p.isBot ? ' 🤖' : ''}: Ready</p>`
-                ).join('');
+                playersDiv.textContent = '';
+                const reconnectHeading = document.createElement('h2');
+                reconnectHeading.textContent = 'Players:';
+                playersDiv.appendChild(reconnectHeading);
+                data.players.forEach(p => {
+                    const row = document.createElement('p');
+                    row.textContent = `${p.username}${p.isBot ? ' 🤖' : ''}: Ready`;
+                    playersDiv.appendChild(row);
+                });
 
                 waitingMessage.textContent = 'Reconnected! Waiting for game to start...';
             }
@@ -1544,17 +1601,27 @@
         }
 
         function updatePlayerUI(players) {
-            playersDiv.innerHTML = '<h2>Players:</h2>' + players.map(p => {
-                const botClass = p.isBot ? ' class="bot-player"' : '';
-                const botIcon = p.isBot ? ' 🤖' : '';
-                const difficultyBadge = p.isBot && p.difficulty ? 
-                    `<span class="difficulty-badge ${p.difficulty.toLowerCase()}">${p.difficulty}</span>` : '';
-                return `
-                    <p${botClass}>
-                        ${p.username}${botIcon}${difficultyBadge}: ${p.score || 0} 
-                        <span class="response-time">(Response time: ${p.totalResponseTime || 0}ms)</span>
-                    </p>`;
-            }).join('');
+            playersDiv.textContent = '';
+            const playersHeading = document.createElement('h2');
+            playersHeading.textContent = 'Players:';
+            playersDiv.appendChild(playersHeading);
+            players.forEach(p => {
+                const row = document.createElement('p');
+                if (p.isBot) row.className = 'bot-player';
+                row.appendChild(document.createTextNode(`${p.username}${p.isBot ? ' 🤖' : ''}`));
+                if (p.isBot && p.difficulty) {
+                    const badge = document.createElement('span');
+                    badge.className = `difficulty-badge ${p.difficulty.toLowerCase()}`;
+                    badge.textContent = p.difficulty;
+                    row.appendChild(badge);
+                }
+                row.appendChild(document.createTextNode(`: ${p.score || 0} `));
+                const responseSpan = document.createElement('span');
+                responseSpan.className = 'response-time';
+                responseSpan.textContent = `(Response time: ${p.totalResponseTime || 0}ms)`;
+                row.appendChild(responseSpan);
+                playersDiv.appendChild(row);
+            });
         }
 
         function updatePlayers(players) {
@@ -1859,11 +1926,14 @@
             const { username, isBot, responseTime, timedOut } = data;
             if (username !== connectedWallet) {
                 if (isBot) {
-                    waitingMessage.innerHTML = `
-                        <div class="bot-answer">
-                            ${username} 🤖 has answered in ${responseTime}ms
-                            <span class="bot-thinking"></span>
-                        </div>`;
+                    waitingMessage.textContent = '';
+                    const botAnswerDiv = document.createElement('div');
+                    botAnswerDiv.className = 'bot-answer';
+                    botAnswerDiv.appendChild(document.createTextNode(`${username} 🤖 has answered in ${responseTime}ms`));
+                    const thinkingSpan = document.createElement('span');
+                    thinkingSpan.className = 'bot-thinking';
+                    botAnswerDiv.appendChild(thinkingSpan);
+                    waitingMessage.appendChild(botAnswerDiv);
                     playBotSound('answer');
                 } else {
                     const responseText = timedOut ? 
@@ -1986,12 +2056,16 @@
                 });
 
                 // Round results text
-                const resultsHtml = playerResults.map(result => {
+                playersDiv.textContent = '';
+                const roundResultsHeading = document.createElement('h2');
+                roundResultsHeading.textContent = 'Round Results:';
+                playersDiv.appendChild(roundResultsHeading);
+                playerResults.forEach(result => {
                     const status = result.isCorrect ? '✓ Correct' : result.answer === -1 ? '⏰ Timed Out' : '✗ Incorrect';
-                    const botLabel = result.isBot ? ' 🤖' : '';
-                    return `<p>${status} ${result.username}${botLabel}: ${result.responseTime}ms</p>`;
-                }).join('');
-                playersDiv.innerHTML = `<h2>Round Results:</h2>${resultsHtml}`;
+                    const row = document.createElement('p');
+                    row.textContent = `${status} ${result.username}${result.isBot ? ' 🤖' : ''}: ${result.responseTime}ms`;
+                    playersDiv.appendChild(row);
+                });
 
                 waitingMessage.textContent = '';
                 const correctAnswerEl = document.createElement('p');
@@ -2001,7 +2075,11 @@
 
             } catch (error) {
                 logError('roundComplete', error);
-                waitingMessage.innerHTML = `<p class="error-message">Error displaying round results</p>`;
+                waitingMessage.textContent = '';
+                const errEl = document.createElement('p');
+                errEl.className = 'error-message';
+                errEl.textContent = 'Error displaying round results';
+                waitingMessage.appendChild(errEl);
             }
         });
    
