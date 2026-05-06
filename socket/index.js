@@ -629,8 +629,12 @@ async function handleGameEvent(socket, event, args) {
         if (gameMode === 'human') {
             // ── Human vs human matchmaking (mirrors joinHumanMatchmaking) ──────
             const pool = await getMatchmakingPool(0);
-            const alreadyQueued = pool.some(p => p.walletAddress === walletAddress);
-            if (alreadyQueued) { socket.emit('matchmakingError', 'Already in queue'); return; }
+            const existingPracticeEntry = pool.find(p => p.walletAddress === walletAddress);
+            if (existingPracticeEntry) {
+                const existingPracticeSocket = io.sockets.sockets.get(existingPracticeEntry.socketId);
+                if (existingPracticeSocket) { socket.emit('matchmakingError', 'Already in queue'); return; }
+                await removeFromMatchmakingPool(0, existingPracticeEntry.socketId);
+            }
 
             await addToMatchmakingPool(0, { walletAddress, socketId: socket.id, joinTime: Date.now() });
             socket.matchmakingPool = 0;
@@ -999,8 +1003,13 @@ async function handleGameEvent(socket, event, args) {
         }
 
         const pool = await getMatchmakingPool(betAmount);
-        const alreadyQueued = pool.some(p => p.walletAddress === walletAddress);
-        if (alreadyQueued) { socket.emit('matchmakingError', 'Already in queue'); return; }
+        const existingEntry = pool.find(p => p.walletAddress === walletAddress);
+        if (existingEntry) {
+            const existingSocket = io.sockets.sockets.get(existingEntry.socketId);
+            if (existingSocket) { socket.emit('matchmakingError', 'Already in queue'); return; }
+            // Stale entry from a dead socket (e.g. refresh race) — remove and re-queue
+            await removeFromMatchmakingPool(betAmount, existingEntry.socketId);
+        }
 
         await addToMatchmakingPool(betAmount, { walletAddress, socketId: socket.id, joinTime: Date.now() });
         socket.matchmakingPool = betAmount;
