@@ -888,24 +888,43 @@
                 // SUCCESS CASE: Funds were automatically refunded to virtual balance
                 console.log('Funds refunded to virtual balance:', data);
 
-                // Show success message (not an error!)
-                waitingMessage.innerHTML = `
-                    <div class="refund-success-notification">
-                        <div class="refund-icon">✅</div>
-                        <h3>Funds Saved!</h3>
-                        <p>${data.error}</p>
-                        ${data.refundReason ? `<p class="refund-reason">Reason: ${data.refundReason}</p>` : ''}
-                        <div class="refund-actions">
-                            <button onclick="location.reload()" class="refresh-button">
-                                🔄 Refresh & Check Balance
-                            </button>
-                            <button onclick="document.getElementById('joinGameBtn').click()" class="retry-button">
-                                ↩️ Retry Game
-                            </button>
-                        </div>
-                        <p class="refund-info">Your balance will update within a few seconds.</p>
-                    </div>
-                `;
+                waitingMessage.textContent = '';
+                const refundSuccessDiv = document.createElement('div');
+                refundSuccessDiv.className = 'refund-success-notification';
+                const rsIconDiv = document.createElement('div');
+                rsIconDiv.className = 'refund-icon';
+                rsIconDiv.textContent = '✅';
+                refundSuccessDiv.appendChild(rsIconDiv);
+                const rsHeading = document.createElement('h3');
+                rsHeading.textContent = 'Funds Saved!';
+                refundSuccessDiv.appendChild(rsHeading);
+                const rsErrorP = document.createElement('p');
+                rsErrorP.textContent = data.error;
+                refundSuccessDiv.appendChild(rsErrorP);
+                if (data.refundReason) {
+                    const rsReasonP = document.createElement('p');
+                    rsReasonP.className = 'refund-reason';
+                    rsReasonP.textContent = `Reason: ${data.refundReason}`;
+                    refundSuccessDiv.appendChild(rsReasonP);
+                }
+                const rsActionsDiv = document.createElement('div');
+                rsActionsDiv.className = 'refund-actions';
+                const refreshBtn = document.createElement('button');
+                refreshBtn.className = 'refresh-button';
+                refreshBtn.textContent = '🔄 Refresh & Check Balance';
+                refreshBtn.addEventListener('click', () => location.reload());
+                rsActionsDiv.appendChild(refreshBtn);
+                const retryBtn = document.createElement('button');
+                retryBtn.className = 'retry-button';
+                retryBtn.textContent = '↩️ Retry Game';
+                retryBtn.addEventListener('click', () => document.getElementById('joinGameBtn').click());
+                rsActionsDiv.appendChild(retryBtn);
+                refundSuccessDiv.appendChild(rsActionsDiv);
+                const rsInfoP = document.createElement('p');
+                rsInfoP.className = 'refund-info';
+                rsInfoP.textContent = 'Your balance will update within a few seconds.';
+                refundSuccessDiv.appendChild(rsInfoP);
+                waitingMessage.appendChild(refundSuccessDiv);
 
                 // Update balance automatically
                 setTimeout(async () => {
@@ -917,22 +936,44 @@
                 // CRITICAL CASE: Automatic refund failed - needs manual intervention
                 logError('refund-failed', data);
 
-                waitingMessage.innerHTML = `
-                    <div class="refund-failed-notification">
-                        <div class="refund-icon">⚠️</div>
-                        <h3>Manual Refund Required</h3>
-                        <p>${data.error}</p>
-                        <div class="support-info">
-                            <p><strong>What to do:</strong></p>
-                            <ol>
-                                <li>Take a screenshot of this message</li>
-                                <li>Note your wallet address: <code>${connectedWallet}</code></li>
-                                <li>Contact support immediately</li>
-                            </ol>
-                        </div>
-                        <p class="refund-timeline">⏱️ Refunds are typically processed within 24 hours.</p>
-                    </div>
-                `;
+                waitingMessage.textContent = '';
+                const refundFailedDiv = document.createElement('div');
+                refundFailedDiv.className = 'refund-failed-notification';
+                const rfIconDiv = document.createElement('div');
+                rfIconDiv.className = 'refund-icon';
+                rfIconDiv.textContent = '⚠️';
+                refundFailedDiv.appendChild(rfIconDiv);
+                const rfHeading = document.createElement('h3');
+                rfHeading.textContent = 'Manual Refund Required';
+                refundFailedDiv.appendChild(rfHeading);
+                const rfErrorP = document.createElement('p');
+                rfErrorP.textContent = data.error;
+                refundFailedDiv.appendChild(rfErrorP);
+                const supportDiv = document.createElement('div');
+                supportDiv.className = 'support-info';
+                const whatToDoP = document.createElement('p');
+                const whatToDoBold = document.createElement('strong');
+                whatToDoBold.textContent = 'What to do:';
+                whatToDoP.appendChild(whatToDoBold);
+                supportDiv.appendChild(whatToDoP);
+                const ol = document.createElement('ol');
+                [
+                    li => { li.textContent = 'Take a screenshot of this message'; },
+                    li => {
+                        li.textContent = 'Note your wallet address: ';
+                        const code = document.createElement('code');
+                        code.textContent = connectedWallet;
+                        li.appendChild(code);
+                    },
+                    li => { li.textContent = 'Contact support immediately'; },
+                ].forEach(fn => { const li = document.createElement('li'); fn(li); ol.appendChild(li); });
+                supportDiv.appendChild(ol);
+                refundFailedDiv.appendChild(supportDiv);
+                const rfTimelineP = document.createElement('p');
+                rfTimelineP.className = 'refund-timeline';
+                rfTimelineP.textContent = '⏱️ Refunds are typically processed within 24 hours.';
+                refundFailedDiv.appendChild(rfTimelineP);
+                waitingMessage.appendChild(refundFailedDiv);
 
                 // Show urgent alert
                 alert(`⚠️ IMPORTANT\n\nAutomatic refund failed. Your refund will be processed manually within 24 hours.\n\nPlease contact support if you don't receive it.\n\nWallet: ${connectedWallet}`);
@@ -944,12 +985,17 @@
                 const errorMessage = typeof data === 'string' ? data :
                                data.error || data.message || 'Failed to join game';
 
-                waitingMessage.innerHTML = `
-                    <div class="error-notification">
-                        <div class="error-icon">❌</div>
-                        <p>${errorMessage}</p>
-                    </div>
-                `;
+                waitingMessage.textContent = '';
+                const errorNotifDiv = document.createElement('div');
+                errorNotifDiv.className = 'error-notification';
+                const errIconDiv = document.createElement('div');
+                errIconDiv.className = 'error-icon';
+                errIconDiv.textContent = '❌';
+                errorNotifDiv.appendChild(errIconDiv);
+                const errP = document.createElement('p');
+                errP.textContent = errorMessage;
+                errorNotifDiv.appendChild(errP);
+                waitingMessage.appendChild(errorNotifDiv);
 
                 // Only show alert if not a user rejection
                 if (!errorMessage.includes('User rejected') && !errorMessage.includes('rejected')) {
@@ -1266,11 +1312,10 @@
         });
 
         socket.on('clearQuestionUI', () => {
-            // Only clear if no correct answer is being displayed
-            if (!waitingMessage.innerHTML.includes('Correct Answer')) {
-                questionDiv.innerHTML = '';
-                optionsDiv.innerHTML = '';
-                waitingMessage.innerHTML = '';
+            if (!waitingMessage.querySelector('.correct-answer')) {
+                questionDiv.textContent = '';
+                optionsDiv.textContent = '';
+                waitingMessage.textContent = '';
             }
         });
 
