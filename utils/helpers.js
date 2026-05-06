@@ -41,8 +41,7 @@ async function verifyRecaptcha(token) {
 
     const secretKey = process.env.RECAPTCHA_SECRET_KEY;
     if (!secretKey) {
-        console.warn('reCAPTCHA secret key not configured, skipping verification');
-        return { success: true, score: 1.0 };
+        throw new Error('reCAPTCHA is enabled but RECAPTCHA_SECRET_KEY is not configured');
     }
 
     try {

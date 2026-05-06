@@ -536,6 +536,14 @@ async function completeQuestion(roomId) {
 
 async function handleGameOver(room, roomId) {
     const io = context.io;
+
+    const gameOverLock = `gameOver:${roomId}`;
+    const lockAcquired = await acquireIdempotencyLock(gameOverLock, 60);
+    if (!lockAcquired) {
+        logger.info(`handleGameOver: duplicate call blocked for room ${roomId}`);
+        return;
+    }
+
     const sortedPlayers = [...room.players].sort((a, b) =>
         b.score !== a.score ? b.score - a.score : (a.totalResponseTime || 0) - (b.totalResponseTime || 0)
     );
@@ -592,24 +600,30 @@ async function handleGameOver(room, roomId) {
         } else if (gameMode === GAME_MODES.TOURNAMENT) {
             const ts = context.tournamentService;
             if (ts && room.tournamentId) {
-                let winnerUserId = null, loserUserId = null;
-                for (const player of room.players.filter(p => !p.isBot)) {
-                    const user = await User.findOne({ walletAddress: player.username });
-                    if (user) {
-                        const result = player.username === winner ? 'win' : 'loss';
-                        try {
-                            await ts.updatePlayerScore(room.tournamentId, user._id, player.score || 0, result);
-                            if (result === 'win')  winnerUserId = user._id;
-                            if (result === 'loss') loserUserId  = user._id;
-                        } catch (e) { logger.error(`Failed to update tournament score for ${player.username}:`, e); }
+                const tournamentLockKey = `tournamentGameOver:${roomId}`;
+                const lockAcquired = await acquireIdempotencyLock(tournamentLockKey, 60);
+                if (!lockAcquired) {
+                    logger.info(`Tournament game over: duplicate processing blocked for room ${roomId}`);
+                } else {
+                    let winnerUserId = null, loserUserId = null;
+                    for (const player of room.players.filter(p => !p.isBot)) {
+                        const user = await User.findOne({ walletAddress: player.username });
+                        if (user) {
+                            const result = player.username === winner ? 'win' : 'loss';
+                            try {
+                                await ts.updatePlayerScore(room.tournamentId, user._id, player.score || 0, result);
+                                if (result === 'win')  winnerUserId = user._id;
+                                if (result === 'loss') loserUserId  = user._id;
+                            } catch (e) { logger.error(`Failed to update tournament score for ${player.username}:`, e); }
+                        }
                     }
-                }
-                if (winnerUserId && loserUserId) {
-                    try {
-                        const { action } = await ts.processMatchResult(room.tournamentId, winnerUserId, loserUserId);
-                        if (action === 'round_advanced')     io.emit('tournamentRoundAdvanced', { tournamentId: room.tournamentId });
-                        if (action === 'tournament_complete') io.emit('tournamentComplete',      { tournamentId: room.tournamentId });
-                    } catch (e) { logger.error('Failed to advance tournament round:', e); }
+                    if (winnerUserId && loserUserId) {
+                        try {
+                            const { action } = await ts.processMatchResult(room.tournamentId, winnerUserId, loserUserId);
+                            if (action === 'round_advanced')      io.emit('tournamentRoundAdvanced', { tournamentId: room.tournamentId });
+                            if (action === 'tournament_complete') io.emit('tournamentComplete',      { tournamentId: room.tournamentId });
+                        } catch (e) { logger.error('Failed to advance tournament round:', e); }
+                    }
                 }
             }
             io.to(roomId).emit('gameOver', { ...basePayload, mode: 'tournament', tournamentId: room.tournamentId, message: 'Tournament match complete!' });

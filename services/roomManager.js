@@ -124,6 +124,7 @@ async function createGameRoom(roomId, betAmount, roomMode = 'waiting', options =
         roundStartTime: null, isDeleted: false,
         gameMode:     options.gameMode     || 'practice',
         tournamentId: options.tournamentId || '',
+        matchId:      options.matchId      || '',
         isPractice:   options.isPractice !== undefined ? options.isPractice : true,
     };
 
@@ -145,6 +146,7 @@ async function createGameRoom(roomId, betAmount, roomMode = 'waiting', options =
             isDeleted:            room.isDeleted.toString(),
             gameMode:             room.gameMode,
             tournamentId:         room.tournamentId,
+            matchId:              room.matchId || '',
             isPractice:           room.isPractice.toString(),
         });
         multi.expire(`room:${roomId}`, 3600);
@@ -206,6 +208,7 @@ async function getGameRoom(roomId) {
             isDeleted:            roomData.isDeleted === 'true',
             gameMode:             roomData.gameMode    || 'practice',
             tournamentId:         roomData.tournamentId || '',
+            matchId:              roomData.matchId      || '',
             isPractice:           roomData.isPractice !== 'false',
         };
     }, `Get game room ${roomId}`);
@@ -247,6 +250,7 @@ function _serializeRoom(room) {
         isDeleted:            room.isDeleted.toString(),
         gameMode:             room.gameMode    || 'practice',
         tournamentId:         room.tournamentId || '',
+        matchId:              room.matchId      || '',
         isPractice:           (room.isPractice !== undefined ? room.isPractice : true).toString(),
     };
 }

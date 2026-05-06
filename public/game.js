@@ -1461,13 +1461,29 @@
         });
 
         function displayQuestion(question, options, questionNumber, totalQuestions) {
-            questionDiv.innerHTML = `<h2>Question ${questionNumber} of ${totalQuestions}</h2><p>${question}</p>`;
-            optionsDiv.innerHTML = options.map((option, index) => `
-                <div>
-                    <input type="radio" id="option${index}" name="answer" value="${index}">
-                    <label for="option${index}">${option}</label>
-                </div>
-            `).join('');
+            questionDiv.textContent = '';
+            const heading = document.createElement('h2');
+            heading.textContent = `Question ${questionNumber} of ${totalQuestions}`;
+            const body = document.createElement('p');
+            body.textContent = question;
+            questionDiv.appendChild(heading);
+            questionDiv.appendChild(body);
+
+            optionsDiv.textContent = '';
+            options.forEach((option, index) => {
+                const div = document.createElement('div');
+                const input = document.createElement('input');
+                input.type = 'radio';
+                input.id = `option${index}`;
+                input.name = 'answer';
+                input.value = index;
+                const label = document.createElement('label');
+                label.setAttribute('for', `option${index}`);
+                label.textContent = option;
+                div.appendChild(input);
+                div.appendChild(label);
+                optionsDiv.appendChild(div);
+            });
         }
 
         function startVisualCountdown(startTimeInSeconds, actualMsRemaining) {
@@ -1977,7 +1993,11 @@
                 }).join('');
                 playersDiv.innerHTML = `<h2>Round Results:</h2>${resultsHtml}`;
 
-                waitingMessage.innerHTML = `<p class="correct-answer">Correct Answer: ${correctAnswerText}</p>`;
+                waitingMessage.textContent = '';
+                const correctAnswerEl = document.createElement('p');
+                correctAnswerEl.className = 'correct-answer';
+                correctAnswerEl.textContent = `Correct Answer: ${correctAnswerText}`;
+                waitingMessage.appendChild(correctAnswerEl);
 
             } catch (error) {
                 logError('roundComplete', error);

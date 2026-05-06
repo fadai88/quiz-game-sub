@@ -843,12 +843,18 @@ async function handleGameEvent(socket, event, args) {
                 r._serverResponseTime = serverResponseTime;
                 return r;
             }
+            // Bind submitted ID to the active question — rejects stale/future IDs.
+            const currentQuestion = r.questions[r.currentQuestionIndex];
+            if (!currentQuestion || questionId !== currentQuestion.tempId) {
+                r._answerRejected = 'wrong_question';
+                return r;
+            }
             const p = r.players.find(pl => pl.username === walletAddress);
             if (p) {
                 // Re-check inside the atomic block — the outer read may be stale
                 if (p.answered) { r._answerRejected = 'already_answered'; return r; }
                 finalResponseTime = serverResponseTime;
-                const isCorrect = answer === questionData.shuffledCorrectAnswer;
+                const isCorrect = answer === currentQuestion.shuffledCorrectAnswer;
                 p.answered = true; p.lastAnswer = answer; p.lastResponseTime = serverResponseTime;
                 p.totalResponseTime = (p.totalResponseTime || 0) + serverResponseTime;
                 if (isCorrect) { p.score++; }
@@ -868,6 +874,11 @@ async function handleGameEvent(socket, event, args) {
         }
         if (atomicResult._answerRejected === 'already_answered') {
             socket.emit('answerError', 'Already answered');
+            return;
+        }
+        if (atomicResult._answerRejected === 'wrong_question') {
+            logger.warn(`[SUBMIT] Stale/invalid question ID from ${walletAddress} in room ${roomId}: submitted ${questionId}`);
+            socket.emit('answerError', 'Invalid question ID');
             return;
         }
 
@@ -1107,10 +1118,30 @@ async function handleGameEvent(socket, event, args) {
             const tournament = await ts.getTournament(tournamentId);
             if (!tournament) { socket.emit('joinGameFailure', 'Tournament not found'); return; }
 
-            const isRegistered = tournament.participants.some(
+            if (tournament.status !== 'in_progress') {
+                socket.emit('joinGameFailure', 'Tournament is not currently in progress');
+                return;
+            }
+
+            const participant = tournament.participants.find(
                 p => p.userId.toString() === user._id.toString()
             );
-            if (!isRegistered) { socket.emit('joinGameFailure', 'Not registered for this tournament'); return; }
+            if (!participant) { socket.emit('joinGameFailure', 'Not registered for this tournament'); return; }
+            if (participant.status !== 'active') {
+                socket.emit('joinGameFailure', participant.status === 'eliminated'
+                    ? 'You have been eliminated from this tournament'
+                    : 'You are not eligible to play in this tournament');
+                return;
+            }
+
+            const currentRound = tournament.rounds[tournament.rounds.length - 1];
+            if (!currentRound) { socket.emit('joinGameFailure', 'No active round found'); return; }
+
+            const pendingMatch = currentRound.matches.find(m =>
+                m.status === 'pending' &&
+                (m.player1.toString() === user._id.toString() || m.player2.toString() === user._id.toString())
+            );
+            if (!pendingMatch) { socket.emit('joinGameFailure', 'No pending match found for you in this round'); return; }
 
             // Leave any existing room
             if (socket.roomId) {
@@ -1133,7 +1164,8 @@ async function handleGameEvent(socket, event, args) {
 
             const { generateRoomId } = require('../utils/helpers');
             const redisClient = context.redisClient;
-            const queueKey = `matchmaking:tournament:${tournamentId}`;
+            // Queue is scoped to the specific bracket match — prevents cross-match pairing
+            const queueKey = `matchmaking:tournament:${tournamentId}:${pendingMatch.matchId}`;
 
             // Check for a waiting opponent — skip stale entries from disconnected players
             let opponent = null;
@@ -1153,7 +1185,7 @@ async function handleGameEvent(socket, event, args) {
 
             if (opponent && opponentSocket) {
                 const roomId = generateRoomId();
-                const room = await createGameRoom(roomId, 0, 'human', { gameMode: 'tournament', tournamentId, isPractice: false });
+                const room = await createGameRoom(roomId, 0, 'human', { gameMode: 'tournament', tournamentId, matchId: pendingMatch.matchId, isPractice: false });
 
                 room.players.push(
                     { id: socket.id,           username: walletAddress,            score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false },
@@ -1173,12 +1205,21 @@ async function handleGameEvent(socket, event, args) {
             } else {
                 // No opponent yet — create room and join queue
                 const roomId = generateRoomId();
-                const room = await createGameRoom(roomId, 0, 'human', { gameMode: 'tournament', tournamentId, isPractice: false });
+                const room = await createGameRoom(roomId, 0, 'human', { gameMode: 'tournament', tournamentId, matchId: pendingMatch.matchId, isPractice: false });
                 room.players.push({ id: socket.id, username: walletAddress, score: 0, totalResponseTime: 0, answered: false, lastAnswer: null, lastResponseTime: null, isBot: false });
                 await updateGameRoom(roomId, room);
                 socket.join(roomId);
                 socket.roomId = roomId;
 
+                // Prevent duplicate queue entries for the same wallet
+                const existing = await redisClient.lrange(queueKey, 0, -1);
+                const alreadyQueued = existing.some(entry => {
+                    try { return JSON.parse(entry).walletAddress === walletAddress; } catch { return false; }
+                });
+                if (alreadyQueued) {
+                    socket.emit('matchmakingJoined', { waitingRoomId: `tournament-${tournamentId}`, mode: 'tournament', tournamentId });
+                    return;
+                }
                 await redisClient.lpush(queueKey, JSON.stringify({ socketId: socket.id, walletAddress, joinTime: Date.now() }));
                 await redisClient.expire(queueKey, 600); // 10-minute queue TTL
 

@@ -100,6 +100,10 @@ app.use(httpRequestLogger);
 // ─── HTML templates — read once at startup, inject nonce per request ─────────
 const recaptchaEnabled = process.env.ENABLE_RECAPTCHA === 'true';
 const safeSiteKey      = (process.env.RECAPTCHA_SITE_KEY || '').replace(/[^a-zA-Z0-9_\-]/g, '');
+if (recaptchaEnabled && !process.env.RECAPTCHA_SECRET_KEY) {
+    console.error('FATAL: ENABLE_RECAPTCHA=true but RECAPTCHA_SECRET_KEY is missing — refusing to start');
+    process.exit(1);
+}
 const gameHtmlTemplate  = fs.readFileSync(path.join(__dirname, 'public', 'game.html'),  'utf8')
     .replace(/YOUR_SITE_KEY/g, safeSiteKey);
 const loginHtmlTemplate = fs.readFileSync(path.join(__dirname, 'public', 'login.html'), 'utf8')
