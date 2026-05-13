@@ -109,6 +109,7 @@ const TournamentSchema = new mongoose.Schema({
             winner: mongoose.Schema.Types.ObjectId,
             score1: Number,
             score2: Number,
+            roomId: { type: String, default: '' },
             status: {
                 type: String,
                 enum: ['pending', 'in_progress', 'completed']

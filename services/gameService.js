@@ -567,10 +567,13 @@ async function handleGameOver(room, roomId) {
     }
 
     try {
-        await updatePlayerStats(room.players.map(p => ({
-            username: p.username, score: p.score || 0,
-            totalResponseTime: p.totalResponseTime || 0, isBot: p.isBot || false,
-        })), { winner, botOpponent, betAmount: room.betAmount, gameMode: room.gameMode });
+        // Tournament stats are updated inside processClaimedMatchResult after match validation
+        if (room.gameMode !== GAME_MODES.TOURNAMENT) {
+            await updatePlayerStats(room.players.map(p => ({
+                username: p.username, score: p.score || 0,
+                totalResponseTime: p.totalResponseTime || 0, isBot: p.isBot || false,
+            })), { winner, botOpponent, betAmount: room.betAmount, gameMode: room.gameMode });
+        }
 
         // Update recent questions
         for (const player of room.players.filter(p => !p.isBot)) {
@@ -599,30 +602,37 @@ async function handleGameOver(room, roomId) {
 
         } else if (gameMode === GAME_MODES.TOURNAMENT) {
             const ts = context.tournamentService;
-            if (ts && room.tournamentId) {
-                const tournamentLockKey = `tournamentGameOver:${roomId}`;
+            if (ts && room.tournamentId && room.matchId) {
+                const tournamentLockKey = `tournamentGameOver:${room.matchId}`;
                 const lockAcquired = await acquireIdempotencyLock(tournamentLockKey, 60);
                 if (!lockAcquired) {
-                    logger.info(`Tournament game over: duplicate processing blocked for room ${roomId}`);
+                    logger.info(`Tournament game over: duplicate processing blocked for match ${room.matchId}`);
                 } else {
-                    let winnerUserId = null, loserUserId = null;
+                    let winnerUserId = null, loserUserId = null, winnerScore = 0, loserScore = 0;
                     for (const player of room.players.filter(p => !p.isBot)) {
                         const user = await User.findOne({ walletAddress: player.username });
                         if (user) {
-                            const result = player.username === winner ? 'win' : 'loss';
-                            try {
-                                await ts.updatePlayerScore(room.tournamentId, user._id, player.score || 0, result);
-                                if (result === 'win')  winnerUserId = user._id;
-                                if (result === 'loss') loserUserId  = user._id;
-                            } catch (e) { logger.error(`Failed to update tournament score for ${player.username}:`, e); }
+                            if (player.username === winner) { winnerUserId = user._id; winnerScore = player.score || 0; }
+                            else                            { loserUserId  = user._id; loserScore  = player.score || 0; }
                         }
                     }
                     if (winnerUserId && loserUserId) {
                         try {
-                            const { action } = await ts.processMatchResult(room.tournamentId, winnerUserId, loserUserId);
-                            if (action === 'round_advanced')      io.emit('tournamentRoundAdvanced', { tournamentId: room.tournamentId });
-                            if (action === 'tournament_complete') io.emit('tournamentComplete',      { tournamentId: room.tournamentId });
-                        } catch (e) { logger.error('Failed to advance tournament round:', e); }
+                            const { action, claimed } = await ts.processClaimedMatchResult(
+                                room.tournamentId, room.matchId, roomId,
+                                winnerUserId, loserUserId, winnerScore, loserScore
+                            );
+                            if (claimed) {
+                                await updatePlayerStats(room.players.map(p => ({
+                                    username: p.username, score: p.score || 0,
+                                    totalResponseTime: p.totalResponseTime || 0, isBot: p.isBot || false,
+                                })), { winner, botOpponent, betAmount: room.betAmount, gameMode: room.gameMode });
+                                if (action === 'round_advanced')      io.emit('tournamentRoundAdvanced', { tournamentId: room.tournamentId });
+                                if (action === 'tournament_complete') io.emit('tournamentComplete',      { tournamentId: room.tournamentId });
+                            } else {
+                                logger.warn(`[handleGameOver] Match ${room.matchId} not claimed for room ${roomId} — skipping stats`);
+                            }
+                        } catch (e) { logger.error('Failed to process tournament match result:', e); }
                     }
                 }
             }

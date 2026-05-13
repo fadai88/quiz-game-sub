@@ -10,6 +10,7 @@ const PrizeCycle = require('../models/PrizeCycle');
 const CycleStat = require('../models/CycleStat');
 const { fromAtomicUnits, formatUSDC } = require('../utils/usdcUtils');
 const { getCleanActiveRooms, getGameRoom, deleteGameRoom, logGameRoomsState } = require('./roomManager');
+const { acquireIdempotencyLock } = require('../utils/idempotency');
 const { alertManager } = require('../config/alerts');
 const { GAME_MODES } = require('../config/constants');
 
@@ -132,27 +133,48 @@ async function handlePlayerLeftWin(roomId, remainingPlayer, disconnectedPlayer, 
             message: `${disconnectedPlayer.username} left the game. ${remainingPlayer.username} wins by forfeit!`,
         });
 
-        await updatePlayerStats(allPlayers, {
-            winner:      remainingPlayer.username,
-            botOpponent,
-            betAmount,
-            gameMode:    room?.gameMode,
-        });
+        // Tournament stats are updated inside processClaimedMatchResult after match validation
+        if (room?.gameMode !== GAME_MODES.TOURNAMENT) {
+            await updatePlayerStats(allPlayers, {
+                winner:      remainingPlayer.username,
+                botOpponent,
+                betAmount,
+                gameMode:    room?.gameMode,
+            });
+        }
 
         // Advance tournament bracket on forfeit
-        if (room?.gameMode === GAME_MODES.TOURNAMENT && room.tournamentId && context.tournamentService) {
-            const winnerUser = await User.findOne({ walletAddress: remainingPlayer.username });
-            const loserUser  = await User.findOne({ walletAddress: disconnectedPlayer.username });
-            if (winnerUser && loserUser) {
-                try {
-                    const ts = context.tournamentService;
-                    await ts.updatePlayerScore(room.tournamentId, winnerUser._id, remainingPlayer.score || 0, 'win');
-                    await ts.updatePlayerScore(room.tournamentId, loserUser._id,  disconnectedPlayer.score || 0, 'loss');
-                    const { action } = await ts.processMatchResult(room.tournamentId, winnerUser._id, loserUser._id);
-                    if (action === 'round_advanced')     io.emit('tournamentRoundAdvanced', { tournamentId: room.tournamentId });
-                    if (action === 'tournament_complete') io.emit('tournamentComplete',      { tournamentId: room.tournamentId });
-                } catch (e) {
-                    logger.error('Failed to advance tournament after forfeit:', e);
+        if (room?.gameMode === GAME_MODES.TOURNAMENT && room.tournamentId && room.matchId && context.tournamentService) {
+            const forfeitLockKey = `tournamentGameOver:${room.matchId}`;
+            const lockAcquired = await acquireIdempotencyLock(forfeitLockKey, 60);
+            if (!lockAcquired) {
+                logger.info(`Tournament forfeit: duplicate processing blocked for match ${room.matchId}`);
+            } else {
+                const winnerUser = await User.findOne({ walletAddress: remainingPlayer.username });
+                const loserUser  = await User.findOne({ walletAddress: disconnectedPlayer.username });
+                if (winnerUser && loserUser) {
+                    try {
+                        const ts = context.tournamentService;
+                        const { action, claimed } = await ts.processClaimedMatchResult(
+                            room.tournamentId, room.matchId, roomId,
+                            winnerUser._id, loserUser._id,
+                            remainingPlayer.score || 0, disconnectedPlayer.score || 0
+                        );
+                        if (claimed) {
+                            await updatePlayerStats(allPlayers, {
+                                winner:      remainingPlayer.username,
+                                botOpponent,
+                                betAmount,
+                                gameMode:    room.gameMode,
+                            });
+                            if (action === 'round_advanced')      io.emit('tournamentRoundAdvanced', { tournamentId: room.tournamentId });
+                            if (action === 'tournament_complete') io.emit('tournamentComplete',      { tournamentId: room.tournamentId });
+                        } else {
+                            logger.warn(`[handlePlayerLeftWin] Match ${room.matchId} not claimed for room ${roomId} — skipping stats`);
+                        }
+                    } catch (e) {
+                        logger.error('Failed to advance tournament after forfeit:', e);
+                    }
                 }
             }
         }

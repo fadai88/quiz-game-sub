@@ -1152,6 +1152,14 @@ async function handleGameEvent(socket, event, args) {
             );
             if (!pendingMatch) { socket.emit('joinGameFailure', 'No pending match found for you in this round'); return; }
 
+            // Resolve the expected opponent wallet to prevent same-wallet pairings
+            const opponentUserId = pendingMatch.player1.toString() === user._id.toString()
+                ? pendingMatch.player2
+                : pendingMatch.player1;
+            const opponentUser = await User.findById(opponentUserId);
+            if (!opponentUser) { socket.emit('joinGameFailure', 'Opponent not found'); return; }
+            const expectedOpponentWallet = opponentUser.walletAddress;
+
             // Leave any existing room
             if (socket.roomId) {
                 const oldRoomId = socket.roomId;
@@ -1176,13 +1184,18 @@ async function handleGameEvent(socket, event, args) {
             // Queue is scoped to the specific bracket match — prevents cross-match pairing
             const queueKey = `matchmaking:tournament:${tournamentId}:${pendingMatch.matchId}`;
 
-            // Check for a waiting opponent — skip stale entries from disconnected players
+            // Check for a waiting opponent — validate wallet identity and liveness
             let opponent = null;
             let opponentSocket = null;
             while (true) {
                 const opponentJson = await redisClient.lpop(queueKey);
                 if (!opponentJson) break;
                 const candidate = JSON.parse(opponentJson);
+                // Reject same-wallet (two sockets for the same account) or wrong bracket participant
+                if (candidate.walletAddress === walletAddress || candidate.walletAddress !== expectedOpponentWallet) {
+                    logger.warn(`[joinTournamentGame] Rejected invalid queue entry: expected ${expectedOpponentWallet}, got ${candidate.walletAddress}`);
+                    continue;
+                }
                 const candidateSocket = context.io.sockets.sockets.get(candidate.socketId);
                 if (candidateSocket) {
                     opponent = candidate;
@@ -1194,6 +1207,18 @@ async function handleGameEvent(socket, event, args) {
 
             if (opponent && opponentSocket) {
                 const roomId = generateRoomId();
+                const Tournament = require('../models/Tournament');
+                // Atomically claim the match — modifiedCount === 0 means another room already claimed it
+                const claimResult = await Tournament.updateOne(
+                    { _id: tournamentId },
+                    { $set: { 'rounds.$[r].matches.$[m].status': 'in_progress', 'rounds.$[r].matches.$[m].roomId': roomId } },
+                    { arrayFilters: [{ 'r.matches.matchId': pendingMatch.matchId }, { 'm.matchId': pendingMatch.matchId, 'm.status': 'pending' }] }
+                );
+                if (claimResult.modifiedCount === 0) {
+                    await redisClient.rpush(queueKey, JSON.stringify({ socketId: opponent.socketId, walletAddress: opponent.walletAddress, joinTime: Date.now() }));
+                    socket.emit('joinGameFailure', 'Match is no longer available');
+                    return;
+                }
                 const room = await createGameRoom(roomId, 0, 'human', { gameMode: 'tournament', tournamentId, matchId: pendingMatch.matchId, isPractice: false });
 
                 room.players.push(
@@ -1212,6 +1237,15 @@ async function handleGameEvent(socket, event, args) {
                 });
                 await startGame(roomId);
             } else {
+                // Reject if another room already claimed this match
+                const freshTournament = await ts.getTournament(tournamentId);
+                const freshRound = freshTournament?.rounds[freshTournament.rounds.length - 1];
+                const freshMatch = freshRound?.matches.find(m => m.matchId === pendingMatch.matchId);
+                if (!freshMatch || freshMatch.status !== 'pending') {
+                    socket.emit('joinGameFailure', 'This match is no longer available');
+                    return;
+                }
+
                 // Dedup check before creating any room — avoids orphaned rooms on duplicate joins
                 const existing = await redisClient.lrange(queueKey, 0, -1);
                 const alreadyQueued = existing.some(entry => {

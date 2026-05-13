@@ -146,106 +146,89 @@ class TournamentService {
     }
 
     /**
-     * Update player score in tournament.
-     * Returns { tournament, roundComplete } so server.js can react.
-     */
-    async updatePlayerScore(tournamentId, userId, scoreIncrement, gameResult) {
-        try {
-            const tournament = await Tournament.findById(tournamentId);
-            if (!tournament) throw new Error('Tournament not found');
-
-            const participant = tournament.participants.find(
-                p => p.userId.toString() === userId.toString()
-            );
-            if (!participant) throw new Error('Participant not found in tournament');
-
-            participant.score += scoreIncrement;
-            participant.gamesPlayed += 1;
-
-            if (gameResult === 'win') {
-                participant.wins += 1;
-            } else if (gameResult === 'loss') {
-                participant.losses += 1;
-                // Single-elimination: loser is out immediately
-                if (tournament.format === 'single_elimination') {
-                    participant.status = 'eliminated';
-                    logger.info(`Player ${userId} eliminated from tournament ${tournamentId}`);
-                }
-            }
-
-            await tournament.save();
-            logger.info(`Updated score for ${userId} in tournament ${tournamentId}: +${scoreIncrement}`);
-            return tournament;
-
-        } catch (error) {
-            logger.error('Failed to update player score:', error);
-            throw error;
-        }
-    }
-
-    /**
-     * Called by server.js after BOTH players in a tournament match have had
-     * their scores updated. Checks if the current round is done and either
-     * advances to the next round or completes the tournament.
+     * Atomically validates a claimed match, updates both participants, completes the
+     * match, and advances the bracket — all in a single Tournament.save().
      *
-     * @param {string} tournamentId
-     * @param {string} winnerUserId   - MongoDB _id of the match winner
-     * @param {string} loserUserId    - MongoDB _id of the match loser
-     * @returns {object} { tournament, action: 'round_advanced' | 'tournament_complete' | 'match_recorded' }
+     * Returns { action, claimed } where claimed===false means the match was rejected
+     * (wrong status or roomId) so the caller must not update external stats.
      */
-    async processMatchResult(tournamentId, winnerUserId, loserUserId) {
+    async processClaimedMatchResult(tournamentId, matchId, roomId, winnerUserId, loserUserId, winnerScore, loserScore) {
         try {
             const tournament = await Tournament.findById(tournamentId);
             if (!tournament) throw new Error('Tournament not found');
-            if (tournament.status !== 'in_progress') return { tournament, action: 'match_recorded' };
+            if (tournament.status !== 'in_progress') return { action: 'match_recorded', claimed: false };
 
-            // ── 1. Update the match record in the rounds array ──────────────
             const currentRound = tournament.rounds[tournament.rounds.length - 1];
-            if (currentRound) {
-                const match = currentRound.matches.find(m =>
-                    (m.player1?.toString() === winnerUserId.toString() && m.player2?.toString() === loserUserId.toString()) ||
-                    (m.player2?.toString() === winnerUserId.toString() && m.player1?.toString() === loserUserId.toString())
-                );
-                if (match) {
-                    match.winner = winnerUserId;
-                    match.status = 'completed';
+            if (!currentRound) return { action: 'match_recorded', claimed: false };
+
+            const match = currentRound.matches.find(m => m.matchId === matchId);
+            if (!match) {
+                logger.warn(`processClaimedMatchResult: match ${matchId} not found`);
+                return { action: 'match_recorded', claimed: false };
+            }
+            if (match.status !== 'in_progress' || match.roomId !== roomId) {
+                logger.warn(`processClaimedMatchResult: match ${matchId} status=${match.status} roomId=${match.roomId} expected ${roomId} — rejected`);
+                return { action: 'match_recorded', claimed: false };
+            }
+
+            // Verify winner and loser are exactly the two bracket participants
+            const p1 = match.player1?.toString();
+            const p2 = match.player2?.toString();
+            const wId = winnerUserId.toString();
+            const lId = loserUserId.toString();
+            if (wId === lId || !((wId === p1 && lId === p2) || (wId === p2 && lId === p1))) {
+                logger.warn(`processClaimedMatchResult: participant mismatch for match ${matchId} — expected [${p1},${p2}] got [${wId},${lId}]`);
+                return { action: 'match_recorded', claimed: false };
+            }
+
+            // Update winner participant
+            const winnerParticipant = tournament.participants.find(p => p.userId.toString() === winnerUserId.toString());
+            if (winnerParticipant) {
+                winnerParticipant.score      += winnerScore || 0;
+                winnerParticipant.gamesPlayed += 1;
+                winnerParticipant.wins        += 1;
+            }
+
+            // Update loser participant
+            const loserParticipant = tournament.participants.find(p => p.userId.toString() === loserUserId.toString());
+            if (loserParticipant) {
+                loserParticipant.score      += loserScore || 0;
+                loserParticipant.gamesPlayed += 1;
+                loserParticipant.losses      += 1;
+                if (tournament.format === 'single_elimination') {
+                    loserParticipant.status = 'eliminated';
+                    logger.info(`Player ${loserUserId} eliminated from tournament ${tournamentId}`);
                 }
             }
+
+            // Complete the match
+            match.winner = winnerUserId;
+            match.status = 'completed';
             await tournament.save();
 
-            // ── 2. Count still-active players ───────────────────────────────
+            // Check for round / tournament completion
             const activePlayers = tournament.participants.filter(p => p.status === 'active');
             logger.info(`Tournament ${tournamentId}: ${activePlayers.length} active players remaining`);
 
-            // ── 3. Only 1 player left → tournament is over ──────────────────
             if (activePlayers.length <= 1) {
                 logger.info(`Tournament ${tournamentId}: final match done, completing tournament`);
                 await this.completeTournament(tournamentId);
-                return { tournament: await Tournament.findById(tournamentId), action: 'tournament_complete' };
+                return { action: 'tournament_complete', claimed: true };
             }
 
-            // ── 4. Check if the current round's pending matches are all done ──
-            const pendingMatchesInRound = currentRound
-                ? currentRound.matches.filter(m => m.status !== 'completed').length
-                : 0;
-
+            const pendingMatchesInRound = currentRound.matches.filter(m => m.status !== 'completed').length;
             if (pendingMatchesInRound === 0) {
-                // ── 5. All matches done → start next round ───────────────────
-                const nextRoundNumber = (currentRound?.roundNumber ?? 0) + 1;
-                logger.info(`Tournament ${tournamentId}: round ${currentRound?.roundNumber} complete, generating round ${nextRoundNumber}`);
-
-                // Re-fetch to get the saved copy with updated eliminations
+                const nextRoundNumber = (currentRound.roundNumber ?? 0) + 1;
+                logger.info(`Tournament ${tournamentId}: round ${currentRound.roundNumber} complete, generating round ${nextRoundNumber}`);
                 const freshTournament = await Tournament.findById(tournamentId);
                 await this._generateRoundMatchups(freshTournament, nextRoundNumber);
-
-                return { tournament: await Tournament.findById(tournamentId), action: 'round_advanced' };
+                return { action: 'round_advanced', claimed: true };
             }
 
-            // Round still has pending matches — just return
-            return { tournament, action: 'match_recorded' };
+            return { action: 'match_recorded', claimed: true };
 
         } catch (error) {
-            logger.error('Failed to process match result:', error);
+            logger.error('Failed to process claimed match result:', error);
             throw error;
         }
     }
