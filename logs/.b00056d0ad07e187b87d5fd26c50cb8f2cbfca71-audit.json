@@ -264,6 +264,11 @@
             "date": 1778047278565,
             "name": "logs/audit-2026-05-06.log",
             "hash": "d31c8b7189fe75d18c21ed7dbc35a1025089e0c6445995fadd576ed5fb0e214b"
+        },
+        {
+            "date": 1778780228901,
+            "name": "logs/audit-2026-05-14.log",
+            "hash": "8932d65a1200ee58d9f5e06aabbb33a6da96bb8bef0b33637a9a327764b9e484"
         }
     ],
     "hashType": "sha256"

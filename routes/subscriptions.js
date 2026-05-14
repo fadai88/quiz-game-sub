@@ -32,12 +32,26 @@ router.get('/status', authenticate, async (req, res) => {
         const user = await User.findById(req.user.id);
         let endDate = null;
         let plan = null;
+        let status = user.subscriptionStatus || 'none';
+        let tier   = user.accountTier || 'free';
+
         if (user.subscriptionId) {
             const sub = await Subscription.findById(user.subscriptionId);
             endDate = sub?.endDate || null;
-            plan = sub?.metadata?.plan || null;
+            plan    = sub?.metadata?.plan || null;
+
+            // Real-time expiry check — cron may have missed this if server was down
+            if (sub && sub.status === 'active' && endDate && endDate < new Date()) {
+                sub.status = 'expired';
+                await sub.save();
+                await User.findByIdAndUpdate(user._id, { subscriptionStatus: 'expired', accountTier: 'free' });
+                status = 'expired';
+                tier   = 'free';
+                logger.info(`[SUBSCRIPTION] Inline-expired subscription ${sub._id} for user ${user._id}`);
+            }
         }
-        res.json({ success: true, status: user.subscriptionStatus || 'none', tier: user.accountTier || 'free', endDate, plan, subscription: user.subscriptionId || null });
+
+        res.json({ success: true, status, tier, endDate, plan, subscription: user.subscriptionId || null });
     } catch (error) {
         logger.error('[SUBSCRIPTION] Error checking status:', { error: error.message });
         res.status(500).json({ success: false, error: error.message });

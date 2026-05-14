@@ -1,5 +1,6 @@
 const Tournament = require('../models/Tournament');
 const User = require('../models/User');
+const Subscription = require('../models/Subscription');
 const PaymentQueue = require('../models/PaymentQueue');
 const logger = require('../logger');
 const { v4: uuidv4 } = require('uuid');
@@ -56,9 +57,10 @@ class TournamentService {
                 throw new Error('Tournament not found');
             }
 
-            // Check if user has premium access
+            // Check if user has a currently-valid premium subscription (real-time endDate check)
             const user = await User.findById(userId);
-            if (!user.hasPremiumAccess()) {
+            const hasActiveSub = await Subscription.hasActiveSubscription(userId);
+            if (!hasActiveSub) {
                 throw new Error('Premium subscription required to join tournaments');
             }
 

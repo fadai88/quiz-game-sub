@@ -14,6 +14,7 @@ const logger          = require('../logger');
 const context         = require('../context');
 const BotDetector     = require('../botDetector');
 const User            = require('../models/User');
+const Subscription    = require('../models/Subscription');
 const GameSession     = require('../models/GameSession');
 const { issueChallenge, consumeChallenge } = require('../utils/challengeStore');
 const { getClientIpFromSocket } = require('../middleware/trustedProxy');
@@ -1025,7 +1026,8 @@ async function handleGameEvent(socket, event, args) {
                 continue;
             }
             const entryUser = await User.findOne({ walletAddress: entry.walletAddress });
-            if (entryUser && entryUser.hasPremiumAccess()) {
+            const hasActiveSub = entryUser ? await Subscription.hasActiveSubscription(entryUser._id) : false;
+            if (hasActiveSub) {
                 premiumPool.push(entry);
             } else {
                 await removeFromMatchmakingPool(betAmount, entry.socketId);
