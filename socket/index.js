@@ -620,7 +620,7 @@ async function handleGameEvent(socket, event, args) {
         }
 
         const practiceUser = await User.findOne({ walletAddress });
-        if (practiceUser && practiceUser.hasPremiumAccess()) {
+        if (practiceUser && await Subscription.hasActiveSubscription(practiceUser._id)) {
             socket.emit('joinGameFailure', 'Premium subscribers cannot join practice games. Use ranked matchmaking instead.');
             return;
         }
@@ -1123,7 +1123,8 @@ async function handleGameEvent(socket, event, args) {
         try {
             const user = await User.findOne({ walletAddress });
             if (!user) { socket.emit('joinGameFailure', 'User not found'); return; }
-            if (!user.hasPremiumAccess()) { socket.emit('joinGameFailure', 'Premium subscription required'); return; }
+            const hasActiveSub = await Subscription.hasActiveSubscription(user._id);
+            if (!hasActiveSub) { socket.emit('joinGameFailure', 'Premium subscription required'); return; }
 
             const ts = context.tournamentService;
             const tournament = await ts.getTournament(tournamentId);
@@ -1220,6 +1221,12 @@ async function handleGameEvent(socket, event, args) {
                     await redisClient.rpush(queueKey, JSON.stringify({ socketId: opponent.socketId, walletAddress: opponent.walletAddress, joinTime: Date.now() }));
                     socket.emit('joinGameFailure', 'Match is no longer available');
                     return;
+                }
+                // Delete the opponent's waiting room created during the queue phase
+                if (opponentSocket.roomId) {
+                    await deleteGameRoom(opponentSocket.roomId).catch(() => {});
+                    opponentSocket.leave(opponentSocket.roomId);
+                    opponentSocket.roomId = null;
                 }
                 const room = await createGameRoom(roomId, 0, 'human', { gameMode: 'tournament', tournamentId, matchId: pendingMatch.matchId, isPractice: false });
 

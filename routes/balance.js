@@ -19,6 +19,7 @@ const { PublicKey } = require('@solana/web3.js');
 const logger  = require('../logger');
 const context = require('../context');
 const User    = require('../models/User');
+const Subscription  = require('../models/Subscription');
 const PaymentQueue  = require('../models/PaymentQueue');
 const PrizeCycle    = require('../models/PrizeCycle');
 const CycleStat     = require('../models/CycleStat');
@@ -111,12 +112,12 @@ router.get('/leaderboard', async (req, res) => {
             .limit(50)
             .lean();
 
-        // Filter to premium active subscribers only
+        // Filter to active subscribers only — real-time endDate check, not stale User fields
         const wallets = stats.map(s => s.walletAddress);
         const premiumSet = new Set(
-            (await User.find({ walletAddress: { $in: wallets }, accountTier: 'premium', subscriptionStatus: 'active' })
+            (await Subscription.find({ walletAddress: { $in: wallets }, status: 'active', endDate: { $gt: new Date() } })
                 .select('walletAddress').lean())
-                .map(u => u.walletAddress)
+                .map(s => s.walletAddress)
         );
         const rows = stats
             .filter(s => premiumSet.has(s.walletAddress))

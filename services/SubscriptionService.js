@@ -252,9 +252,9 @@ class SubscriptionService {
         const startDate = new Date();
         const endDate   = new Date();
         if (plan === 'yearly') {
-            endDate.setFullYear(endDate.getFullYear() + 1);
+            endDate.setTime(endDate.getTime() + (365 * 24 * 60 * 60 * 1000));
         } else {
-            endDate.setMonth(endDate.getMonth() + 1);
+            endDate.setTime(endDate.getTime() + (30 * 24 * 60 * 60 * 1000));
         }
 
         const subscription = await Subscription.create({
@@ -319,6 +319,7 @@ class SubscriptionService {
     async cancelSubscription(subscriptionId) {
         const subscription = await Subscription.findById(subscriptionId);
         if (!subscription) throw new Error('Subscription not found');
+        if (subscription.status !== 'active') throw new Error(`Subscription cannot be cancelled (status: ${subscription.status})`);
 
         await subscription.cancel();
 

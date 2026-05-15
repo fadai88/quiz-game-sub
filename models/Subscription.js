@@ -44,7 +44,7 @@ const SubscriptionSchema = new mongoose.Schema({
     },
     autoRenew: {
         type: Boolean,
-        default: true
+        default: false
     },
     transactionSignature: {
         type: String,
