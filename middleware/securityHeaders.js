@@ -26,11 +26,11 @@ function securityHeaders(req, res, next) {
 
     const cspDirectives = [
         "default-src 'self'",
-        `script-src 'self' 'nonce-${nonce}' https://www.google.com https://www.gstatic.com https://bundle.run https://unpkg.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://static.cloudflareinsights.com`,
+        `script-src 'self' 'nonce-${nonce}' https://www.google.com https://www.gstatic.com https://static.cloudflareinsights.com`,
         "style-src 'self' 'unsafe-inline'",
         "img-src 'self' data: https:",
         "font-src 'self' data:",
-        "connect-src 'self' wss: ws: https://courtnay-0wegdq-fast-mainnet.helius-rpc.com https://devnet.helius-rpc.com https://mainnet.helius-rpc.com https://api.anthropic.com https://unpkg.com https://cdn.jsdelivr.net https://bundle.run https://cdnjs.cloudflare.com https://www.google.com https://www.gstatic.com",
+        "connect-src 'self' wss: ws: https://courtnay-0wegdq-fast-mainnet.helius-rpc.com https://devnet.helius-rpc.com https://mainnet.helius-rpc.com https://api.anthropic.com https://www.google.com https://www.gstatic.com",
         "frame-src 'self' https://www.google.com https://recaptcha.google.com https://www.recaptcha.net",
         "child-src 'self' https://www.google.com https://recaptcha.google.com",
         "frame-ancestors 'none'",

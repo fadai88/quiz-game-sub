@@ -1,5 +1,6 @@
 // services/PaymentProcessor.js
-const { Connection, PublicKey, Transaction, sendAndConfirmTransaction, getLatestBlockhash } = require('@solana/web3.js');
+const { Connection, PublicKey, Transaction } = require('@solana/web3.js');
+const bs58 = require('bs58').default;
 const { createTransferCheckedInstruction, getAssociatedTokenAddress, createAssociatedTokenAccountInstruction, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 const PaymentQueue = require('../models/PaymentQueue');
 
@@ -196,10 +197,7 @@ class PaymentProcessor {
             }
             
             // Send the actual payment
-            const signature = await this.sendPayment(
-                payment.recipientWallet, 
-                payment.amount
-            );
+            const signature = await this.sendPayment(payment);
             
             // Mark payment as completed (with try-catch)
             try {
@@ -278,102 +276,120 @@ class PaymentProcessor {
         }
     }
 
-    // Send a payment using Solana
-    async sendPayment(recipientWalletAddress, amount) {
+    // Send a payment using Solana.
+    //
+    // Safety guarantee: the transaction is signed offline first so we can
+    // derive its signature before any network call. That signature is persisted
+    // to the DB before broadcasting. On every retry we check whether the stored
+    // signature already confirmed on-chain — if it did, we return it immediately
+    // without building or sending another transaction. This prevents double-send
+    // when sendRawTransaction succeeds but confirmation times out.
+    async sendPayment(payment) {
         const MAX_RETRIES = 3;
         let currentRetry = 0;
         let currentEndpointIndex = Math.floor(Math.random() * this.config.rpcEndpoints.length);
         let connection = this.config.connection;
-        
+
         while (currentRetry < MAX_RETRIES) {
             try {
-                console.log({ level: 'info', event: 'sendPayment', attempt: currentRetry + 1, amount, wallet: recipientWalletAddress, rpc: connection.rpcEndpoint });
-                
-                const recipientPublicKey = new PublicKey(recipientWalletAddress);
-                
-                // Get token accounts for treasury and recipient
+                console.log({ level: 'info', event: 'sendPayment', attempt: currentRetry + 1, amount: payment.amount, wallet: payment.recipientWallet, rpc: connection.rpcEndpoint });
+
+                // ── Step 1: Check if a previously broadcast signature already confirmed ──
+                // Prevents double-send: if the last attempt broadcast but timed out
+                // during confirmation, the tx may already be finalized.
+                if (payment.broadcastSignature) {
+                    const alreadyConfirmed = await this._checkSignatureStatus(connection, payment.broadcastSignature);
+                    if (alreadyConfirmed) {
+                        console.log({ level: 'info', event: 'sendPayment', message: 'Previous broadcast already confirmed', signature: payment.broadcastSignature });
+                        return payment.broadcastSignature;
+                    }
+                    console.log({ level: 'info', event: 'sendPayment', message: 'Previous signature not confirmed, building new transaction' });
+                }
+
+                // ── Step 2: Build transaction ─────────────────────────────────────────
+                const recipientPublicKey = new PublicKey(payment.recipientWallet);
+
                 const treasuryTokenAccount = await this.findAssociatedTokenAddress(
                     this.config.TREASURY_WALLET,
                     this.config.USDC_MINT
                 );
-                
                 const recipientTokenAccount = await this.findAssociatedTokenAddress(
                     recipientPublicKey,
                     this.config.USDC_MINT
                 );
-                
-                // Create transaction
+
                 const transaction = new Transaction();
-                
-                // Check if recipient ATA exists and create if not
+
                 const recipientTokenAccountInfo = await connection.getAccountInfo(recipientTokenAccount);
                 if (!recipientTokenAccountInfo) {
-                    console.log({ level: 'info', event: 'sendPayment', message: `Creating ATA for ${recipientWalletAddress}` });
+                    console.log({ level: 'info', event: 'sendPayment', message: `Creating ATA for ${payment.recipientWallet}` });
                     transaction.add(
                         createAssociatedTokenAccountInstruction(
-                            this.config.TREASURY_WALLET,  // payer (treasury pays the fee)
+                            this.config.TREASURY_WALLET,
                             recipientTokenAccount,
                             recipientPublicKey,
                             this.config.USDC_MINT
                         )
                     );
                 }
-                
-                // Create transfer instruction
-                const transferIx = createTransferCheckedInstruction(
-                    treasuryTokenAccount,
-                    this.config.USDC_MINT,
-                    recipientTokenAccount,
-                    this.config.TREASURY_WALLET,
-                    amount, // Convert to USDC decimals
-                    6
+
+                transaction.add(
+                    createTransferCheckedInstruction(
+                        treasuryTokenAccount,
+                        this.config.USDC_MINT,
+                        recipientTokenAccount,
+                        this.config.TREASURY_WALLET,
+                        payment.amount,
+                        6
+                    )
                 );
-                transaction.add(transferIx);
-                
+
                 transaction.feePayer = this.config.TREASURY_WALLET;
-                
-                // Use getLatestBlockhash instead of getRecentBlockhash
                 console.log({ level: 'info', event: 'sendPayment', message: 'Getting latest blockhash...' });
                 const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
                 transaction.recentBlockhash = blockhash;
-                transaction.lastValidBlockHeight = lastValidBlockHeight;
-                
-                // Sign and send transaction
-                console.log({ level: 'info', event: 'sendPayment', message: 'Signing and sending...' });
-                const signature = await sendAndConfirmTransaction(
-                    connection,
-                    transaction,
-                    [this.config.TREASURY_KEYPAIR],
-                    {
-                        skipPreflight: false,
-                        preflightCommitment: 'confirmed',
-                        commitment: 'confirmed',
-                        maxRetries: 5
-                    }
-                );
-                
+
+                // ── Step 3: Sign offline — derive signature before any network call ──
+                transaction.sign(this.config.TREASURY_KEYPAIR);
+                const signature = bs58.encode(transaction.signatures[0].signature);
+
+                // ── Step 4: Persist signature BEFORE broadcasting ─────────────────────
+                // If broadcast succeeds but confirmation times out, the next retry
+                // finds this signature and confirms it rather than sending a new tx.
+                await PaymentQueue.findByIdAndUpdate(payment._id, { broadcastSignature: signature });
+                payment.broadcastSignature = signature;
+
+                // ── Step 5: Broadcast ─────────────────────────────────────────────────
+                console.log({ level: 'info', event: 'sendPayment', message: 'Broadcasting...', signature });
+                await connection.sendRawTransaction(transaction.serialize(), {
+                    skipPreflight: false,
+                    preflightCommitment: 'confirmed',
+                });
+
+                // ── Step 6: Confirm by the stored signature ───────────────────────────
+                console.log({ level: 'info', event: 'sendPayment', message: 'Confirming...', signature });
+                await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+
                 console.log({ level: 'info', event: 'sendPayment', signature, status: 'success' });
                 return signature;
+
             } catch (error) {
                 console.error({ level: 'error', event: 'sendPayment', attempt: currentRetry + 1, error: error.message, rpc: connection.rpcEndpoint });
                 currentRetry++;
-                
+
                 if (currentRetry >= MAX_RETRIES) {
                     console.error({ level: 'error', event: 'sendPayment', message: 'Max retries reached' });
                     throw error;
                 }
-                
-                // Try a different RPC endpoint
+
                 currentEndpointIndex = (currentEndpointIndex + 1) % this.config.rpcEndpoints.length;
                 const newEndpoint = this.config.rpcEndpoints[currentEndpointIndex];
                 console.log({ level: 'info', event: 'sendPayment', message: `Switching RPC to ${newEndpoint}` });
-                
                 connection = new Connection(newEndpoint, {
                     commitment: 'confirmed',
-                    confirmTransactionInitialTimeout: 60000
+                    confirmTransactionInitialTimeout: 60000,
                 });
-                
-                // Exponential backoff
+
                 const waitTime = Math.pow(2, currentRetry) * 1000;
                 console.log({ level: 'info', event: 'sendPayment', message: `Waiting ${waitTime}ms before retry` });
                 await new Promise(resolve => setTimeout(resolve, waitTime));
@@ -381,6 +397,23 @@ class PaymentProcessor {
         }
 
         throw new Error('Failed to send payment after multiple attempts');
+    }
+
+    // Check whether a previously broadcast signature confirmed on-chain.
+    // Returns true if confirmed/finalized, false if unknown or not yet indexed.
+    // Throws if the transaction is known to have failed on-chain.
+    async _checkSignatureStatus(connection, signature) {
+        try {
+            const statuses = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+            const status = statuses?.value?.[0];
+            if (!status) return false;
+            if (status.err) throw new Error(`Broadcast transaction failed on-chain: ${JSON.stringify(status.err)}`);
+            return status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized';
+        } catch (error) {
+            if (error.message.startsWith('Broadcast transaction failed')) throw error;
+            console.warn({ level: 'warn', event: '_checkSignatureStatus', signature, error: error.message });
+            return false;
+        }
     }
 
     // Helper to find associated token address

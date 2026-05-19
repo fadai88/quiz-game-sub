@@ -41,6 +41,10 @@ const PaymentQueueSchema = new mongoose.Schema({
     type: String,
     sparse: true
   },
+  broadcastSignature: {
+    type: String,
+    sparse: true
+  },
   errorMessage: {
     type: String
   },
@@ -101,9 +105,15 @@ PaymentQueueSchema.statics.getPendingPayments = async function(limit = 10) {
   return this.find({
     $or: [
       { status: 'pending' },
-      { 
-        status: 'failed', 
+      {
+        status: 'failed',
         attempts: { $lt: 5 },
+        lastAttemptAt: { $lt: fiveMinutesAgo }
+      },
+      // Pick up payments stuck in 'processing' (server crash mid-flight).
+      // sendPayment will check broadcastSignature before building a new tx.
+      {
+        status: 'processing',
         lastAttemptAt: { $lt: fiveMinutesAgo }
       }
     ]

@@ -14,6 +14,16 @@
             "date": 1778821932553,
             "name": "logs/performance-2026-05-15.log",
             "hash": "62275ee64bea102c7d5728e86f5b97c5a576cbe185b9925b23d2a8f76812ae66"
+        },
+        {
+            "date": 1778930890962,
+            "name": "logs/performance-2026-05-16.log",
+            "hash": "51022541f39cf1d5cc50159ca98c8f41673fb241edc5761ba8e390be9c3a3d0c"
+        },
+        {
+            "date": 1778998675445,
+            "name": "logs/performance-2026-05-17.log",
+            "hash": "4887d0d11146dbb480decd9dd1685fd1c46b6cf3596a583752b00ca6bd1d3920"
         }
     ],
     "hashType": "sha256"
