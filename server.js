@@ -142,7 +142,7 @@ function getHttpLimiter() {
 
 async function httpRateLimit(req, res, next) {
     try {
-        await getHttpLimiter().consume(req.ip);
+        await getHttpLimiter().consume(getClientIpFromRequest(req));
         next();
     } catch {
         res.status(429).json({ success: false, error: 'Too many requests. Please slow down.' });

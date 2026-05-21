@@ -1,5 +1,9 @@
         const TOURNAMENTS_API = '/api/tournaments';
         const SUBSCRIPTION_API = '/api/subscription';
+
+        function esc(val) {
+            return String(val ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+        }
         
         let userSubscription = null;
         let hasPremium = false;
@@ -83,18 +87,18 @@
                     <div class="tournament-card">
                         <div class="tournament-header">
                             <div>
-                                <div class="tournament-title">${tournament.name}</div>
-                                <p style="color: #94a3b8; font-size: 14px;">${tournament.description || ''}</p>
+                                <div class="tournament-title">${esc(tournament.name)}</div>
+                                <p style="color: #94a3b8; font-size: 14px;">${esc(tournament.description)}</p>
                             </div>
-                            <div class="tournament-badge badge-${tournament.status}">
-                                ${tournament.status.toUpperCase().replace('_', ' ')}
+                            <div class="tournament-badge badge-${esc(tournament.status)}">
+                                ${esc(tournament.status).toUpperCase().replace('_', ' ')}
                             </div>
                         </div>
 
                         ${tournament.prizePool?.total > 0 ? `
                             <div class="prize-pool">
                                 <div style="font-size: 14px; opacity: 0.9;">Prize Pool</div>
-                                <div class="prize-amount">${tournament.prizePool.total} ${tournament.prizePool.currency}</div>
+                                <div class="prize-amount">${Number(tournament.prizePool.total)} ${esc(tournament.prizePool.currency)}</div>
                             </div>
                         ` : ''}
 
@@ -105,11 +109,11 @@
                         <div class="tournament-info">
                             <div class="info-row">
                                 <span class="info-label">Start Time</span>
-                                <span class="info-value">${startTime.toLocaleString()}</span>
+                                <span class="info-value">${esc(startTime.toLocaleString())}</span>
                             </div>
                             <div class="info-row">
                                 <span class="info-label">Format</span>
-                                <span class="info-value">${tournament.format?.replace('_', ' ')}</span>
+                                <span class="info-value">${esc(tournament.format).replace('_', ' ')}</span>
                             </div>
                             <div class="info-row">
                                 <span class="info-label">Questions</span>
@@ -118,7 +122,7 @@
                         </div>
 
                         ${!isHistory && now < startTime ? `
-                            <div class="countdown" id="countdown-${tournament._id}">
+                            <div class="countdown" id="countdown-${esc(tournament._id)}">
                                 Starting in: <span class="countdown-value"></span>
                             </div>
                         ` : ''}
@@ -144,9 +148,9 @@
                 const winner = tournament.winners?.find(w => w.userId === userSubscription?.userId);
                 
                 if (winner) {
-                    return `<button class="action-btn" disabled>🏆 Position ${winner.position} - Won ${winner.prizeAmount} USDC</button>`;
+                    return `<button class="action-btn" disabled>🏆 Position ${Number(winner.position)} - Won ${Number(winner.prizeAmount)} USDC</button>`;
                 }
-                return `<button class="action-btn" disabled>Score: ${userParticipant?.score || 0}</button>`;
+                return `<button class="action-btn" disabled>Score: ${Number(userParticipant?.score || 0)}</button>`;
             }
 
             if (tournament.status === 'registration') {
@@ -154,12 +158,12 @@
                     return `<button class="action-btn" disabled>Registration Closed</button>`;
                 }
                 if (isRegistered) {
-                    return `<button class="action-btn unregister-btn" onclick="unregisterFromTournament('${tournament._id}')">Unregister</button>`;
+                    return `<button class="action-btn unregister-btn" onclick="unregisterFromTournament('${esc(tournament._id)}')">Unregister</button>`;
                 }
                 if (isFull) {
                     return `<button class="action-btn" disabled>Tournament Full</button>`;
                 }
-                return `<button class="action-btn register-btn" onclick="registerForTournament('${tournament._id}')">Register Now</button>`;
+                return `<button class="action-btn register-btn" onclick="registerForTournament('${esc(tournament._id)}')">Register Now</button>`;
             }
 
             if (tournament.status === 'in_progress' && isRegistered) {

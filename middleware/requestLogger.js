@@ -4,6 +4,7 @@
 
 const { v4: uuidv4 } = require('uuid');
 const logger = require('../logger');
+const { getClientIpFromRequest, getClientIpFromSocket } = require('./trustedProxy');
 
 // ============================================================================
 // HTTP REQUEST LOGGER MIDDLEWARE
@@ -18,11 +19,9 @@ function httpRequestLogger(req, res, next) {
                         req.headers['x-request-id'] || 
                         uuidv4();
     
-    // Extract client information
-    const ip = req.headers['x-forwarded-for'] || 
-               req.headers['x-real-ip'] || 
-               req.connection.remoteAddress || 
-               req.socket.remoteAddress;
+    // Extract client information — use trusted-proxy-aware helper to prevent
+    // spoofing via forged X-Forwarded-For / X-Real-IP headers.
+    const ip = getClientIpFromRequest(req);
     
     const userAgent = req.headers['user-agent'];
     const sessionId = req.cookies?.sessionToken?.substring(0, 8);
@@ -114,10 +113,8 @@ function socketLogger(socket, next) {
     // Generate correlation ID for this connection
     socket.correlationId = uuidv4();
     
-    // Extract client information
-    const ip = socket.handshake.headers['x-forwarded-for'] || 
-               socket.handshake.headers['x-real-ip'] || 
-               socket.handshake.address;
+    // Extract client information — use trusted-proxy-aware helper.
+    const ip = getClientIpFromSocket(socket);
     
     const userAgent = socket.handshake.headers['user-agent'];
     

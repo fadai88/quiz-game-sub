@@ -85,7 +85,7 @@ router.get('/payment/:paymentId', authenticate, async (req, res) => {
             trackValidationFailure(req.ip, 'payment', error.details.map(d => d.message).join('; '));
             return res.status(400).json({ success: false, error: 'Invalid payment ID' });
         }
-        const payment = await PaymentQueue.findById(value.paymentId);
+        const payment = await PaymentQueue.findOne({ _id: value.paymentId, recipientWallet: req.user.walletAddress });
         if (!payment) return res.status(404).json({ error: 'Payment not found' });
         res.json({
             paymentId:            payment._id,

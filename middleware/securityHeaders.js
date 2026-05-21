@@ -45,7 +45,7 @@ function securityHeaders(req, res, next) {
     ].join(', ');
     res.setHeader('Permissions-Policy', permissionsPolicy);
 
-    if (ENVIRONMENT === 'production' && req.secure) {
+    if (ENVIRONMENT === 'production' && (req.secure || req.headers['x-forwarded-proto'] === 'https')) {
         res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
     }
 
