@@ -689,7 +689,7 @@ async function handleGameEvent(socket, event, args) {
     if (event === 'joinGame') {
         const { error } = transactionSchema.validate(data);
         if (error) {
-            trackValidationFailure(socket.user?.walletAddress || socket.handshake.address, 'joinGame', error.message);
+            trackValidationFailure(socket.user?.walletAddress || getClientIpFromSocket(socket), 'joinGame', error.message);
             socket.emit('joinGameFailure', 'Invalid input format'); return;
         }
         const walletAddress = socket.user.walletAddress;

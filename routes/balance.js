@@ -36,11 +36,11 @@ router.get('/balance/:walletAddress', authenticate, async (req, res) => {
     try {
         const { walletAddress } = req.params;
         if (!walletAddress || walletAddress.length < 32 || walletAddress.length > 44) {
-            SecurityLogger.log('balance_check_invalid_address', { ip: req.ip, address: walletAddress });
+            SecurityLogger.log('balance_check_invalid_address', { ip: getClientIpFromRequest(req), address: walletAddress });
             return res.status(400).json({ error: 'Invalid wallet address' });
         }
         if (req.user.walletAddress !== walletAddress) {
-            SecurityLogger.log('balance_check_unauthorized', { ip: req.ip, requestedWallet: walletAddress, sessionWallet: req.user.walletAddress });
+            SecurityLogger.log('balance_check_unauthorized', { ip: getClientIpFromRequest(req), requestedWallet: walletAddress, sessionWallet: req.user.walletAddress });
             return res.status(403).json({ error: 'Unauthorized' });
         }
         const cfg = context.config;
@@ -82,7 +82,7 @@ router.get('/payment/:paymentId', authenticate, async (req, res) => {
     try {
         const { error, value } = paymentIdParamSchema.validate(req.params, { abortEarly: false, stripUnknown: true });
         if (error) {
-            trackValidationFailure(req.ip, 'payment', error.details.map(d => d.message).join('; '));
+            trackValidationFailure(getClientIpFromRequest(req), 'payment', error.details.map(d => d.message).join('; '));
             return res.status(400).json({ success: false, error: 'Invalid payment ID' });
         }
         const payment = await PaymentQueue.findOne({ _id: value.paymentId, recipientWallet: req.user.walletAddress });

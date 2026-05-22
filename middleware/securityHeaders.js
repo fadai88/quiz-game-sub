@@ -5,6 +5,7 @@
 
 const crypto = require('crypto');
 const { ENVIRONMENT } = require('../config/constants');
+const { TRUSTED_PROXY_IPS } = require('./trustedProxy');
 
 function securityHeaders(req, res, next) {
     const nonce = crypto.randomBytes(16).toString('base64');
@@ -45,8 +46,17 @@ function securityHeaders(req, res, next) {
     ].join(', ');
     res.setHeader('Permissions-Policy', permissionsPolicy);
 
-    if (ENVIRONMENT === 'production' && (req.secure || req.headers['x-forwarded-proto'] === 'https')) {
-        res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+    if (ENVIRONMENT === 'production') {
+        // Only honour x-forwarded-proto when the immediate peer is a trusted proxy;
+        // otherwise any client can send the header and trigger HSTS on a plain-HTTP
+        // connection, confusing downstream caches and security tooling.
+        const peer = req.socket?.remoteAddress || '';
+        const normalizedPeer = peer.replace(/^::ffff:/, '');
+        const fromTrustedProxy = TRUSTED_PROXY_IPS.has(peer) || TRUSTED_PROXY_IPS.has(normalizedPeer);
+        const isHttps = req.secure || (fromTrustedProxy && req.headers['x-forwarded-proto'] === 'https');
+        if (isHttps) {
+            res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+        }
     }
 
     next();

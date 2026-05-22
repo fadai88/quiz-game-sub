@@ -3,6 +3,7 @@
 // Drop-in replacements for existing console.log statements
 
 const logger = require('../logger');
+const { getClientIpFromRequest, getClientIpFromSocket } = require('../middleware/trustedProxy');
 
 // ============================================================================
 // AUTHENTICATION EVENTS
@@ -15,7 +16,7 @@ const SecurityLogger = {
         logger.auth('login_success', {
             walletAddress,
             sessionId: sessionData.sessionId?.substring(0, 8),
-            ip: req.headers['x-forwarded-for'] || req.ip,
+            ip: getClientIpFromRequest(req),
             userAgent: req.headers['user-agent'],
             deviceFingerprint: sessionData.fingerprint,
             loginTime: new Date().toISOString()
@@ -27,7 +28,7 @@ const SecurityLogger = {
         logger.security('auth_failed', {
             walletAddress,
             reason,
-            ip: req.headers['x-forwarded-for'] || req.ip,
+            ip: getClientIpFromRequest(req),
             userAgent: req.headers['user-agent'],
             timestamp: new Date().toISOString()
         });
@@ -69,7 +70,7 @@ const SecurityLogger = {
         logger.auth('socket_authenticated', {
             walletAddress,
             socketId: socket.id,
-            ip: socket.handshake.headers['x-forwarded-for'] || socket.handshake.address,
+            ip: getClientIpFromSocket(socket),
             userAgent: socket.handshake.headers['user-agent'],
             transport: socket.conn.transport.name,
             timestamp: new Date().toISOString()
@@ -82,7 +83,7 @@ const SecurityLogger = {
             reason,
             walletAddress,
             socketId: socket.id,
-            ip: socket.handshake.headers['x-forwarded-for'] || socket.handshake.address,
+            ip: getClientIpFromSocket(socket),
             timestamp: new Date().toISOString()
         });
     },

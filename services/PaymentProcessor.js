@@ -295,15 +295,22 @@ class PaymentProcessor {
                 console.log({ level: 'info', event: 'sendPayment', attempt: currentRetry + 1, amount: payment.amount, wallet: payment.recipientWallet, rpc: connection.rpcEndpoint });
 
                 // ── Step 1: Check if a previously broadcast signature already confirmed ──
-                // Prevents double-send: if the last attempt broadcast but timed out
-                // during confirmation, the tx may already be finalized.
+                // A null from getSignatureStatuses does NOT mean the tx failed — the RPC
+                // may just not have indexed it yet. Poll until the signature confirms OR
+                // the blockhash is provably expired. Only then build a replacement tx.
                 if (payment.broadcastSignature) {
-                    const alreadyConfirmed = await this._checkSignatureStatus(connection, payment.broadcastSignature);
-                    if (alreadyConfirmed) {
+                    const result = await this._confirmExistingSignature(
+                        connection,
+                        payment.broadcastSignature,
+                        payment.broadcastLastValidBlockHeight ?? null
+                    );
+                    if (result === 'confirmed') {
                         console.log({ level: 'info', event: 'sendPayment', message: 'Previous broadcast already confirmed', signature: payment.broadcastSignature });
                         return payment.broadcastSignature;
                     }
-                    console.log({ level: 'info', event: 'sendPayment', message: 'Previous signature not confirmed, building new transaction' });
+                    // result === 'expired': blockhash lifetime is past — the old tx can
+                    // never land on-chain, so it is safe to build a replacement.
+                    console.log({ level: 'info', event: 'sendPayment', message: 'Previous signature blockhash expired, building replacement transaction', signature: payment.broadcastSignature });
                 }
 
                 // ── Step 2: Build transaction ─────────────────────────────────────────
@@ -353,11 +360,15 @@ class PaymentProcessor {
                 transaction.sign(this.config.TREASURY_KEYPAIR);
                 const signature = bs58.encode(transaction.signatures[0].signature);
 
-                // ── Step 4: Persist signature BEFORE broadcasting ─────────────────────
-                // If broadcast succeeds but confirmation times out, the next retry
-                // finds this signature and confirms it rather than sending a new tx.
-                await PaymentQueue.findByIdAndUpdate(payment._id, { broadcastSignature: signature });
+                // ── Step 4: Persist signature + blockhash expiry BEFORE broadcasting ──
+                // Storing lastValidBlockHeight lets the retry loop determine when the
+                // blockhash is definitively expired before building a replacement tx.
+                await PaymentQueue.findByIdAndUpdate(payment._id, {
+                    broadcastSignature: signature,
+                    broadcastLastValidBlockHeight: lastValidBlockHeight,
+                });
                 payment.broadcastSignature = signature;
+                payment.broadcastLastValidBlockHeight = lastValidBlockHeight;
 
                 // ── Step 5: Broadcast ─────────────────────────────────────────────────
                 console.log({ level: 'info', event: 'sendPayment', message: 'Broadcasting...', signature });
@@ -397,6 +408,44 @@ class PaymentProcessor {
         }
 
         throw new Error('Failed to send payment after multiple attempts');
+    }
+
+    // Poll a previously broadcast signature until it confirms or its blockhash
+    // is provably expired. Returns 'confirmed' or 'expired'. Throws on-chain failure.
+    //
+    // When lastValidBlockHeight is known (stored alongside the signature) expiry is
+    // detected via getBlockHeight — authoritative and cheap. When it is null (legacy
+    // records written before this field existed) a 90-second wall-clock fallback is
+    // used instead; Solana blockhashes live ~60-90 s so this is conservative.
+    async _confirmExistingSignature(connection, signature, lastValidBlockHeight) {
+        const POLL_INTERVAL_MS = 2000;
+        const LEGACY_TIMEOUT_MS = 90_000;
+        const MAX_TOTAL_MS = 120_000; // absolute safety cap
+        const startTime = Date.now();
+
+        while (Date.now() - startTime < MAX_TOTAL_MS) {
+            // _checkSignatureStatus returns false when not-yet-indexed; throws on failure.
+            const confirmed = await this._checkSignatureStatus(connection, signature);
+            if (confirmed) return 'confirmed';
+
+            if (lastValidBlockHeight !== null) {
+                try {
+                    const currentHeight = await connection.getBlockHeight('confirmed');
+                    if (currentHeight > lastValidBlockHeight) return 'expired';
+                } catch (err) {
+                    // RPC error — don't assume expired; keep polling.
+                    console.warn({ level: 'warn', event: '_confirmExistingSignature', message: 'getBlockHeight failed', error: err.message });
+                }
+            } else {
+                if (Date.now() - startTime > LEGACY_TIMEOUT_MS) return 'expired';
+            }
+
+            await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+        }
+
+        // Absolute cap reached — do one final status check before giving up.
+        const finalConfirmed = await this._checkSignatureStatus(connection, signature);
+        return finalConfirmed ? 'confirmed' : 'expired';
     }
 
     // Check whether a previously broadcast signature confirmed on-chain.

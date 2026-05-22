@@ -14,16 +14,18 @@ const { COOKIE_OPTIONS }                = require('../config/constants');
 const { verifyRecaptcha }               = require('../utils/helpers');
 const { SecurityLogger }                = require('../utils/securityLogger');
 const { trackValidationFailure }        = require('../config/alerts');
+const { getClientIpFromRequest }        = require('../middleware/trustedProxy');
 
 // ─── POST /api/auth/login ─────────────────────────────────────────────────────
 
 router.post('/login', async (req, res) => {
     try {
+        const clientIp = getClientIpFromRequest(req);
         const { error, value } = loginSchema.validate(req.body, { abortEarly: false, stripUnknown: true });
         if (error) {
             const errorDetails = error.details.map(d => d.message).join('; ');
-            trackValidationFailure(req.ip, 'login', errorDetails);
-            logger.warn(`[SECURITY] Validation failed for login from ${req.ip}: ${errorDetails}`);
+            trackValidationFailure(clientIp, 'login', errorDetails);
+            logger.warn(`[SECURITY] Validation failed for login from ${clientIp}: ${errorDetails}`);
             return res.status(400).json({ success: false, error: 'Invalid input data' });
         }
 
@@ -46,7 +48,7 @@ router.post('/login', async (req, res) => {
             if (!result.success) return res.status(400).json({ success: false, error: 'reCAPTCHA failed' });
         }
 
-        const connectionData = { ip: req.ip || req.connection.remoteAddress, userAgent: req.headers['user-agent'] };
+        const connectionData = { ip: clientIp, userAgent: req.headers['user-agent'] };
 
         let user = await User.findOne({ walletAddress });
         if (!user) {

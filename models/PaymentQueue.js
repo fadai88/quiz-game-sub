@@ -45,6 +45,9 @@ const PaymentQueueSchema = new mongoose.Schema({
     type: String,
     sparse: true
   },
+  broadcastLastValidBlockHeight: {
+    type: Number,
+  },
   errorMessage: {
     type: String
   },
