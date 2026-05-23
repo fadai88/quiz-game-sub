@@ -10,14 +10,29 @@ const { getClientIpFromRequest, getClientIpFromSocket } = require('../middleware
 // ============================================================================
 
 const SecurityLogger = {
-    
-    // Login success
+
+    // Generic fallback used by callers that don't fit a named template
+    log: (event, data = {}) => logger.security(event, { ...data, timestamp: new Date().toISOString() }),
+
+    // Login success (HTTP request)
     loginSuccess: (walletAddress, sessionData, req) => {
         logger.auth('login_success', {
             walletAddress,
             sessionId: sessionData.sessionId?.substring(0, 8),
             ip: getClientIpFromRequest(req),
             userAgent: req.headers['user-agent'],
+            deviceFingerprint: sessionData.fingerprint,
+            loginTime: new Date().toISOString()
+        });
+    },
+
+    // Login success (Socket.IO — handshake is not an Express req, so use socket helper)
+    socketLoginSuccess: (walletAddress, sessionData, socket) => {
+        logger.auth('login_success', {
+            walletAddress,
+            sessionId: sessionData.sessionId?.substring(0, 8),
+            ip: getClientIpFromSocket(socket),
+            userAgent: socket.handshake.headers['user-agent'],
             deviceFingerprint: sessionData.fingerprint,
             loginTime: new Date().toISOString()
         });

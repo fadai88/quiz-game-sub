@@ -295,7 +295,7 @@ function registerConnectionHandler(io) {
                 // Key embeds the token so HTTP login can atomically consume it via DEL
                 await context.redisClient.set(`verify:${walletAddress}:${verifyToken}`, '1', 'EX', 300);
 
-                SecurityLogger.loginSuccess(walletAddress, { sessionId: verifyToken, fingerprint: clientData?.userAgent }, socket.handshake);
+                SecurityLogger.socketLoginSuccess(walletAddress, { sessionId: verifyToken, fingerprint: clientData?.userAgent }, socket);
                 socket.emit('loginSuccess', { walletAddress, verifyToken, virtualBalance: user.virtualBalance || 0, serverTime: Date.now(), clientTime: clientTime || null });
                 logger.info(`Wallet login success: ${walletAddress}`);
             } catch (error) {
