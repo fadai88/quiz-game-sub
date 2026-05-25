@@ -9,9 +9,20 @@
 const cron   = require('node-cron');
 const logger = require('../logger');
 const context = require('../context');
-const GameSession = require('../models/GameSession');
-const PrizeCycle  = require('../models/PrizeCycle');
+const GameSession    = require('../models/GameSession');
+const PrizeCycle     = require('../models/PrizeCycle');
+const PaymentQueue   = require('../models/PaymentQueue');
 const { refundToVirtualBalance } = require('../services/playerService');
+const {
+    trackFailedPayout,
+    trackStuckPayment,
+    trackLowTreasurySol,
+    trackLowTreasuryUsdc,
+} = require('../config/alerts');
+
+// Thresholds — override via env vars if needed
+const MIN_TREASURY_SOL  = parseFloat(process.env.MIN_TREASURY_SOL)  || 0.05; // lamports → SOL
+const MIN_TREASURY_USDC = parseFloat(process.env.MIN_TREASURY_USDC) || 50;   // USDC
 
 /**
  * Register all cron jobs. Call this inside `server.listen()` callback.
@@ -112,6 +123,63 @@ function registerCronJobs(botDetector = null) {
         timezone: 'UTC',
     });
     logger.info('🗓️ Weekly prize-cycle rotation initialized (every Monday 00:00 UTC)');
+
+    // ── Payment health: failed + stuck payouts ────────────────────────────────
+    cron.schedule('*/10 * * * *', async () => {
+        try {
+            const [failedCount, stuckCount] = await Promise.all([
+                PaymentQueue.countDocuments({ status: 'failed', attempts: { $gte: 5 } }),
+                PaymentQueue.countDocuments({
+                    status: 'processing',
+                    lastAttemptAt: { $lt: new Date(Date.now() - 30 * 60 * 1000) },
+                }),
+            ]);
+
+            if (failedCount > 0) {
+                logger.error(`Payment monitor: ${failedCount} payout(s) exhausted all retries`, { failedCount });
+                await trackFailedPayout({ failedCount });
+            }
+            if (stuckCount > 0) {
+                logger.warn(`Payment monitor: ${stuckCount} payment(s) stuck in 'processing' >30 min`, { stuckCount });
+                await trackStuckPayment({ stuckCount });
+            }
+        } catch (error) {
+            logger.error('Payment health cron failed:', { error: error.message });
+        }
+    });
+    logger.info('💳 Payment health monitor initialized (runs every 10 minutes)');
+
+    // ── Treasury balance check ────────────────────────────────────────────────
+    cron.schedule('*/10 * * * *', async () => {
+        try {
+            const cfg = context.config;
+            if (!cfg?.connection || !cfg?.TREASURY_WALLET || !cfg?.USDC_MINT) return;
+
+            const [lamports, tokenAccounts] = await Promise.all([
+                cfg.connection.getBalance(cfg.TREASURY_WALLET),
+                cfg.connection.getTokenAccountsByOwner(cfg.TREASURY_WALLET, { mint: cfg.USDC_MINT }),
+            ]);
+
+            const solBalance = lamports / 1e9;
+            let usdcBalance = 0;
+            if (tokenAccounts.value.length > 0) {
+                const info = await cfg.connection.getTokenAccountBalance(tokenAccounts.value[0].pubkey);
+                usdcBalance = parseFloat(info.value.amount) / 1e6;
+            }
+
+            if (solBalance < MIN_TREASURY_SOL) {
+                logger.error(`Treasury LOW SOL: ${solBalance.toFixed(4)} SOL (min ${MIN_TREASURY_SOL})`, { solBalance });
+                await trackLowTreasurySol({ solBalance, threshold: MIN_TREASURY_SOL });
+            }
+            if (usdcBalance < MIN_TREASURY_USDC) {
+                logger.error(`Treasury LOW USDC: ${usdcBalance.toFixed(2)} USDC (min ${MIN_TREASURY_USDC})`, { usdcBalance });
+                await trackLowTreasuryUsdc({ usdcBalance, threshold: MIN_TREASURY_USDC });
+            }
+        } catch (error) {
+            logger.error('Treasury balance cron failed:', { error: error.message });
+        }
+    });
+    logger.info('🏦 Treasury balance monitor initialized (runs every 10 minutes)');
 }
 
 module.exports = { registerCronJobs };

@@ -76,7 +76,19 @@ const ALERT_THRESHOLDS = {
         count: 50,
         window: 300000, // 5 minutes
         severity: 'critical'
-    }
+    },
+
+    // Infrastructure reconnects — 3 drops in 5 minutes signals instability
+    REDIS_RECONNECT: { count: 3, window: 300000, severity: 'high' },
+    MONGO_RECONNECT: { count: 3, window: 300000, severity: 'medium' },
+
+    // Payment health — any single occurrence warrants attention
+    FAILED_PAYOUTS:  { count: 1, window: 3600000, severity: 'critical' },
+    STUCK_PAYMENTS:  { count: 1, window: 3600000, severity: 'high' },
+
+    // Treasury balance thresholds (overrideable via env)
+    LOW_TREASURY_SOL:  { count: 1, window: 1800000, severity: 'critical' },
+    LOW_TREASURY_USDC: { count: 1, window: 1800000, severity: 'high' },
 };
 
 // ============================================================================
@@ -693,8 +705,15 @@ const trackFailedTransaction = (identifier, data) =>
 const trackSlowRequest = (identifier, data) => 
     alertManager.track('SLOW_REQUESTS', identifier, data);
 
-const trackError = (identifier, data) => 
+const trackError = (identifier, data) =>
     alertManager.track('ERROR_RATE', identifier, data);
+
+const trackRedisReconnect  = (data) => alertManager.track('REDIS_RECONNECT', 'redis',   data);
+const trackMongoReconnect  = (data) => alertManager.track('MONGO_RECONNECT', 'mongodb', data);
+const trackFailedPayout    = (data) => alertManager.track('FAILED_PAYOUTS',  'payments', data);
+const trackStuckPayment    = (data) => alertManager.track('STUCK_PAYMENTS',  'payments', data);
+const trackLowTreasurySol  = (data) => alertManager.track('LOW_TREASURY_SOL',  'treasury', data);
+const trackLowTreasuryUsdc = (data) => alertManager.track('LOW_TREASURY_USDC', 'treasury', data);
 
 // ============================================================================
 // EXPORT
@@ -710,5 +729,11 @@ module.exports = {
     trackBotSuspicion,
     trackFailedTransaction,
     trackSlowRequest,
-    trackError
+    trackError,
+    trackRedisReconnect,
+    trackMongoReconnect,
+    trackFailedPayout,
+    trackStuckPayment,
+    trackLowTreasurySol,
+    trackLowTreasuryUsdc,
 };

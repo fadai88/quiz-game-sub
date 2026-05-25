@@ -67,6 +67,7 @@ const balanceRoutes       = require('./routes/balance');
 const subscriptionRoutes  = require('./routes/subscriptions');
 const { tournamentRouter, adminTournamentRouter } = require('./routes/tournaments');
 const { registerCronJobs } = require('./jobs/cronJobs');
+const { trackMongoReconnect } = require('./config/alerts');
 const { RateLimiterRedis, RateLimiterMemory } = require('rate-limiter-flexible');
 
 // ─── Session secret ───────────────────────────────────────────────────────────
@@ -82,6 +83,10 @@ const server = http.createServer(app);
 const allowedOrigins = process.env.ALLOWED_ORIGINS
     ? process.env.ALLOWED_ORIGINS.split(',')
     : ['http://localhost:3000'];
+if (!process.env.ALLOWED_ORIGINS && ENVIRONMENT === 'production') {
+    console.error('❌ FATAL: ALLOWED_ORIGINS not set in production — refusing to start with localhost CORS fallback.');
+    process.exit(1);
+}
 
 const io = socketIo(server, {
     cors: { origin: allowedOrigins, methods: ['GET', 'POST'] },
@@ -179,8 +184,14 @@ mongoose.connect(process.env.MONGODB_URI, mongooseOptions)
     .catch(err => { console.error('❌ FATAL: MongoDB connection failed:', err.message); process.exit(1); });
 
 mongoose.connection.on('error',        err  => console.error('❌ MongoDB runtime error:', err.message));
-mongoose.connection.on('disconnected', ()   => console.warn('⚠️  MongoDB disconnected'));
-mongoose.connection.on('reconnected',  ()   => console.log('✅ MongoDB reconnected'));
+mongoose.connection.on('disconnected', ()   => {
+    console.warn('⚠️  MongoDB disconnected');
+    trackMongoReconnect({ event: 'disconnected' });
+});
+mongoose.connection.on('reconnected',  ()   => {
+    console.log('✅ MongoDB reconnected');
+    trackMongoReconnect({ event: 'reconnected' });
+});
 
 // ─── Config initialisation (AWS Secrets + services) ──────────────────────────
 async function initializeConfig() {

@@ -13,7 +13,7 @@ const { loginSchema }                   = require('../config/schemas');
 const { COOKIE_OPTIONS }                = require('../config/constants');
 const { verifyRecaptcha }               = require('../utils/helpers');
 const { SecurityLogger }                = require('../utils/securityLogger');
-const { trackValidationFailure }        = require('../config/alerts');
+const { trackValidationFailure, trackFailedLogin } = require('../config/alerts');
 const { getClientIpFromRequest }        = require('../middleware/trustedProxy');
 
 // ─── POST /api/auth/login ─────────────────────────────────────────────────────
@@ -37,6 +37,7 @@ router.post('/login', async (req, res) => {
         const deletedCount = await redisClient.del(`verify:${walletAddress}:${verifyToken}`);
         if (deletedCount === 0) {
             SecurityLogger.invalidToken(walletAddress, 'expired_or_invalid');
+            trackFailedLogin(clientIp, { walletAddress, reason: 'invalid_or_expired_token' });
             return res.status(401).json({ success: false, error: 'Invalid verification. Please try logging in again.' });
         }
         logger.auth(`Verification token validated for ${walletAddress}`);

@@ -8,6 +8,7 @@
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
     "start": "node server.js",
     "install:prod": "npm ci --omit=dev",
+    "verify:vendor": "sha256sum -c public/vendor/checksums.sha256",
     "dev": "nodemon server.js"
   },
   "dependencies": {

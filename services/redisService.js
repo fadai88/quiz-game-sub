@@ -8,6 +8,7 @@ const { createAdapter } = require('@socket.io/redis-adapter');
 const { RateLimiterRedis } = require('rate-limiter-flexible');
 const logger = require('../logger');
 const context = require('../context');
+const { trackRedisReconnect } = require('../config/alerts');
 
 // ─── Per-event rate limiters (populated by initializeRateLimiter) ─────────────
 const eventLimiters = new Map();
@@ -90,10 +91,17 @@ async function initializeRedis() {
             });
         }
 
-        redisClient.on('ready',   () => console.log('✅ Redis ready'));
-        redisClient.on('connect', () => console.log('Redis connected'));
-        redisClient.on('error',   (err) => logger.error('⚠️  Redis error (will auto-retry):', { error: err.message }));
-        redisClient.on('close',   () => console.warn('⚠️  Redis connection closed (will auto-reconnect)'));
+        redisClient.on('ready',       () => console.log('✅ Redis ready'));
+        redisClient.on('connect',     () => console.log('Redis connected'));
+        redisClient.on('error',       (err) => logger.error('⚠️  Redis error (will auto-retry):', { error: err.message }));
+        redisClient.on('close',       () => {
+            logger.warn('⚠️  Redis connection closed (will auto-reconnect)');
+            trackRedisReconnect({ event: 'close' });
+        });
+        redisClient.on('reconnecting', () => {
+            logger.warn('⚠️  Redis reconnecting...');
+            trackRedisReconnect({ event: 'reconnecting' });
+        });
 
         await redisClient.ping();
         await redisClient.set('test', '1', 'EX', 60);
