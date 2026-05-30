@@ -35,7 +35,12 @@ class PaymentProcessor {
         this.config = config;
         this.isProcessing = false;
         this.processInterval = null;
-        
+        this._makeConnection = config.connectionFactory ||
+            ((endpoint) => new Connection(endpoint, {
+                commitment: 'confirmed',
+                confirmTransactionInitialTimeout: 60000,
+            }));
+
         console.log('✅ PaymentProcessor initialized with validated config');
     }
 
@@ -379,7 +384,13 @@ class PaymentProcessor {
 
                 // ── Step 6: Confirm by the stored signature ───────────────────────────
                 console.log({ level: 'info', event: 'sendPayment', message: 'Confirming...', signature });
-                await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+                const confirmResult = await connection.confirmTransaction(
+                    { signature, blockhash, lastValidBlockHeight },
+                    'confirmed'
+                );
+                if (confirmResult?.value?.err) {
+                    throw new Error(`Transaction confirmed with error: ${JSON.stringify(confirmResult.value.err)}`);
+                }
 
                 console.log({ level: 'info', event: 'sendPayment', signature, status: 'success' });
                 return signature;
@@ -396,10 +407,7 @@ class PaymentProcessor {
                 currentEndpointIndex = (currentEndpointIndex + 1) % this.config.rpcEndpoints.length;
                 const newEndpoint = this.config.rpcEndpoints[currentEndpointIndex];
                 console.log({ level: 'info', event: 'sendPayment', message: `Switching RPC to ${newEndpoint}` });
-                connection = new Connection(newEndpoint, {
-                    commitment: 'confirmed',
-                    confirmTransactionInitialTimeout: 60000,
-                });
+                connection = this._makeConnection(newEndpoint);
 
                 const waitTime = Math.pow(2, currentRetry) * 1000;
                 console.log({ level: 'info', event: 'sendPayment', message: `Waiting ${waitTime}ms before retry` });
