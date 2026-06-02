@@ -1,29 +1,27 @@
-const { Keypair } = require('@solana/web3.js');
+const { Keypair } = require("@solana/web3.js");
 
 class TreasuryManager {
-    static keypair = null;
+  static keypair = null;
 
-    static initialize() {
-        // In production, use secure key management
-        // For development, you can use a JSON file or environment variables
-        const secretKey = process.env.TREASURY_SECRET_KEY;
-        if (!secretKey) {
-            throw new Error('Treasury secret key not configured');
-        }
-
-        this.keypair = Keypair.fromSecretKey(
-            Buffer.from(JSON.parse(secretKey))
-        );
+  static initialize() {
+    // In production, use secure key management
+    // For development, you can use a JSON file or environment variables
+    const secretKey = process.env.TREASURY_SECRET_KEY;
+    if (!secretKey) {
+      throw new Error("Treasury secret key not configured");
     }
 
-    static async signTransaction(transaction) {
-        if (!this.keypair) {
-            throw new Error('Treasury not initialized');
-        }
+    this.keypair = Keypair.fromSecretKey(Buffer.from(JSON.parse(secretKey)));
+  }
 
-        transaction.sign(this.keypair);
-        return transaction;
+  static async signTransaction(transaction) {
+    if (!this.keypair) {
+      throw new Error("Treasury not initialized");
     }
+
+    transaction.sign(this.keypair);
+    return transaction;
+  }
 }
 
-module.exports = TreasuryManager; 
+module.exports = TreasuryManager;

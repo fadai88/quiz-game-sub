@@ -3,63 +3,82 @@
  * OWASP-recommended security headers (CSP, HSTS, X-Frame-Options, etc.).
  */
 
-const crypto = require('crypto');
-const { ENVIRONMENT } = require('../config/constants');
-const { TRUSTED_PROXY_IPS } = require('./trustedProxy');
+const crypto = require("crypto");
+const { ENVIRONMENT } = require("../config/constants");
+const { TRUSTED_PROXY_IPS } = require("./trustedProxy");
 
 function securityHeaders(req, res, next) {
-    const nonce = crypto.randomBytes(16).toString('base64');
-    res.locals.cspNonce = nonce;
+  const nonce = crypto.randomBytes(16).toString("base64");
+  res.locals.cspNonce = nonce;
 
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-XSS-Protection', '1; mode=block');
-    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    // Static assets get a short public cache; HTML pages and API responses must not be cached.
-    const isStaticAsset = /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|map)$/i.test(req.path);
-    if (isStaticAsset) {
-        res.setHeader('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
-    } else {
-        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-        res.setHeader('Pragma', 'no-cache');
-        res.setHeader('Expires', '0');
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-XSS-Protection", "1; mode=block");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  // Static assets get a short public cache; HTML pages and API responses must not be cached.
+  const isStaticAsset =
+    /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|map)$/i.test(req.path);
+  if (isStaticAsset) {
+    res.setHeader(
+      "Cache-Control",
+      "public, max-age=3600, stale-while-revalidate=86400"
+    );
+  } else {
+    res.setHeader(
+      "Cache-Control",
+      "no-store, no-cache, must-revalidate, proxy-revalidate"
+    );
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+  }
+
+  const cspDirectives = [
+    "default-src 'self'",
+    `script-src 'self' 'nonce-${nonce}' https://www.google.com https://www.gstatic.com https://static.cloudflareinsights.com`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: https:",
+    "font-src 'self' data:",
+    "connect-src 'self' wss: ws: https://courtnay-0wegdq-fast-mainnet.helius-rpc.com https://devnet.helius-rpc.com https://mainnet.helius-rpc.com https://api.anthropic.com https://www.google.com https://www.gstatic.com",
+    "frame-src 'self' https://www.google.com https://recaptcha.google.com https://www.recaptcha.net",
+    "child-src 'self' https://www.google.com https://recaptcha.google.com",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+  ].join("; ");
+  res.setHeader("Content-Security-Policy", cspDirectives);
+
+  const permissionsPolicy = [
+    "geolocation=()",
+    "microphone=()",
+    "camera=()",
+    "payment=()",
+    "usb=()",
+    "magnetometer=()",
+    "accelerometer=()",
+    "gyroscope=()",
+  ].join(", ");
+  res.setHeader("Permissions-Policy", permissionsPolicy);
+
+  if (ENVIRONMENT === "production") {
+    // Only honour x-forwarded-proto when the immediate peer is a trusted proxy;
+    // otherwise any client can send the header and trigger HSTS on a plain-HTTP
+    // connection, confusing downstream caches and security tooling.
+    const peer = req.socket?.remoteAddress || "";
+    const normalizedPeer = peer.replace(/^::ffff:/, "");
+    const fromTrustedProxy =
+      TRUSTED_PROXY_IPS.has(peer) || TRUSTED_PROXY_IPS.has(normalizedPeer);
+    const isHttps =
+      req.secure ||
+      (fromTrustedProxy && req.headers["x-forwarded-proto"] === "https");
+    if (isHttps) {
+      res.setHeader(
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains; preload"
+      );
     }
+  }
 
-    const cspDirectives = [
-        "default-src 'self'",
-        `script-src 'self' 'nonce-${nonce}' https://www.google.com https://www.gstatic.com https://static.cloudflareinsights.com`,
-        "style-src 'self' 'unsafe-inline'",
-        "img-src 'self' data: https:",
-        "font-src 'self' data:",
-        "connect-src 'self' wss: ws: https://courtnay-0wegdq-fast-mainnet.helius-rpc.com https://devnet.helius-rpc.com https://mainnet.helius-rpc.com https://api.anthropic.com https://www.google.com https://www.gstatic.com",
-        "frame-src 'self' https://www.google.com https://recaptcha.google.com https://www.recaptcha.net",
-        "child-src 'self' https://www.google.com https://recaptcha.google.com",
-        "frame-ancestors 'none'",
-        "base-uri 'self'",
-        "form-action 'self'",
-    ].join('; ');
-    res.setHeader('Content-Security-Policy', cspDirectives);
-
-    const permissionsPolicy = [
-        'geolocation=()', 'microphone=()', 'camera=()', 'payment=()',
-        'usb=()', 'magnetometer=()', 'accelerometer=()', 'gyroscope=()',
-    ].join(', ');
-    res.setHeader('Permissions-Policy', permissionsPolicy);
-
-    if (ENVIRONMENT === 'production') {
-        // Only honour x-forwarded-proto when the immediate peer is a trusted proxy;
-        // otherwise any client can send the header and trigger HSTS on a plain-HTTP
-        // connection, confusing downstream caches and security tooling.
-        const peer = req.socket?.remoteAddress || '';
-        const normalizedPeer = peer.replace(/^::ffff:/, '');
-        const fromTrustedProxy = TRUSTED_PROXY_IPS.has(peer) || TRUSTED_PROXY_IPS.has(normalizedPeer);
-        const isHttps = req.secure || (fromTrustedProxy && req.headers['x-forwarded-proto'] === 'https');
-        if (isHttps) {
-            res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
-        }
-    }
-
-    next();
+  next();
 }
 
 module.exports = securityHeaders;

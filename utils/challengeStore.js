@@ -1,4 +1,4 @@
-'use strict';
+"use strict";
 
 /**
  * utils/challengeStore.js
@@ -27,12 +27,12 @@
  *     was signed.
  */
 
-const crypto  = require('crypto');
-const context = require('../context');
-const logger  = require('../logger');
+const crypto = require("crypto");
+const context = require("../context");
+const logger = require("../logger");
 
 const CHALLENGE_TTL_SECONDS = 120; // 2 minutes
-const CHALLENGE_KEY_PREFIX  = 'challenge:';
+const CHALLENGE_KEY_PREFIX = "challenge:";
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -44,15 +44,20 @@ const CHALLENGE_KEY_PREFIX  = 'challenge:';
  * @returns {{ nonce: string, issuedAt: number }}
  */
 async function issueChallenge(walletAddress) {
-    const nonce     = crypto.randomUUID();
-    const issuedAt  = Date.now();
-    const key       = _key(walletAddress);
-    const payload   = JSON.stringify({ nonce, issuedAt });
+  const nonce = crypto.randomUUID();
+  const issuedAt = Date.now();
+  const key = _key(walletAddress);
+  const payload = JSON.stringify({ nonce, issuedAt });
 
-    await context.redisClient.set(key, payload, 'EX', CHALLENGE_TTL_SECONDS);
+  await context.redisClient.set(key, payload, "EX", CHALLENGE_TTL_SECONDS);
 
-    logger.info(`[CHALLENGE] Issued for ${_short(walletAddress)}: nonce=${nonce.slice(0, 8)}…`);
-    return { nonce, issuedAt };
+  logger.info(
+    `[CHALLENGE] Issued for ${_short(walletAddress)}: nonce=${nonce.slice(
+      0,
+      8
+    )}…`
+  );
+  return { nonce, issuedAt };
 }
 
 /**
@@ -64,7 +69,7 @@ async function issueChallenge(walletAddress) {
  * @returns {string}
  */
 function buildMessage(nonce, issuedAt) {
-    return `Sign in to Proof of Smart\nNonce: ${nonce}\nIssued: ${issuedAt}`;
+  return `Sign in to Proof of Smart\nNonce: ${nonce}\nIssued: ${issuedAt}`;
 }
 
 /**
@@ -77,69 +82,82 @@ function buildMessage(nonce, issuedAt) {
  * @returns {string}             — canonical message to verify the signature against
  */
 async function consumeChallenge(walletAddress, clientNonce) {
-    const key     = _key(walletAddress);
-    const raw     = await context.redisClient.get(key);
+  const key = _key(walletAddress);
+  const raw = await context.redisClient.get(key);
 
-    if (!raw) {
-        logger.warn(`[CHALLENGE] No active challenge for ${_short(walletAddress)}`);
-        throw new Error('No active challenge — please request a new one');
-    }
+  if (!raw) {
+    logger.warn(`[CHALLENGE] No active challenge for ${_short(walletAddress)}`);
+    throw new Error("No active challenge — please request a new one");
+  }
 
-    let stored;
-    try {
-        stored = JSON.parse(raw);
-    } catch {
-        await context.redisClient.del(key);
-        throw new Error('Malformed challenge — please request a new one');
-    }
-
-    const { nonce: storedNonce, issuedAt } = stored;
-
-    // Constant-time comparison to prevent timing attacks on the nonce
-    const nonceMatches = _safeEqual(storedNonce, clientNonce);
-
-    // Check age even if nonce matched (belt-and-suspenders — Redis TTL is primary)
-    const ageMs  = Date.now() - issuedAt;
-    const expired = ageMs > CHALLENGE_TTL_SECONDS * 1000;
-
-    // Delete before throwing so a failed attempt can't be retried with the same nonce
+  let stored;
+  try {
+    stored = JSON.parse(raw);
+  } catch {
     await context.redisClient.del(key);
+    throw new Error("Malformed challenge — please request a new one");
+  }
 
-    if (!nonceMatches) {
-        logger.warn(`[CHALLENGE] Nonce mismatch for ${_short(walletAddress)}`);
-        throw new Error('Challenge nonce mismatch');
-    }
+  const { nonce: storedNonce, issuedAt } = stored;
 
-    if (expired) {
-        logger.warn(`[CHALLENGE] Expired challenge for ${_short(walletAddress)} (age ${Math.round(ageMs / 1000)}s)`);
-        throw new Error('Challenge expired — please request a new one');
-    }
+  // Constant-time comparison to prevent timing attacks on the nonce
+  const nonceMatches = _safeEqual(storedNonce, clientNonce);
 
-    logger.info(`[CHALLENGE] Consumed for ${_short(walletAddress)} (age ${Math.round(ageMs / 1000)}s)`);
-    return buildMessage(storedNonce, issuedAt);
+  // Check age even if nonce matched (belt-and-suspenders — Redis TTL is primary)
+  const ageMs = Date.now() - issuedAt;
+  const expired = ageMs > CHALLENGE_TTL_SECONDS * 1000;
+
+  // Delete before throwing so a failed attempt can't be retried with the same nonce
+  await context.redisClient.del(key);
+
+  if (!nonceMatches) {
+    logger.warn(`[CHALLENGE] Nonce mismatch for ${_short(walletAddress)}`);
+    throw new Error("Challenge nonce mismatch");
+  }
+
+  if (expired) {
+    logger.warn(
+      `[CHALLENGE] Expired challenge for ${_short(
+        walletAddress
+      )} (age ${Math.round(ageMs / 1000)}s)`
+    );
+    throw new Error("Challenge expired — please request a new one");
+  }
+
+  logger.info(
+    `[CHALLENGE] Consumed for ${_short(walletAddress)} (age ${Math.round(
+      ageMs / 1000
+    )}s)`
+  );
+  return buildMessage(storedNonce, issuedAt);
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
 
 function _key(walletAddress) {
-    return `${CHALLENGE_KEY_PREFIX}${walletAddress}`;
+  return `${CHALLENGE_KEY_PREFIX}${walletAddress}`;
 }
 
 function _short(walletAddress) {
-    return `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`;
+  return `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`;
 }
 
 /**
  * Constant-time string comparison (prevents timing-based nonce enumeration).
  */
 function _safeEqual(a, b) {
-    if (typeof a !== 'string' || typeof b !== 'string') return false;
-    if (a.length !== b.length) {
-        // Still run a dummy comparison so execution time doesn't leak length
-        crypto.timingSafeEqual(Buffer.alloc(1), Buffer.alloc(1));
-        return false;
-    }
-    return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  if (a.length !== b.length) {
+    // Still run a dummy comparison so execution time doesn't leak length
+    crypto.timingSafeEqual(Buffer.alloc(1), Buffer.alloc(1));
+    return false;
+  }
+  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
-module.exports = { issueChallenge, consumeChallenge, buildMessage, CHALLENGE_TTL_SECONDS };
+module.exports = {
+  issueChallenge,
+  consumeChallenge,
+  buildMessage,
+  CHALLENGE_TTL_SECONDS,
+};

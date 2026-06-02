@@ -20,20 +20,20 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-'use strict';
+"use strict";
 
-const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
 // Parse env var once at startup so there is no per-request overhead.
 const TRUSTED_PROXY_IPS = (() => {
-    const raw = process.env.TRUSTED_PROXY_IPS || '';
-    const configured = raw
-        .split(',')
-        .map(s => s.trim())
-        .filter(Boolean);
+  const raw = process.env.TRUSTED_PROXY_IPS || "";
+  const configured = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-    const trusted = new Set([...LOOPBACK, ...configured]);
-    return trusted;
+  const trusted = new Set([...LOOPBACK, ...configured]);
+  return trusted;
 })();
 
 /**
@@ -43,20 +43,20 @@ const TRUSTED_PROXY_IPS = (() => {
  * @returns {string} client IP
  */
 function getClientIpFromRequest(req) {
-    const peer = req.socket?.remoteAddress || '';
-    const normalizedPeer = peer.replace(/^::ffff:/, '');
+  const peer = req.socket?.remoteAddress || "";
+  const normalizedPeer = peer.replace(/^::ffff:/, "");
 
-    if (TRUSTED_PROXY_IPS.has(peer) || TRUSTED_PROXY_IPS.has(normalizedPeer)) {
-        const xff = req.headers['x-forwarded-for'];
-        if (xff) {
-            // XFF is a comma-separated list; the left-most entry is the client.
-            const candidate = xff.split(',')[0].trim();
-            if (candidate) return candidate;
-        }
+  if (TRUSTED_PROXY_IPS.has(peer) || TRUSTED_PROXY_IPS.has(normalizedPeer)) {
+    const xff = req.headers["x-forwarded-for"];
+    if (xff) {
+      // XFF is a comma-separated list; the left-most entry is the client.
+      const candidate = xff.split(",")[0].trim();
+      if (candidate) return candidate;
     }
+  }
 
-    // Peer is not a trusted proxy — use the direct connection address.
-    return normalizedPeer || peer;
+  // Peer is not a trusted proxy — use the direct connection address.
+  return normalizedPeer || peer;
 }
 
 /**
@@ -66,18 +66,18 @@ function getClientIpFromRequest(req) {
  * @returns {string} client IP
  */
 function getClientIpFromSocket(socket) {
-    const peer = socket.handshake.address || '';
-    const normalizedPeer = peer.replace(/^::ffff:/, '');
+  const peer = socket.handshake.address || "";
+  const normalizedPeer = peer.replace(/^::ffff:/, "");
 
-    if (TRUSTED_PROXY_IPS.has(peer) || TRUSTED_PROXY_IPS.has(normalizedPeer)) {
-        const xff = socket.handshake.headers['x-forwarded-for'];
-        if (xff) {
-            const candidate = xff.split(',')[0].trim();
-            if (candidate) return candidate;
-        }
+  if (TRUSTED_PROXY_IPS.has(peer) || TRUSTED_PROXY_IPS.has(normalizedPeer)) {
+    const xff = socket.handshake.headers["x-forwarded-for"];
+    if (xff) {
+      const candidate = xff.split(",")[0].trim();
+      if (candidate) return candidate;
     }
+  }
 
-    return normalizedPeer || peer;
+  return normalizedPeer || peer;
 }
 
 /**
@@ -88,13 +88,13 @@ function getClientIpFromSocket(socket) {
  *   app.use(trustedProxyMiddleware);
  */
 function trustedProxyMiddleware(req, _res, next) {
-    req.clientIp = getClientIpFromRequest(req);
-    next();
+  req.clientIp = getClientIpFromRequest(req);
+  next();
 }
 
 module.exports = {
-    getClientIpFromRequest,
-    getClientIpFromSocket,
-    trustedProxyMiddleware,
-    TRUSTED_PROXY_IPS, // exported for tests
+  getClientIpFromRequest,
+  getClientIpFromSocket,
+  trustedProxyMiddleware,
+  TRUSTED_PROXY_IPS, // exported for tests
 };

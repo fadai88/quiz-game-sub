@@ -1,1476 +1,1655 @@
-        function getErrorMessage(error) {
-            // Handle sanitized error objects from server
-            if (error && typeof error === 'object') {
-                // New sanitized format: { error: "message", code: "ERROR_CODE", errorId: "abc123" }
-                if (error.error) {
-                    return error.error;
-                }
-                // Validation errors may have this structure
-                if (error.message) {
-                    return error.message;
-                }
-                // Fallback for generic objects
-                return 'An error occurred. Please try again.';
-            }
-            // Handle string errors (legacy or simple messages)
-            if (typeof error === 'string') {
-                return error;
-            }
-            // Unknown format
-            return 'An error occurred. Please try again.';
+function getErrorMessage(error) {
+  // Handle sanitized error objects from server
+  if (error && typeof error === "object") {
+    // New sanitized format: { error: "message", code: "ERROR_CODE", errorId: "abc123" }
+    if (error.error) {
+      return error.error;
+    }
+    // Validation errors may have this structure
+    if (error.message) {
+      return error.message;
+    }
+    // Fallback for generic objects
+    return "An error occurred. Please try again.";
+  }
+  // Handle string errors (legacy or simple messages)
+  if (typeof error === "string") {
+    return error;
+  }
+  // Unknown format
+  return "An error occurred. Please try again.";
+}
+
+// Safe console logging - only log error IDs in production, not full details
+function logError(context, error) {
+  const isProduction =
+    window.location.hostname !== "localhost" &&
+    !window.location.hostname.includes("127.0.0.1");
+
+  if (isProduction) {
+    // Production: Only log error ID for support
+    if (error && error.errorId) {
+      console.log(`[${context}] Error ID: ${error.errorId}`);
+    } else {
+      console.log(`[${context}] An error occurred`);
+    }
+  } else {
+    // Development: Log sanitized details (not full stack traces)
+    console.log(`[${context}]`, {
+      message: getErrorMessage(error),
+      code: error?.code,
+      errorId: error?.errorId,
+    });
+  }
+}
+const AccountLayout = {
+  decode(buffer) {
+    const accountInfo = {
+      mint: new solanaWeb3.PublicKey(buffer.slice(0, 32)),
+      owner: new solanaWeb3.PublicKey(buffer.slice(32, 64)),
+      amount: buffer.slice(64, 72).readBigUInt64LE(0),
+      delegateOption: buffer[72],
+      delegate: new solanaWeb3.PublicKey(buffer.slice(73, 105)),
+      state: buffer[105],
+      isNativeOption: buffer[106],
+      isNative: buffer.slice(107, 115),
+      delegatedAmount: buffer.slice(115, 123),
+      closeAuthorityOption: buffer[123],
+      closeAuthority: new solanaWeb3.PublicKey(buffer.slice(124, 156)),
+    };
+    return accountInfo;
+  },
+};
+
+// UUID v4 generator for nonces (replay protection)
+function generateUUID() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  // Fallback for older browsers
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+const socket = io({
+  withCredentials: true,
+});
+
+socket.on("error", (error) => {
+  logError("socket-error", error); // ✅ Safe logging
+
+  if (error.code === "AUTH_REQUIRED") {
+    alert("Please login to continue");
+    window.location.href = "/login.html";
+  }
+
+  if (error.code === "SESSION_EXPIRED") {
+    alert("Your session has expired. Please login again.");
+    window.location.href = "/login.html";
+  }
+
+  if (error.code === "AUTH_ERROR") {
+    alert("Authentication error. Please try logging in again.");
+    window.location.href = "/login.html";
+  }
+});
+
+socket.on("connect_error", (err) => {
+  logError("connection", { message: err.message }); // ✅ Safe logging
+  // Don't show connection errors to user - they're often temporary
+});
+
+socket.on("connect", () => {
+  console.log("Connected via transport:", socket.io.engine.transport.name); // "polling" or "websocket"
+  socket.io.engine.once("upgrade", () => {
+    console.log("Upgraded to:", socket.io.engine.transport.name);
+  });
+
+  // Check if this is a reconnection attempt
+  if (isReconnecting) {
+    console.log("Reconnected! Waiting for game state restoration...");
+    updateReconnectAttemptDisplay();
+
+    // Wait up to 3 seconds for gameStateRestore event
+    const reconnectTimeout = setTimeout(() => {
+      if (isReconnecting) {
+        console.log("No game state received within timeout");
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+          // Max attempts reached - give up
+          hideReconnectingOverlay();
+          isReconnecting = false;
+          hasGameToRestore = false;
+          reconnectAttempts = 0;
+          showNotification(
+            "Unable to restore game session. Please start a new game.",
+            "error"
+          );
+          resetGame();
+        } else {
+          // Try to restore via explicit request
+          socket.emit("requestGameRestore", {
+            roomId: currentRoomId,
+          });
         }
-        
-        // Safe console logging - only log error IDs in production, not full details
-        function logError(context, error) {
-            const isProduction = window.location.hostname !== 'localhost' && 
-                                 !window.location.hostname.includes('127.0.0.1');
-            
-            if (isProduction) {
-                // Production: Only log error ID for support
-                if (error && error.errorId) {
-                    console.log(`[${context}] Error ID: ${error.errorId}`);
-                } else {
-                    console.log(`[${context}] An error occurred`);
-                }
-            } else {
-                // Development: Log sanitized details (not full stack traces)
-                console.log(`[${context}]`, {
-                    message: getErrorMessage(error),
-                    code: error?.code,
-                    errorId: error?.errorId
-                });
-            }
-        }
-        const AccountLayout = {
-            decode(buffer) {
-                const accountInfo = {
-                    mint: new solanaWeb3.PublicKey(buffer.slice(0, 32)),
-                    owner: new solanaWeb3.PublicKey(buffer.slice(32, 64)),
-                    amount: buffer.slice(64, 72).readBigUInt64LE(0),
-                    delegateOption: buffer[72],
-                    delegate: new solanaWeb3.PublicKey(buffer.slice(73, 105)),
-                    state: buffer[105],
-                    isNativeOption: buffer[106],
-                    isNative: buffer.slice(107, 115),
-                    delegatedAmount: buffer.slice(115, 123),
-                    closeAuthorityOption: buffer[123],
-                    closeAuthority: new solanaWeb3.PublicKey(buffer.slice(124, 156))
-                };
-                return accountInfo;
-            }
+      }
+    }, 3000);
+
+    // Store timeout reference to clear if state is restored
+    window.reconnectTimeoutRef = reconnectTimeout;
+  }
+
+  // Trigger session init after connect
+  initializeFromSession();
+});
+
+socket.on("loginSuccess", (data) => {
+  // This runs when game.html reconnects to the socket using the session cookie
+  if (data.serverTime) {
+    const now = Date.now();
+    if (data.clientTime) {
+      // NTP-style: offset = serverTime - midpoint of client send/receive times.
+      // Removes ~half-RTT bias from a simple serverTime - now calculation.
+      serverTimeOffset = data.serverTime - (data.clientTime + now) / 2;
+    } else {
+      serverTimeOffset = data.serverTime - now;
+    }
+    console.log("Clock synced in Game. Offset:", serverTimeOffset, "ms");
+  }
+});
+
+let connectedWallet = null;
+let currentRoomId = null;
+let isPremium = false; // set by initGameMode()
+let currentBetAmount = null; // kept for compatibility, not used for betting
+
+// ── Subscription / Game Mode ─────────────────────────────────────────────
+const urlParams = new URLSearchParams(window.location.search);
+const currentTournamentId = urlParams.get("tournament") || null;
+const currentGameMode = currentTournamentId ? "tournament" : "practice";
+
+// Populate game mode info banner and modal labels on load
+(async function initGameMode() {
+  const modeEl = document.getElementById("gameModeInfo");
+  const humanReward = document.getElementById("humanRewardInfo");
+  const botReward = document.getElementById("botRewardInfo");
+  const botBtn = document.getElementById("playAgainstBotBtn");
+  const humanBtn = document.getElementById("waitForPlayerBtn");
+
+  if (currentGameMode === "tournament") {
+    // Verify premium access before allowing tournament play
+    try {
+      const res = await fetch("/api/subscription/status", {
+        credentials: "include",
+      });
+      const subData = await res.json();
+      if (
+        !subData.success ||
+        subData.tier !== "premium" ||
+        subData.status !== "active"
+      ) {
+        modeEl.innerHTML =
+          "⚠️ <strong>Premium required for tournaments.</strong> " +
+          '<a href="/subscription.html">Upgrade now</a>';
+        document.getElementById("joinGameBtn").disabled = true;
+        return;
+      }
+    } catch (e) {
+      console.error("Subscription check failed:", e);
+    }
+    modeEl.innerHTML =
+      "🏆 <strong>Tournament Mode</strong> — Win real USDC prizes!";
+    if (humanReward) humanReward.textContent = "Compete for USDC prize";
+    if (botReward) botReward.textContent = "Practice before your match";
+  } else {
+    // Check subscription tier to show/hide game options
+    try {
+      const res = await fetch("/api/subscription/status", {
+        credentials: "include",
+      });
+      const subData = await res.json();
+      isPremium =
+        subData.success &&
+        subData.tier === "premium" &&
+        subData.status === "active";
+    } catch (e) {
+      console.error("Subscription check failed:", e);
+    }
+
+    if (isPremium) {
+      if (botBtn) botBtn.style.display = "none";
+      if (humanBtn)
+        humanBtn.querySelector(".choice-title").textContent =
+          "Play Ranked Match";
+      modeEl.innerHTML =
+        "🏅 <strong>Ranked Mode</strong> — Premium players only.";
+      if (humanReward) humanReward.textContent = "Ranked match";
+    } else {
+      if (humanBtn) humanBtn.style.display = "none";
+      if (botBtn)
+        botBtn.querySelector(".choice-title").textContent = "Practice vs Bot";
+      modeEl.innerHTML =
+        "🎮 <strong>Practice Mode</strong> — Play for fun, no prizes. " +
+        '<a href="/subscription.html">Upgrade to Premium</a> for ranked matches.';
+      if (botReward) botReward.textContent = "Practice vs AI";
+    }
+  }
+})();
+// ────────────────────────────────────────────────────────────────────────
+
+let currentQuestionId = null;
+let questionTimer;
+let correctAnswer;
+let loggedInUser = null;
+let phantomProvider = null;
+let balanceUpdateInterval;
+let gameTransactionInfo = null;
+let isProcessingBet = false; // NEW: Prevent multi-clicks
+
+// Reconnection state variables
+let isReconnecting = false;
+let reconnectAttempts = 0;
+let hasGameToRestore = false;
+let inMatchmakingQueue = false;
+let waitingRoomId = null;
+const MAX_RECONNECT_ATTEMPTS = 5;
+let serverTimeOffset = 0;
+
+const joinGameBtn = document.getElementById("joinGameBtn");
+const waitingMessage = document.getElementById("waitingMessage");
+const playersDiv = document.getElementById("players");
+const questionDiv = document.getElementById("question");
+const optionsDiv = document.getElementById("options");
+const submitAnswerBtn = document.getElementById("submitAnswer");
+const countdownTimer = document.getElementById("countdownTimer");
+
+let countdownInterval;
+let virtualBalance = 0;
+
+let waitingForPlayer = true;
+let waitingTimeout;
+const WAITING_TIMEOUT_DURATION = 30000; // 30 seconds wait time
+
+function getUrlParameter(name) {
+  var regex = new RegExp("[\\?&]" + name + "=([^&#]*)");
+  var results = regex.exec(location.search);
+  return results === null
+    ? ""
+    : decodeURIComponent(results[1].replace(/\+/g, " "));
+}
+
+class USDCManager {
+  constructor(connection) {
+    this.connection = connection;
+    this.usdcMint = config.USDC_MINT;
+  }
+
+  async findAssociatedTokenAddress(walletAddress, tokenMintAddress) {
+    return (
+      await solanaWeb3.PublicKey.findProgramAddress(
+        [
+          walletAddress.toBuffer(),
+          TOKEN_PROGRAM_ID.toBuffer(),
+          tokenMintAddress.toBuffer(),
+        ],
+        ASSOCIATED_TOKEN_PROGRAM_ID
+      )
+    )[0];
+  }
+
+  async getOrCreateAssociatedTokenAccount(walletPublicKey) {
+    try {
+      const tokenAccount = await this.findAssociatedTokenAddress(
+        walletPublicKey,
+        this.usdcMint
+      );
+
+      let accountInfo;
+      try {
+        // Check if account exists
+        accountInfo = await this.connection.getAccountInfo(tokenAccount);
+      } catch (error) {
+        logError("account-checking", error);
+        // CRITICAL FIX: If the RPC fails, THROW the error.
+        // Do NOT proceed to create an account, or Phantom will pop up unnecessarily.
+        throw error;
+      }
+
+      // If accountInfo exists, return it.
+      if (accountInfo) {
+        return { tokenAccount, transaction: null };
+      }
+
+      // Only proceed to creation if accountInfo is explicitly null (meaning no network error, but account doesn't exist)
+      console.log(
+        "Account not found (valid), creating new associated token account..."
+      );
+      const transaction = new solanaWeb3.Transaction().add(
+        this.createAssociatedTokenAccountInstruction(
+          walletPublicKey,
+          tokenAccount,
+          walletPublicKey,
+          this.usdcMint
+        )
+      );
+
+      transaction.recentBlockhash = (
+        await this.connection.getRecentBlockhash()
+      ).blockhash;
+      transaction.feePayer = walletPublicKey;
+
+      return { tokenAccount, transaction };
+    } catch (error) {
+      // This catches the thrown error above and stops the process
+      logError("getOrCreateAssociatedTokenAccount", error);
+      throw error;
+    }
+  }
+
+  createAssociatedTokenAccountInstruction(payer, associatedToken, owner, mint) {
+    const keys = [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: associatedToken, isSigner: false, isWritable: true },
+      { pubkey: owner, isSigner: false, isWritable: false },
+      { pubkey: mint, isSigner: false, isWritable: false },
+      {
+        pubkey: solanaWeb3.SystemProgram.programId,
+        isSigner: false,
+        isWritable: false,
+      },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      {
+        pubkey: solanaWeb3.SYSVAR_RENT_PUBKEY,
+        isSigner: false,
+        isWritable: false,
+      },
+    ];
+
+    return new solanaWeb3.TransactionInstruction({
+      keys,
+      programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+      data: Buffer.from([]),
+    });
+  }
+
+  async getUSDCBalance(walletAddress) {
+    try {
+      const walletPublicKey = new solanaWeb3.PublicKey(walletAddress);
+      const { tokenAccount, transaction } =
+        await this.getOrCreateAssociatedTokenAccount(walletPublicKey);
+
+      if (transaction) {
+        return {
+          balance: 0,
+          needsTokenAccount: true,
+          createAccountTransaction: transaction,
         };
+      }
 
-        // UUID v4 generator for nonces (replay protection)
-        function generateUUID() {
-            if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-                return crypto.randomUUID();
-            }
-            // Fallback for older browsers
-            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-                const r = Math.random() * 16 | 0;
-                const v = c === 'x' ? r : (r & 0x3 | 0x8);
-                return v.toString(16);
-            });
+      // Get all token accounts owned by the wallet
+      const tokenAccounts = await this.connection.getTokenAccountsByOwner(
+        walletPublicKey,
+        {
+          mint: this.usdcMint,
         }
+      );
 
-        const socket = io({ 
-            withCredentials: true,
-        });
+      // Find the token account with a balance
+      let balance = 0;
+      for (const { account } of tokenAccounts.value) {
+        const accountData = account.data;
+        const accountInfo = AccountLayout.decode(accountData);
+        balance = Number(accountInfo.amount) / Math.pow(10, 6);
+        if (balance > 0) break;
+      }
 
-        socket.on('error', (error) => {
-            logError('socket-error', error);  // ✅ Safe logging
-            
-            if (error.code === 'AUTH_REQUIRED') {
-                alert('Please login to continue');
-                window.location.href = '/login.html';
-            }
-            
-            if (error.code === 'SESSION_EXPIRED') {
-                alert('Your session has expired. Please login again.');
-                window.location.href = '/login.html';
-            }
-            
-            if (error.code === 'AUTH_ERROR') {
-                alert('Authentication error. Please try logging in again.');
-                window.location.href = '/login.html';
-            }
-        });
+      console.log("Found USDC balance:", balance);
 
-        socket.on('connect_error', (err) => {
-            logError('connection', { message: err.message });  // ✅ Safe logging
-            // Don't show connection errors to user - they're often temporary
-        });
+      return {
+        balance,
+        needsTokenAccount: false,
+      };
+    } catch (error) {
+      logError("usdc-balance", error);
+      throw error;
+    }
+  }
 
-        socket.on('connect', () => {
-            console.log('Connected via transport:', socket.io.engine.transport.name); // "polling" or "websocket"
-            socket.io.engine.once('upgrade', () => {
-                console.log('Upgraded to:', socket.io.engine.transport.name);
-            });
-
-            // Check if this is a reconnection attempt
-            if (isReconnecting) {
-                console.log('Reconnected! Waiting for game state restoration...');
-                updateReconnectAttemptDisplay();
-
-                // Wait up to 3 seconds for gameStateRestore event
-                const reconnectTimeout = setTimeout(() => {
-                    if (isReconnecting) {
-                        console.log('No game state received within timeout');
-                        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-                            // Max attempts reached - give up
-                            hideReconnectingOverlay();
-                            isReconnecting = false;
-                            hasGameToRestore = false;
-                            reconnectAttempts = 0;
-                            showNotification('Unable to restore game session. Please start a new game.', 'error');
-                            resetGame();
-                        } else {
-                            // Try to restore via explicit request
-                            socket.emit('requestGameRestore', {
-                                roomId: currentRoomId
-                            });
-                        }
-                    }
-                }, 3000);
-
-                // Store timeout reference to clear if state is restored
-                window.reconnectTimeoutRef = reconnectTimeout;
-            }
-
-            // Trigger session init after connect
-            initializeFromSession();
-        });
-
-        socket.on('loginSuccess', (data) => {
-            // This runs when game.html reconnects to the socket using the session cookie
-            if (data.serverTime) {
-                const now = Date.now();
-                if (data.clientTime) {
-                    // NTP-style: offset = serverTime - midpoint of client send/receive times.
-                    // Removes ~half-RTT bias from a simple serverTime - now calculation.
-                    serverTimeOffset = data.serverTime - (data.clientTime + now) / 2;
-                } else {
-                    serverTimeOffset = data.serverTime - now;
-                }
-                console.log('Clock synced in Game. Offset:', serverTimeOffset, 'ms');
-            }
-        });
-
-        let connectedWallet = null;
-        let currentRoomId = null;
-        let isPremium = false;  // set by initGameMode()
-        let currentBetAmount = null; // kept for compatibility, not used for betting
-
-        // ── Subscription / Game Mode ─────────────────────────────────────────────
-        const urlParams = new URLSearchParams(window.location.search);
-        const currentTournamentId = urlParams.get('tournament') || null;
-        const currentGameMode = currentTournamentId ? 'tournament' : 'practice';
-
-        // Populate game mode info banner and modal labels on load
-        (async function initGameMode() {
-            const modeEl = document.getElementById('gameModeInfo');
-            const humanReward = document.getElementById('humanRewardInfo');
-            const botReward   = document.getElementById('botRewardInfo');
-            const botBtn      = document.getElementById('playAgainstBotBtn');
-            const humanBtn    = document.getElementById('waitForPlayerBtn');
-
-            if (currentGameMode === 'tournament') {
-                // Verify premium access before allowing tournament play
-                try {
-                    const res = await fetch('/api/subscription/status', { credentials: 'include' });
-                    const subData = await res.json();
-                    if (!subData.success || subData.tier !== 'premium' || subData.status !== 'active') {
-                        modeEl.innerHTML = '⚠️ <strong>Premium required for tournaments.</strong> ' +
-                            '<a href="/subscription.html">Upgrade now</a>';
-                        document.getElementById('joinGameBtn').disabled = true;
-                        return;
-                    }
-                } catch(e) {
-                    console.error('Subscription check failed:', e);
-                }
-                modeEl.innerHTML = '🏆 <strong>Tournament Mode</strong> — Win real USDC prizes!';
-                if (humanReward) humanReward.textContent = 'Compete for USDC prize';
-                if (botReward)   botReward.textContent   = 'Practice before your match';
-            } else {
-                // Check subscription tier to show/hide game options
-                try {
-                    const res = await fetch('/api/subscription/status', { credentials: 'include' });
-                    const subData = await res.json();
-                    isPremium = subData.success && subData.tier === 'premium' && subData.status === 'active';
-                } catch(e) {
-                    console.error('Subscription check failed:', e);
-                }
-
-                if (isPremium) {
-                    if (botBtn)   botBtn.style.display = 'none';
-                    if (humanBtn) humanBtn.querySelector('.choice-title').textContent = 'Play Ranked Match';
-                    modeEl.innerHTML = '🏅 <strong>Ranked Mode</strong> — Premium players only.';
-                    if (humanReward) humanReward.textContent = 'Ranked match';
-                } else {
-                    if (humanBtn) humanBtn.style.display = 'none';
-                    if (botBtn)   botBtn.querySelector('.choice-title').textContent = 'Practice vs Bot';
-                    modeEl.innerHTML = '🎮 <strong>Practice Mode</strong> — Play for fun, no prizes. ' +
-                        '<a href="/subscription.html">Upgrade to Premium</a> for ranked matches.';
-                    if (botReward) botReward.textContent = 'Practice vs AI';
-                }
-            }
-        })();
-        // ────────────────────────────────────────────────────────────────────────
-
-        let currentQuestionId = null;
-        let questionTimer;
-        let correctAnswer;
-        let loggedInUser = null;
-        let phantomProvider = null;
-        let balanceUpdateInterval;
-        let gameTransactionInfo = null;
-        let isProcessingBet = false;  // NEW: Prevent multi-clicks
-
-        // Reconnection state variables
-        let isReconnecting = false;
-        let reconnectAttempts = 0;
-        let hasGameToRestore = false;
-        let inMatchmakingQueue = false;
-        let waitingRoomId = null;
-        const MAX_RECONNECT_ATTEMPTS = 5;
-        let serverTimeOffset = 0;
-
-        const joinGameBtn = document.getElementById('joinGameBtn');
-        const waitingMessage = document.getElementById('waitingMessage');
-        const playersDiv = document.getElementById('players');
-        const questionDiv = document.getElementById('question');
-        const optionsDiv = document.getElementById('options');
-        const submitAnswerBtn = document.getElementById('submitAnswer');
-        const countdownTimer = document.getElementById('countdownTimer');
-
-        let countdownInterval;
-        let virtualBalance = 0;
-
-        let waitingForPlayer = true;
-        let waitingTimeout;
-        const WAITING_TIMEOUT_DURATION = 30000; // 30 seconds wait time
-
-        function getUrlParameter(name) {
-            var regex = new RegExp('[\\?&]' + name + '=([^&#]*)');
-            var results = regex.exec(location.search);
-            return results === null ? '' : decodeURIComponent(results[1].replace(/\+/g, ' '));
-        };
-
-        class USDCManager {
-            constructor(connection) {
-                this.connection = connection;
-                this.usdcMint = config.USDC_MINT;
-            }
-
-            async findAssociatedTokenAddress(walletAddress, tokenMintAddress) {
-                return (await solanaWeb3.PublicKey.findProgramAddress(
-                    [
-                        walletAddress.toBuffer(),
-                        TOKEN_PROGRAM_ID.toBuffer(),
-                        tokenMintAddress.toBuffer(),
-                    ],
-                    ASSOCIATED_TOKEN_PROGRAM_ID
-                ))[0];
-            }
-
-            async getOrCreateAssociatedTokenAccount(walletPublicKey) {
-                try {
-                    const tokenAccount = await this.findAssociatedTokenAddress(
-                        walletPublicKey,
-                        this.usdcMint
-                    );
-
-                    let accountInfo;
-                    try {
-                        // Check if account exists
-                        accountInfo = await this.connection.getAccountInfo(tokenAccount);
-                    } catch (error) {
-                        logError('account-checking', error);
-                        // CRITICAL FIX: If the RPC fails, THROW the error.
-                        // Do NOT proceed to create an account, or Phantom will pop up unnecessarily.
-                        throw error;
-                    }
-
-                    // If accountInfo exists, return it.
-                    if (accountInfo) {
-                        return { tokenAccount, transaction: null };
-                    }
-
-                    // Only proceed to creation if accountInfo is explicitly null (meaning no network error, but account doesn't exist)
-                    console.log('Account not found (valid), creating new associated token account...');
-                    const transaction = new solanaWeb3.Transaction().add(
-                        this.createAssociatedTokenAccountInstruction(
-                            walletPublicKey,
-                            tokenAccount,
-                            walletPublicKey,
-                            this.usdcMint
-                        )
-                    );
-
-                    transaction.recentBlockhash = (await this.connection.getRecentBlockhash()).blockhash;
-                    transaction.feePayer = walletPublicKey;
-
-                    return { tokenAccount, transaction };
-                } catch (error) {
-                    // This catches the thrown error above and stops the process
-                    logError('getOrCreateAssociatedTokenAccount', error);
-                    throw error;
-                }
-            }
-
-            createAssociatedTokenAccountInstruction(
-                payer,
-                associatedToken,
-                owner,
-                mint
-            ) {
-                const keys = [
-                    { pubkey: payer, isSigner: true, isWritable: true },
-                    { pubkey: associatedToken, isSigner: false, isWritable: true },
-                    { pubkey: owner, isSigner: false, isWritable: false },
-                    { pubkey: mint, isSigner: false, isWritable: false },
-                    { pubkey: solanaWeb3.SystemProgram.programId, isSigner: false, isWritable: false },
-                    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-                    { pubkey: solanaWeb3.SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
-                ];
-
-                return new solanaWeb3.TransactionInstruction({
-                    keys,
-                    programId: ASSOCIATED_TOKEN_PROGRAM_ID,
-                    data: Buffer.from([])
-                });
-            }
-
-            async getUSDCBalance(walletAddress) {
-                try {
-                    const walletPublicKey = new solanaWeb3.PublicKey(walletAddress);
-                    const { tokenAccount, transaction } = await this.getOrCreateAssociatedTokenAccount(walletPublicKey);
-
-                    if (transaction) {
-                        return {
-                            balance: 0,
-                            needsTokenAccount: true,
-                            createAccountTransaction: transaction
-                        };
-                    }
-
-                    // Get all token accounts owned by the wallet
-                    const tokenAccounts = await this.connection.getTokenAccountsByOwner(
-                        walletPublicKey,
-                        {
-                            mint: this.usdcMint
-                        }
-                    );
-
-                    // Find the token account with a balance
-                    let balance = 0;
-                    for (const { account } of tokenAccounts.value) {
-                        const accountData = account.data;
-                        const accountInfo = AccountLayout.decode(accountData);
-                        balance = Number(accountInfo.amount) / Math.pow(10, 6);
-                        if (balance > 0) break;
-                    }
-
-                    console.log('Found USDC balance:', balance);
-
-                    return {
-                        balance,
-                        needsTokenAccount: false
-                    };
-                } catch (error) {
-                    logError('usdc-balance', error);
-                    throw error;
-                }
-            }
-
-            async createTransferTransaction(walletAddress, betAmount, nonce) {
-                try {
-                    // betAmount is now in atomic units (e.g., 3000000 for 3 USDC)
-                    // Validate against atomic unit values
-                    if (!VALID_BET_AMOUNTS_ATOMIC.includes(betAmount)) {
-                        throw new Error(`Invalid bet amount. Must be 3, 10, 15, 20, or 30 USDC`);
-                    }
-
-                    const fromWallet = new solanaWeb3.PublicKey(walletAddress);
-
-                    // Get token accounts for user and treasury
-                    const fromTokenAccount = await this.findAssociatedTokenAddress(
-                        fromWallet,
-                        this.usdcMint
-                    );
-
-                    const toTokenAccount = await this.findAssociatedTokenAddress(
-                        config.TREASURY_WALLET,
-                        this.usdcMint
-                    );
-
-                    // Amount is already in atomic units (no conversion needed)
-                    const amount = betAmount;
-
-                    // Create transfer instruction
-                    const keys = [
-                        { pubkey: fromTokenAccount, isSigner: false, isWritable: true },
-                        { pubkey: toTokenAccount, isSigner: false, isWritable: true },
-                        { pubkey: fromWallet, isSigner: true, isWritable: false },
-                        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }
-                    ];
-
-                    const dataLayout = {
-                        transfer: 3,  // Command index for Transfer
-                        amount: amount
-                    };
-
-                    const data = Buffer.alloc(9);
-                    data.writeUInt8(dataLayout.transfer, 0);
-                    data.writeBigUInt64LE(BigInt(dataLayout.amount), 1);
-
-                    const transferInstruction = new solanaWeb3.TransactionInstruction({
-                        keys,
-                        programId: TOKEN_PROGRAM_ID,
-                        data
-                    });
-
-                    // NEW: Add unique memo for anti-dupe (prevents identical tx bytes across sessions)
-                    const memoText = `bet-${fromAtomicUnits(betAmount)}-${nonce}-${Date.now()}`;
-                    const memoIx = new solanaWeb3.TransactionInstruction({
-                        keys: [],  // No accounts needed
-                        programId: new solanaWeb3.PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'),  // Standard Memo program
-                        data: Buffer.from(memoText, 'utf8')  // ~20-40 unique bytes
-                    });
-
-                    // Create transaction
-                    const transaction = new solanaWeb3.Transaction();
-                    
-                    // Get recent blockhash
-                    const { blockhash, lastValidBlockHeight } = await this.connection.getLatestBlockhash();
-                    transaction.recentBlockhash = blockhash;
-                    transaction.lastValidBlockHeight = lastValidBlockHeight;
-                    transaction.feePayer = fromWallet;
-                    
-                    // NEW: Add memo FIRST (ensures uniqueness in tx message)
-                    transaction.add(memoIx);
-                    // Add instruction (existing transfer)
-                    transaction.add(transferInstruction);
-
-                    console.log('Created transfer transaction:', {
-                        from: fromTokenAccount.toString(),
-                        to: toTokenAccount.toString(),
-                        amountAtomic: amount,
-                        amountUSDC: fromAtomicUnits(amount),
-                        feePayer: fromWallet.toString()
-                    });
-                    // NEW: Optional log for debugging uniqueness
-                    console.log('Created unique tx with memo:', memoText);
-
-                    return transaction;
-                } catch (error) {
-                    logError('create-transaction', error);
-                    throw error;
-                }
-            }
-        }
-
-        const connection = new solanaWeb3.Connection(
-            'https://devnet.helius-rpc.com/?api-key=961d5e62-871f-447a-bda0-0d61ce151d6e',
-            'confirmed'
+  async createTransferTransaction(walletAddress, betAmount, nonce) {
+    try {
+      // betAmount is now in atomic units (e.g., 3000000 for 3 USDC)
+      // Validate against atomic unit values
+      if (!VALID_BET_AMOUNTS_ATOMIC.includes(betAmount)) {
+        throw new Error(
+          `Invalid bet amount. Must be 3, 10, 15, 20, or 30 USDC`
         );
-        
-        const usdcManager = new USDCManager(connection);
+      }
 
-        async function checkSession() {
-            try {
-                const response = await fetch('/api/auth/session', {
-                    method: 'GET',
-                    credentials: 'include'  // CRITICAL: Send cookies
-                });
-                
-                const data = await response.json();
-                
-                if (data.authenticated) {
-                    console.log('✅ Session valid for wallet:', data.walletAddress);
-                    connectedWallet = data.walletAddress;
-                    
-                    // Update UI
-                    if (document.getElementById('walletStatus')) {
-                        document.getElementById('walletStatus').textContent = 
-                            `Connected: ${connectedWallet.slice(0,4)}...${connectedWallet.slice(-4)}`;
-                    }
-                    
-                    return true;
-                } else {
-                    console.warn('⚠️ No valid session - redirecting to login');
-                    window.location.href = 'login.html';
-                    return false;
-                }
-                
-            } catch (error) {
-                logError('session-check', error);
-                window.location.href = 'login.html';
-                return false;
-            }
+      const fromWallet = new solanaWeb3.PublicKey(walletAddress);
+
+      // Get token accounts for user and treasury
+      const fromTokenAccount = await this.findAssociatedTokenAddress(
+        fromWallet,
+        this.usdcMint
+      );
+
+      const toTokenAccount = await this.findAssociatedTokenAddress(
+        config.TREASURY_WALLET,
+        this.usdcMint
+      );
+
+      // Amount is already in atomic units (no conversion needed)
+      const amount = betAmount;
+
+      // Create transfer instruction
+      const keys = [
+        { pubkey: fromTokenAccount, isSigner: false, isWritable: true },
+        { pubkey: toTokenAccount, isSigner: false, isWritable: true },
+        { pubkey: fromWallet, isSigner: true, isWritable: false },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      ];
+
+      const dataLayout = {
+        transfer: 3, // Command index for Transfer
+        amount: amount,
+      };
+
+      const data = Buffer.alloc(9);
+      data.writeUInt8(dataLayout.transfer, 0);
+      data.writeBigUInt64LE(BigInt(dataLayout.amount), 1);
+
+      const transferInstruction = new solanaWeb3.TransactionInstruction({
+        keys,
+        programId: TOKEN_PROGRAM_ID,
+        data,
+      });
+
+      // NEW: Add unique memo for anti-dupe (prevents identical tx bytes across sessions)
+      const memoText = `bet-${fromAtomicUnits(
+        betAmount
+      )}-${nonce}-${Date.now()}`;
+      const memoIx = new solanaWeb3.TransactionInstruction({
+        keys: [], // No accounts needed
+        programId: new solanaWeb3.PublicKey(
+          "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
+        ), // Standard Memo program
+        data: Buffer.from(memoText, "utf8"), // ~20-40 unique bytes
+      });
+
+      // Create transaction
+      const transaction = new solanaWeb3.Transaction();
+
+      // Get recent blockhash
+      const { blockhash, lastValidBlockHeight } =
+        await this.connection.getLatestBlockhash();
+      transaction.recentBlockhash = blockhash;
+      transaction.lastValidBlockHeight = lastValidBlockHeight;
+      transaction.feePayer = fromWallet;
+
+      // NEW: Add memo FIRST (ensures uniqueness in tx message)
+      transaction.add(memoIx);
+      // Add instruction (existing transfer)
+      transaction.add(transferInstruction);
+
+      console.log("Created transfer transaction:", {
+        from: fromTokenAccount.toString(),
+        to: toTokenAccount.toString(),
+        amountAtomic: amount,
+        amountUSDC: fromAtomicUnits(amount),
+        feePayer: fromWallet.toString(),
+      });
+      // NEW: Optional log for debugging uniqueness
+      console.log("Created unique tx with memo:", memoText);
+
+      return transaction;
+    } catch (error) {
+      logError("create-transaction", error);
+      throw error;
+    }
+  }
+}
+
+const connection = new solanaWeb3.Connection(
+  "https://devnet.helius-rpc.com/?api-key=961d5e62-871f-447a-bda0-0d61ce151d6e",
+  "confirmed"
+);
+
+const usdcManager = new USDCManager(connection);
+
+async function checkSession() {
+  try {
+    const response = await fetch("/api/auth/session", {
+      method: "GET",
+      credentials: "include", // CRITICAL: Send cookies
+    });
+
+    const data = await response.json();
+
+    if (data.authenticated) {
+      console.log("✅ Session valid for wallet:", data.walletAddress);
+      connectedWallet = data.walletAddress;
+
+      // Update UI
+      if (document.getElementById("walletStatus")) {
+        document.getElementById(
+          "walletStatus"
+        ).textContent = `Connected: ${connectedWallet.slice(
+          0,
+          4
+        )}...${connectedWallet.slice(-4)}`;
+      }
+
+      return true;
+    } else {
+      console.warn("⚠️ No valid session - redirecting to login");
+      window.location.href = "login.html";
+      return false;
+    }
+  } catch (error) {
+    logError("session-check", error);
+    window.location.href = "login.html";
+    return false;
+  }
+}
+
+async function logout() {
+  try {
+    await fetch("/api/auth/logout", {
+      method: "POST",
+      credentials: "include",
+    });
+  } catch (error) {
+    logError("logout", error);
+  }
+  window.location.href = "login.html";
+}
+
+// Initialize from URL or session data first
+async function initializeFromSession() {
+  console.log("Checking session via secure cookie...");
+
+  // Check session via HTTP (secure cookie)
+  const isAuthenticated = await checkSession();
+
+  if (!isAuthenticated) {
+    return; // checkSession already redirects to login
+  }
+
+  // connectedWallet is now set by checkSession()
+  console.log("✅ Wallet connected:", connectedWallet);
+
+  // Update wallet status UI
+  document.getElementById(
+    "walletStatus"
+  ).textContent = `Connected: ${connectedWallet.slice(
+    0,
+    4
+  )}...${connectedWallet.slice(-4)}`;
+
+  // NO walletReconnect needed - cookie authenticates Socket.IO automatically
+
+  // Proceed with balance/UI init
+  try {
+    await updateBalance(); // Fetch once on connection
+    // No polling needed - balance only changes during game actions
+    await initializeWallet();
+  } catch (error) {
+    logError("session-init", error);
+    alert("Failed to initialize. Please refresh the page.");
+  }
+}
+
+async function initializeWallet() {
+  try {
+    if (!window.solana || !window.solana.isPhantom) {
+      throw new Error("Phantom wallet not installed");
+    }
+
+    // Session already validated by checkSession() - connectedWallet is set
+    // Optional: Auto-connect to Phantom if not already connected
+    if (!window.solana.isConnected) {
+      try {
+        await window.solana.connect({ onlyIfTrusted: true });
+        console.log("Auto-connected to Phantom wallet");
+      } catch (err) {
+        console.log("Phantom not auto-connected:", err.message);
+      }
+    }
+
+    // Verify Phantom wallet matches session wallet (if connected)
+    if (window.solana.isConnected) {
+      const phantomPublicKey = window.solana.publicKey.toString();
+      if (phantomPublicKey !== connectedWallet) {
+        console.warn(
+          `Wallet mismatch: Phantom=${phantomPublicKey}, Session=${connectedWallet}`
+        );
+        alert(
+          "Wallet mismatch detected. Please log in with the correct wallet."
+        );
+        await logout();
+        return;
+      }
+      console.log("✅ Phantom wallet verified:", phantomPublicKey);
+    }
+  } catch (error) {
+    logError("wallet-init", error);
+    // Don't redirect here since initializeFromSession already handles that
+  }
+}
+
+async function updateBalance() {
+  try {
+    // Skip balance updates in practice mode (no USDC needed)
+    if (currentGameMode === "practice") {
+      document.getElementById("balanceDisplay").style.display = "none";
+      return;
+    }
+    if (!connectedWallet) {
+      document.getElementById("balanceDisplay").textContent =
+        "Balance: Not connected";
+      return;
+    }
+
+    console.log("[balance] Fetching balance for:", connectedWallet);
+
+    // Fetch on-chain balance
+    const onChainResponse = await fetch(`/api/balance/${connectedWallet}`, {
+      method: "GET",
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    if (!onChainResponse.ok) {
+      if (onChainResponse.status === 401) {
+        console.error("[balance] Not authenticated - redirecting");
+        window.location.href = "login.html";
+        return;
+      }
+      if (onChainResponse.status === 403) {
+        console.error("[balance] Forbidden - wallet mismatch");
+        throw new Error("Unauthorized wallet access");
+      }
+      throw new Error(`Balance check failed: ${onChainResponse.status}`);
+    }
+
+    const onChainData = await onChainResponse.json();
+    const onChainBalance = parseFloat(onChainData.balance) || 0;
+
+    // Fetch virtual balance
+    let virtualBalance = 0;
+    try {
+      const virtualResponse = await fetch(
+        `/api/virtual-balance/${connectedWallet}`,
+        {
+          method: "GET",
+          credentials: "include",
+          headers: {
+            Accept: "application/json",
+          },
         }
+      );
 
-        async function logout() {
-            try {
-                await fetch('/api/auth/logout', {
-                    method: 'POST',
-                    credentials: 'include'
-                });
-            } catch (error) {
-                logError('logout', error);
-            }
-            window.location.href = 'login.html';
-        }
+      if (virtualResponse.ok) {
+        const virtualData = await virtualResponse.json();
+        virtualBalance = parseFloat(virtualData.balance) || 0;
+      }
+    } catch (virtualError) {
+      console.warn("[balance] Could not fetch virtual balance:", virtualError);
+      // Continue with 0 virtual balance
+    }
 
-        // Initialize from URL or session data first
-        async function initializeFromSession() {
-            console.log('Checking session via secure cookie...');
-            
-            // Check session via HTTP (secure cookie)
-            const isAuthenticated = await checkSession();
-            
-            if (!isAuthenticated) {
-                return; // checkSession already redirects to login
-            }
-            
-            // connectedWallet is now set by checkSession()
-            console.log('✅ Wallet connected:', connectedWallet);
-            
-            // Update wallet status UI
-            document.getElementById('walletStatus').textContent = 
-                `Connected: ${connectedWallet.slice(0,4)}...${connectedWallet.slice(-4)}`;
-            
-            // NO walletReconnect needed - cookie authenticates Socket.IO automatically
-            
-            // Proceed with balance/UI init
-            try {
-                await updateBalance();  // Fetch once on connection
-                // No polling needed - balance only changes during game actions
-                await initializeWallet();
-            } catch (error) {
-                logError('session-init', error);
-                alert('Failed to initialize. Please refresh the page.');
-            }
-        }
+    const totalBalance = onChainBalance + virtualBalance;
 
-        async function initializeWallet() {
-            try {
-                if (!window.solana || !window.solana.isPhantom) {
-                    throw new Error('Phantom wallet not installed');
-                }
+    console.log("[balance] Balance retrieved:", {
+      onChain: onChainBalance,
+      virtual: virtualBalance,
+      total: totalBalance,
+    });
 
-
-                // Session already validated by checkSession() - connectedWallet is set
-                // Optional: Auto-connect to Phantom if not already connected
-                if (!window.solana.isConnected) {
-                    try {
-                        await window.solana.connect({ onlyIfTrusted: true });
-                        console.log('Auto-connected to Phantom wallet');
-                    } catch (err) {
-                        console.log('Phantom not auto-connected:', err.message);
-                    }
-                }
-
-                // Verify Phantom wallet matches session wallet (if connected)
-                if (window.solana.isConnected) {
-                    const phantomPublicKey = window.solana.publicKey.toString();
-                    if (phantomPublicKey !== connectedWallet) {
-                        console.warn(`Wallet mismatch: Phantom=${phantomPublicKey}, Session=${connectedWallet}`);
-                        alert('Wallet mismatch detected. Please log in with the correct wallet.');
-                        await logout();
-                        return;
-                    }
-                    console.log('✅ Phantom wallet verified:', phantomPublicKey);
-                }
-
-            } catch (error) {
-                logError('wallet-init', error);
-                // Don't redirect here since initializeFromSession already handles that
-            }
-        }
-
-        async function updateBalance() {
-            try {
-                // Skip balance updates in practice mode (no USDC needed)
-                if (currentGameMode === 'practice') {
-                    document.getElementById('balanceDisplay').style.display = 'none';
-                    return;
-                }
-                if (!connectedWallet) {
-                    document.getElementById('balanceDisplay').textContent = 'Balance: Not connected';
-                    return;
-                }
-
-                console.log('[balance] Fetching balance for:', connectedWallet);
-
-                // Fetch on-chain balance
-                const onChainResponse = await fetch(`/api/balance/${connectedWallet}`, {
-                    method: 'GET',
-                    credentials: 'include',
-                    headers: {
-                        'Accept': 'application/json'
-                    }
-                });
-
-                if (!onChainResponse.ok) {
-                    if (onChainResponse.status === 401) {
-                        console.error('[balance] Not authenticated - redirecting');
-                        window.location.href = 'login.html';
-                        return;
-                    }
-                    if (onChainResponse.status === 403) {
-                        console.error('[balance] Forbidden - wallet mismatch');
-                        throw new Error('Unauthorized wallet access');
-                    }
-                    throw new Error(`Balance check failed: ${onChainResponse.status}`);
-                }
-
-                const onChainData = await onChainResponse.json();
-                const onChainBalance = parseFloat(onChainData.balance) || 0;
-
-                // Fetch virtual balance
-                let virtualBalance = 0;
-                try {
-                    const virtualResponse = await fetch(`/api/virtual-balance/${connectedWallet}`, {
-                        method: 'GET',
-                        credentials: 'include',
-                        headers: {
-                            'Accept': 'application/json'
-                        }
-                    });
-
-                    if (virtualResponse.ok) {
-                        const virtualData = await virtualResponse.json();
-                        virtualBalance = parseFloat(virtualData.balance) || 0;
-                    }
-                } catch (virtualError) {
-                    console.warn('[balance] Could not fetch virtual balance:', virtualError);
-                    // Continue with 0 virtual balance
-                }
-
-                const totalBalance = onChainBalance + virtualBalance;
-
-                console.log('[balance] Balance retrieved:', {
-                    onChain: onChainBalance,
-                    virtual: virtualBalance,
-                    total: totalBalance
-                });
-
-                // Update UI
-                const balanceElement = document.getElementById('balanceDisplay');
-                if (balanceElement) {
-                    if (virtualBalance > 0) {
-                        // Show breakdown when user has virtual balance
-                        balanceElement.innerHTML = `
+    // Update UI
+    const balanceElement = document.getElementById("balanceDisplay");
+    if (balanceElement) {
+      if (virtualBalance > 0) {
+        // Show breakdown when user has virtual balance
+        balanceElement.innerHTML = `
                             <div class="balance-breakdown">
                                 <div class="balance-total">
-                                    Total: <strong>${totalBalance.toFixed(2)} USDC</strong>
+                                    Total: <strong>${totalBalance.toFixed(
+                                      2
+                                    )} USDC</strong>
                                 </div>
                                 <div class="balance-details">
-                                    <span class="wallet-balance">Wallet: ${onChainBalance.toFixed(2)} USDC</span>
+                                    <span class="wallet-balance">Wallet: ${onChainBalance.toFixed(
+                                      2
+                                    )} USDC</span>
                                     <span class="virtual-balance-highlight">
-                                        💰 Credits: ${virtualBalance.toFixed(2)} USDC
+                                        💰 Credits: ${virtualBalance.toFixed(
+                                          2
+                                        )} USDC
                                     </span>
                                 </div>
                                 <div class="balance-note">Use credits for your next game!</div>
                             </div>
                         `;
-                    } else {
-                        // Simple display when no virtual balance
-                        balanceElement.textContent = `Balance: ${onChainBalance.toFixed(2)} USDC`;
-                    }
-                }
+      } else {
+        // Simple display when no virtual balance
+        balanceElement.textContent = `Balance: ${onChainBalance.toFixed(
+          2
+        )} USDC`;
+      }
+    }
+  } catch (error) {
+    logError("balance-update", error);
+    console.error("[balance] Failed to update balance:", error);
 
-            } catch (error) {
-                logError('balance-update', error);
-                console.error('[balance] Failed to update balance:', error);
+    const balanceElement = document.getElementById("balanceDisplay");
+    if (balanceElement) {
+      balanceElement.textContent = "Error fetching balance";
+    }
+  }
+}
 
-                const balanceElement = document.getElementById('balanceDisplay');
-                if (balanceElement) {
-                    balanceElement.textContent = 'Error fetching balance';
-                }
-            }
-        }
+async function connectWallet() {
+  try {
+    if (window.solana && window.solana.isPhantom) {
+      phantomProvider = window.solana;
+    } else {
+      alert(
+        "Phantom wallet is not installed. Please install it from https://phantom.app/"
+      );
+      window.open("https://phantom.app/", "_blank");
+      return;
+    }
 
-        async function connectWallet() {
-            try {
-                if (window.solana && window.solana.isPhantom) {
-                    phantomProvider = window.solana;
-                } else {
-                    alert('Phantom wallet is not installed. Please install it from https://phantom.app/');
-                    window.open('https://phantom.app/', '_blank');
-                    return;
-                }
-
-                // Get reCAPTCHA token if enabled
-                let recaptchaToken = null;
-                if (window.recaptchaEnabled && window.grecaptcha) {
-                    try {
-                        await grecaptcha.ready();
-                        recaptchaToken = await grecaptcha.execute(window.recaptchaSiteKey, {action: 'wallet_connect'});
-                    } catch (error) {
-                        logError('reCAPTCHA', error);
-                        // Continue without reCAPTCHA if there's an error.    LOOK AT THIS!!!!!
-                    }
-                }
-
-                const response = await phantomProvider.connect();
-                connectedWallet = response.publicKey.toString();
-                console.log('Connected to wallet:', connectedWallet);
-
-                // Generate message for signing
-                const message = `Login to Game - ${Date.now()}`;
-                const encodedMessage = new TextEncoder().encode(message);
-
-                // Request signature from wallet
-                const signatureBytes = await phantomProvider.signMessage(encodedMessage, 'utf8');
-                const signature = btoa(String.fromCharCode.apply(null, signatureBytes));
-
-                // Emit login event with all necessary data
-                socket.emit('walletLogin', {
-                    walletAddress: connectedWallet,
-                    signature,
-                    message,
-                    recaptchaToken,
-                    clientTime: Date.now(),
-                    clientData: {
-                        userAgent: navigator.userAgent,
-                        language: navigator.language,
-                        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-                        screenResolution: `${window.screen.width}x${window.screen.height}`
-                    }
-                });
-
-                updateWalletStatus();
-                
-                // Update balance immediately after connecting
-                await updateBalance();  // Fetch once on connection
-                // No polling needed - balance only changes during game actions
-                return connectedWallet;
-            } catch (err) {
-                logError('wallet-connection', err);
-                alert('Failed to connect wallet: ' + err.message);
-                return null;
-            }
-        }
-
-        function updateWalletStatus() {
-            if (connectedWallet) {
-                // Update UI to show connected wallet
-                const shortAddress = `${connectedWallet.slice(0, 4)}...${connectedWallet.slice(-4)}`;
-                document.getElementById('walletStatus').textContent = `Connected: ${shortAddress}`;
-            }
-        }
-
-
-        window.solana?.on('disconnect', async () => {
-            console.log('Wallet disconnected');
-            if (balanceUpdateInterval) {
-                clearInterval(balanceUpdateInterval);
-            }
-            
-            // Call logout endpoint to clear cookie
-            try {
-                await fetch('/api/auth/logout', {
-                    method: 'POST',
-                    credentials: 'include'
-                });
-            } catch (error) {
-                logError('logout', error);
-            }
-            
-            // NO localStorage to clear - session is in httpOnly cookie
-            window.location.href = 'login.html';
+    // Get reCAPTCHA token if enabled
+    let recaptchaToken = null;
+    if (window.recaptchaEnabled && window.grecaptcha) {
+      try {
+        await grecaptcha.ready();
+        recaptchaToken = await grecaptcha.execute(window.recaptchaSiteKey, {
+          action: "wallet_connect",
         });
+      } catch (error) {
+        logError("reCAPTCHA", error);
+        // Continue without reCAPTCHA if there's an error.    LOOK AT THIS!!!!!
+      }
+    }
 
-        // Add helper functions at the top of your script section
-        async function findAssociatedTokenAddress(walletAddress, tokenMintAddress) {
-            return (await solanaWeb3.PublicKey.findProgramAddress(
-                [
-                    walletAddress.toBuffer(),
-                    TOKEN_PROGRAM_ID.toBuffer(),
-                    tokenMintAddress.toBuffer(),
-                ],
-                ASSOCIATED_TOKEN_PROGRAM_ID
-            ))[0];
-        }
+    const response = await phantomProvider.connect();
+    connectedWallet = response.publicKey.toString();
+    console.log("Connected to wallet:", connectedWallet);
 
-        function updateUIForJoining() {
-            joinGameBtn.disabled = true;
-            joinGameBtn.textContent = 'Processing...';
-            waitingMessage.textContent = 'Processing USDC payment...';
-        }
+    // Generate message for signing
+    const message = `Login to Game - ${Date.now()}`;
+    const encodedMessage = new TextEncoder().encode(message);
 
-        function resetJoinUI() {
-            joinGameBtn.disabled = false;
-            joinGameBtn.textContent = 'Join Game';
-            waitingMessage.textContent = '';
-        }
+    // Request signature from wallet
+    const signatureBytes = await phantomProvider.signMessage(
+      encodedMessage,
+      "utf8"
+    );
+    const signature = btoa(String.fromCharCode.apply(null, signatureBytes));
 
-        function resetUIAfterError() {
-            resetJoinUI();
-            waitingMessage.textContent = '';
-            const modal = document.getElementById('gameChoiceModal');
-            if (modal.style.display === 'flex') {
-                modal.style.display = 'none';
-            }
-            if (waitingTimeout) {
-                clearTimeout(waitingTimeout);
-            }
-            currentRoomId = null;
-            currentBetAmount = null;
-            gameTransactionInfo = null;
-            // NEW: Re-enable choice buttons
-            document.getElementById('playAgainstBotBtn').disabled = false;
-            document.getElementById('playAgainstBotBtn').textContent = 'Play Against Bot';
-            document.getElementById('waitForPlayerBtn').disabled = false;
-            document.getElementById('waitForPlayerBtn').textContent = 'Playing against human';
-            isProcessingBet = false;
-            console.log('UI reset after error');
-        }
+    // Emit login event with all necessary data
+    socket.emit("walletLogin", {
+      walletAddress: connectedWallet,
+      signature,
+      message,
+      recaptchaToken,
+      clientTime: Date.now(),
+      clientData: {
+        userAgent: navigator.userAgent,
+        language: navigator.language,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        screenResolution: `${window.screen.width}x${window.screen.height}`,
+      },
+    });
 
-        // NEW: Client-side pre-validation function for bet and wallet
-        function validateBetAndWallet(betAmount, wallet) {
-            // Validate bet amount (now in atomic units)
-            if (!Number.isInteger(betAmount) || !VALID_BET_AMOUNTS_ATOMIC.includes(betAmount)) {
-                throw new Error('Invalid bet amount. Must be 3, 10, 15, 20, or 30 USDC.');
-            }
-            // Rough base58 regex for wallet (server will do full PublicKey check)
-            if (!wallet || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(wallet)) {
-                throw new Error('Invalid wallet address format.');
-            }
-            return true;
-        }
-        
-        joinGameBtn.addEventListener('click', async () => {
-            try {
-                if (!connectedWallet) {
-                    alert('Please connect your wallet first');
-                    return;
-                }
-                // No bet needed - just show game mode modal
-                updateUIForJoining();
-                waitingMessage.textContent = 'Waiting for game mode selection...';
-                showGameChoiceModal();
-            } catch (error) {
-                logError('join-game', error);
-                resetUIAfterError();
-                alert('Failed to join game: ' + error.message);
-                joinGameBtn.disabled = false;
-            }
-        });
+    updateWalletStatus();
 
-        socket.on('balanceUpdate', (newBalance) => {
-            virtualBalance = newBalance;
-            document.getElementById('balanceDisplay').textContent = `Balance: $${virtualBalance.toFixed(2)}`;
-        });
+    // Update balance immediately after connecting
+    await updateBalance(); // Fetch once on connection
+    // No polling needed - balance only changes during game actions
+    return connectedWallet;
+  } catch (err) {
+    logError("wallet-connection", err);
+    alert("Failed to connect wallet: " + err.message);
+    return null;
+  }
+}
 
-        socket.on('joinGameSuccess', (data) => {
-            console.log('Successfully joined game:', data);
-            
-            // Show success state briefly before hiding
-            joinGameBtn.textContent = 'Joined Successfully ✓';
-            waitingMessage.textContent = 'Waiting for another player...';
-            
-            // Hide the button after a brief delay so user sees the success
-            setTimeout(() => {
-                joinGameBtn.style.display = 'none';
-            }, 1500);
-            
-            // No polling to stop - balance only fetched when needed
-        });
+function updateWalletStatus() {
+  if (connectedWallet) {
+    // Update UI to show connected wallet
+    const shortAddress = `${connectedWallet.slice(
+      0,
+      4
+    )}...${connectedWallet.slice(-4)}`;
+    document.getElementById(
+      "walletStatus"
+    ).textContent = `Connected: ${shortAddress}`;
+  }
+}
 
-        socket.on('joinGameFailure', (data) => {
-            console.log('Join game failure:', data);
+window.solana?.on("disconnect", async () => {
+  console.log("Wallet disconnected");
+  if (balanceUpdateInterval) {
+    clearInterval(balanceUpdateInterval);
+  }
 
-            // Check if this is a refund situation (money was taken but game failed)
-            if (typeof data === 'object' && data.code === 'REFUNDED_TO_BALANCE') {
-                // SUCCESS CASE: Funds were automatically refunded to virtual balance
-                console.log('Funds refunded to virtual balance:', data);
+  // Call logout endpoint to clear cookie
+  try {
+    await fetch("/api/auth/logout", {
+      method: "POST",
+      credentials: "include",
+    });
+  } catch (error) {
+    logError("logout", error);
+  }
 
-                waitingMessage.textContent = '';
-                const refundSuccessDiv = document.createElement('div');
-                refundSuccessDiv.className = 'refund-success-notification';
-                const rsIconDiv = document.createElement('div');
-                rsIconDiv.className = 'refund-icon';
-                rsIconDiv.textContent = '✅';
-                refundSuccessDiv.appendChild(rsIconDiv);
-                const rsHeading = document.createElement('h3');
-                rsHeading.textContent = 'Funds Saved!';
-                refundSuccessDiv.appendChild(rsHeading);
-                const rsErrorP = document.createElement('p');
-                rsErrorP.textContent = data.error;
-                refundSuccessDiv.appendChild(rsErrorP);
-                if (data.refundReason) {
-                    const rsReasonP = document.createElement('p');
-                    rsReasonP.className = 'refund-reason';
-                    rsReasonP.textContent = `Reason: ${data.refundReason}`;
-                    refundSuccessDiv.appendChild(rsReasonP);
-                }
-                const rsActionsDiv = document.createElement('div');
-                rsActionsDiv.className = 'refund-actions';
-                const refreshBtn = document.createElement('button');
-                refreshBtn.className = 'refresh-button';
-                refreshBtn.textContent = '🔄 Refresh & Check Balance';
-                refreshBtn.addEventListener('click', () => location.reload());
-                rsActionsDiv.appendChild(refreshBtn);
-                const retryBtn = document.createElement('button');
-                retryBtn.className = 'retry-button';
-                retryBtn.textContent = '↩️ Retry Game';
-                retryBtn.addEventListener('click', () => document.getElementById('joinGameBtn').click());
-                rsActionsDiv.appendChild(retryBtn);
-                refundSuccessDiv.appendChild(rsActionsDiv);
-                const rsInfoP = document.createElement('p');
-                rsInfoP.className = 'refund-info';
-                rsInfoP.textContent = 'Your balance will update within a few seconds.';
-                refundSuccessDiv.appendChild(rsInfoP);
-                waitingMessage.appendChild(refundSuccessDiv);
+  // NO localStorage to clear - session is in httpOnly cookie
+  window.location.href = "login.html";
+});
 
-                // Update balance automatically
-                setTimeout(async () => {
-                    await updateBalance();
-                    console.log('Balance updated after refund');
-                }, 2000);
+// Add helper functions at the top of your script section
+async function findAssociatedTokenAddress(walletAddress, tokenMintAddress) {
+  return (
+    await solanaWeb3.PublicKey.findProgramAddress(
+      [
+        walletAddress.toBuffer(),
+        TOKEN_PROGRAM_ID.toBuffer(),
+        tokenMintAddress.toBuffer(),
+      ],
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    )
+  )[0];
+}
 
-            } else if (typeof data === 'object' && data.code === 'REFUND_FAILED') {
-                // CRITICAL CASE: Automatic refund failed - needs manual intervention
-                logError('refund-failed', data);
+function updateUIForJoining() {
+  joinGameBtn.disabled = true;
+  joinGameBtn.textContent = "Processing...";
+  waitingMessage.textContent = "Processing USDC payment...";
+}
 
-                waitingMessage.textContent = '';
-                const refundFailedDiv = document.createElement('div');
-                refundFailedDiv.className = 'refund-failed-notification';
-                const rfIconDiv = document.createElement('div');
-                rfIconDiv.className = 'refund-icon';
-                rfIconDiv.textContent = '⚠️';
-                refundFailedDiv.appendChild(rfIconDiv);
-                const rfHeading = document.createElement('h3');
-                rfHeading.textContent = 'Manual Refund Required';
-                refundFailedDiv.appendChild(rfHeading);
-                const rfErrorP = document.createElement('p');
-                rfErrorP.textContent = data.error;
-                refundFailedDiv.appendChild(rfErrorP);
-                const supportDiv = document.createElement('div');
-                supportDiv.className = 'support-info';
-                const whatToDoP = document.createElement('p');
-                const whatToDoBold = document.createElement('strong');
-                whatToDoBold.textContent = 'What to do:';
-                whatToDoP.appendChild(whatToDoBold);
-                supportDiv.appendChild(whatToDoP);
-                const ol = document.createElement('ol');
-                [
-                    li => { li.textContent = 'Take a screenshot of this message'; },
-                    li => {
-                        li.textContent = 'Note your wallet address: ';
-                        const code = document.createElement('code');
-                        code.textContent = connectedWallet;
-                        li.appendChild(code);
-                    },
-                    li => { li.textContent = 'Contact support immediately'; },
-                ].forEach(fn => { const li = document.createElement('li'); fn(li); ol.appendChild(li); });
-                supportDiv.appendChild(ol);
-                refundFailedDiv.appendChild(supportDiv);
-                const rfTimelineP = document.createElement('p');
-                rfTimelineP.className = 'refund-timeline';
-                rfTimelineP.textContent = '⏱️ Refunds are typically processed within 24 hours.';
-                refundFailedDiv.appendChild(rfTimelineP);
-                waitingMessage.appendChild(refundFailedDiv);
+function resetJoinUI() {
+  joinGameBtn.disabled = false;
+  joinGameBtn.textContent = "Join Game";
+  waitingMessage.textContent = "";
+}
 
-                // Show urgent alert
-                alert(`⚠️ IMPORTANT\n\nAutomatic refund failed. Your refund will be processed manually within 24 hours.\n\nPlease contact support if you don't receive it.\n\nWallet: ${connectedWallet}`);
+function resetUIAfterError() {
+  resetJoinUI();
+  waitingMessage.textContent = "";
+  const modal = document.getElementById("gameChoiceModal");
+  if (modal.style.display === "flex") {
+    modal.style.display = "none";
+  }
+  if (waitingTimeout) {
+    clearTimeout(waitingTimeout);
+  }
+  currentRoomId = null;
+  currentBetAmount = null;
+  gameTransactionInfo = null;
+  // NEW: Re-enable choice buttons
+  document.getElementById("playAgainstBotBtn").disabled = false;
+  document.getElementById("playAgainstBotBtn").textContent = "Play Against Bot";
+  document.getElementById("waitForPlayerBtn").disabled = false;
+  document.getElementById("waitForPlayerBtn").textContent =
+    "Playing against human";
+  isProcessingBet = false;
+  console.log("UI reset after error");
+}
 
-            } else {
-                // NORMAL ERROR CASE: Payment was never taken
-                logError('join-game', data);
+// NEW: Client-side pre-validation function for bet and wallet
+function validateBetAndWallet(betAmount, wallet) {
+  // Validate bet amount (now in atomic units)
+  if (
+    !Number.isInteger(betAmount) ||
+    !VALID_BET_AMOUNTS_ATOMIC.includes(betAmount)
+  ) {
+    throw new Error("Invalid bet amount. Must be 3, 10, 15, 20, or 30 USDC.");
+  }
+  // Rough base58 regex for wallet (server will do full PublicKey check)
+  if (!wallet || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(wallet)) {
+    throw new Error("Invalid wallet address format.");
+  }
+  return true;
+}
 
-                const errorMessage = typeof data === 'string' ? data :
-                               data.error || data.message || 'Failed to join game';
+joinGameBtn.addEventListener("click", async () => {
+  try {
+    if (!connectedWallet) {
+      alert("Please connect your wallet first");
+      return;
+    }
+    // No bet needed - just show game mode modal
+    updateUIForJoining();
+    waitingMessage.textContent = "Waiting for game mode selection...";
+    showGameChoiceModal();
+  } catch (error) {
+    logError("join-game", error);
+    resetUIAfterError();
+    alert("Failed to join game: " + error.message);
+    joinGameBtn.disabled = false;
+  }
+});
 
-                waitingMessage.textContent = '';
-                const errorNotifDiv = document.createElement('div');
-                errorNotifDiv.className = 'error-notification';
-                const errIconDiv = document.createElement('div');
-                errIconDiv.className = 'error-icon';
-                errIconDiv.textContent = '❌';
-                errorNotifDiv.appendChild(errIconDiv);
-                const errP = document.createElement('p');
-                errP.textContent = errorMessage;
-                errorNotifDiv.appendChild(errP);
-                waitingMessage.appendChild(errorNotifDiv);
+socket.on("balanceUpdate", (newBalance) => {
+  virtualBalance = newBalance;
+  document.getElementById(
+    "balanceDisplay"
+  ).textContent = `Balance: $${virtualBalance.toFixed(2)}`;
+});
 
-                // Only show alert if not a user rejection
-                if (!errorMessage.includes('User rejected') && !errorMessage.includes('rejected')) {
-                    alert(`Error: ${errorMessage}`);
-                }
-            }
+socket.on("joinGameSuccess", (data) => {
+  console.log("Successfully joined game:", data);
 
-            // Reset UI for retry
-            resetJoinUI();
-            joinGameBtn.disabled = false;
-        });
+  // Show success state briefly before hiding
+  joinGameBtn.textContent = "Joined Successfully ✓";
+  waitingMessage.textContent = "Waiting for another player...";
 
-        socket.on('matchmakingError', (error) => {
-            logError('matchmaking', error);  // ✅ Safe logging
-            resetUIAfterError();
-            alert(getErrorMessage(error));  // ✅ User-friendly message
-            joinGameBtn.disabled = false;
-        });
+  // Hide the button after a brief delay so user sees the success
+  setTimeout(() => {
+    joinGameBtn.style.display = "none";
+  }, 1500);
 
-        submitAnswerBtn.addEventListener('click', async () => {
-            const selectedOption = document.querySelector('input[name="answer"]:checked');
-            if (!selectedOption) {
-                alert('Please select an answer!');
-                return;
-            }
-            
-            const selectedAnswer = parseInt(selectedOption.value);
-            
-            console.log('Submitting answer:', {
-                roomId: currentRoomId,
-                questionId: currentQuestionId,
-                answer: selectedAnswer,
-            });
-            
-            socket.emit('submitAnswer', { 
-                roomId: currentRoomId, 
-                questionId: currentQuestionId, 
-                answer: selectedAnswer
-            });
-            
-            submitAnswerBtn.disabled = true;
-            waitingMessage.textContent = 'Waiting for other player to answer...';
-        });
+  // No polling to stop - balance only fetched when needed
+});
 
-        socket.on('botGameReady', (data) => {
-            waitingMessage.textContent = `Playing against ${data.botName} 🤖 (${data.difficulty})`;
-            document.body.classList.add('playing-bot');
-            
-            // If there's a bot animation or sound, play it here
-            if (typeof playBotSound === 'function') {
-                playBotSound('start');
-            }
-        });
+socket.on("joinGameFailure", (data) => {
+  console.log("Join game failure:", data);
 
-        socket.on('playerJoined', (username) => {
-            // Clear any waiting timeout
-            if (waitingTimeout) {
-                clearTimeout(waitingTimeout);
-            }
-            
-            waitingMessage.textContent = `${username} joined. Game is starting...`;
-            
-            // Play sound if available
-            const joinSound = document.getElementById('joinSound');
-            if (joinSound) {
-                joinSound.play();
-            }
-        });
+  // Check if this is a refund situation (money was taken but game failed)
+  if (typeof data === "object" && data.code === "REFUNDED_TO_BALANCE") {
+    // SUCCESS CASE: Funds were automatically refunded to virtual balance
+    console.log("Funds refunded to virtual balance:", data);
 
-        socket.on('gameStart', ({ players, questionCount, singlePlayerMode, botOpponent }) => {
-            if (botOpponent) {
-                waitingMessage.textContent = `Playing against ${botOpponent} 🤖`;
-                document.body.classList.add('playing-bot');
-                playBotSound('start');
-            } else {
-                waitingMessage.textContent = singlePlayerMode ? 
-                    'No other players found. Starting single player mode...' : 
-                    'Game started!';
-                document.body.classList.remove('playing-bot');
-            }
-            updatePlayerUI(players);
-        });
+    waitingMessage.textContent = "";
+    const refundSuccessDiv = document.createElement("div");
+    refundSuccessDiv.className = "refund-success-notification";
+    const rsIconDiv = document.createElement("div");
+    rsIconDiv.className = "refund-icon";
+    rsIconDiv.textContent = "✅";
+    refundSuccessDiv.appendChild(rsIconDiv);
+    const rsHeading = document.createElement("h3");
+    rsHeading.textContent = "Funds Saved!";
+    refundSuccessDiv.appendChild(rsHeading);
+    const rsErrorP = document.createElement("p");
+    rsErrorP.textContent = data.error;
+    refundSuccessDiv.appendChild(rsErrorP);
+    if (data.refundReason) {
+      const rsReasonP = document.createElement("p");
+      rsReasonP.className = "refund-reason";
+      rsReasonP.textContent = `Reason: ${data.refundReason}`;
+      refundSuccessDiv.appendChild(rsReasonP);
+    }
+    const rsActionsDiv = document.createElement("div");
+    rsActionsDiv.className = "refund-actions";
+    const refreshBtn = document.createElement("button");
+    refreshBtn.className = "refresh-button";
+    refreshBtn.textContent = "🔄 Refresh & Check Balance";
+    refreshBtn.addEventListener("click", () => location.reload());
+    rsActionsDiv.appendChild(refreshBtn);
+    const retryBtn = document.createElement("button");
+    retryBtn.className = "retry-button";
+    retryBtn.textContent = "↩️ Retry Game";
+    retryBtn.addEventListener("click", () =>
+      document.getElementById("joinGameBtn").click()
+    );
+    rsActionsDiv.appendChild(retryBtn);
+    refundSuccessDiv.appendChild(rsActionsDiv);
+    const rsInfoP = document.createElement("p");
+    rsInfoP.className = "refund-info";
+    rsInfoP.textContent = "Your balance will update within a few seconds.";
+    refundSuccessDiv.appendChild(rsInfoP);
+    waitingMessage.appendChild(refundSuccessDiv);
 
-        socket.on('nextQuestion', ({ questionId, question, options, questionNumber, totalQuestions, questionEndsAt }) => {
-            currentQuestionId = questionId;
-            waitingMessage.innerHTML = ''; 
+    // Update balance automatically
+    setTimeout(async () => {
+      await updateBalance();
+      console.log("Balance updated after refund");
+    }, 2000);
+  } else if (typeof data === "object" && data.code === "REFUND_FAILED") {
+    // CRITICAL CASE: Automatic refund failed - needs manual intervention
+    logError("refund-failed", data);
 
-            displayQuestion(question, options, questionNumber, totalQuestions);
-            submitAnswerBtn.disabled = false;
-            submitAnswerBtn.style.display = 'block';
-                        
-            // 1. Calculate the actual milliseconds remaining
-            const clientEndTime = questionEndsAt - serverTimeOffset;
-            const now = Date.now();
-            
-            // Use Math.max to ensure we don't get a negative number if the packet is extremely late
-            const msRemaining = Math.max(0, clientEndTime - now);
-            
-            // 2. UX Fix: If we are within 1.5s of the start, force the display to "10"
-            let displaySeconds = Math.ceil(msRemaining / 1000);
-            if (msRemaining > 8500 && msRemaining <= 10000) {
-                displaySeconds = 10;
-            }
+    waitingMessage.textContent = "";
+    const refundFailedDiv = document.createElement("div");
+    refundFailedDiv.className = "refund-failed-notification";
+    const rfIconDiv = document.createElement("div");
+    rfIconDiv.className = "refund-icon";
+    rfIconDiv.textContent = "⚠️";
+    refundFailedDiv.appendChild(rfIconDiv);
+    const rfHeading = document.createElement("h3");
+    rfHeading.textContent = "Manual Refund Required";
+    refundFailedDiv.appendChild(rfHeading);
+    const rfErrorP = document.createElement("p");
+    rfErrorP.textContent = data.error;
+    refundFailedDiv.appendChild(rfErrorP);
+    const supportDiv = document.createElement("div");
+    supportDiv.className = "support-info";
+    const whatToDoP = document.createElement("p");
+    const whatToDoBold = document.createElement("strong");
+    whatToDoBold.textContent = "What to do:";
+    whatToDoP.appendChild(whatToDoBold);
+    supportDiv.appendChild(whatToDoP);
+    const ol = document.createElement("ol");
+    [
+      (li) => {
+        li.textContent = "Take a screenshot of this message";
+      },
+      (li) => {
+        li.textContent = "Note your wallet address: ";
+        const code = document.createElement("code");
+        code.textContent = connectedWallet;
+        li.appendChild(code);
+      },
+      (li) => {
+        li.textContent = "Contact support immediately";
+      },
+    ].forEach((fn) => {
+      const li = document.createElement("li");
+      fn(li);
+      ol.appendChild(li);
+    });
+    supportDiv.appendChild(ol);
+    refundFailedDiv.appendChild(supportDiv);
+    const rfTimelineP = document.createElement("p");
+    rfTimelineP.className = "refund-timeline";
+    rfTimelineP.textContent =
+      "⏱️ Refunds are typically processed within 24 hours.";
+    refundFailedDiv.appendChild(rfTimelineP);
+    waitingMessage.appendChild(refundFailedDiv);
 
-            // 3. Clear any existing timer
-            if (questionTimer) clearTimeout(questionTimer);
+    // Show urgent alert
+    alert(
+      `⚠️ IMPORTANT\n\nAutomatic refund failed. Your refund will be processed manually within 24 hours.\n\nPlease contact support if you don't receive it.\n\nWallet: ${connectedWallet}`
+    );
+  } else {
+    // NORMAL ERROR CASE: Payment was never taken
+    logError("join-game", data);
 
-            // 4. Start visual countdown with dynamic tick timing
-            // This will handle both the display AND the button disabling
-            startVisualCountdown(displaySeconds, msRemaining);
-        });
+    const errorMessage =
+      typeof data === "string"
+        ? data
+        : data.error || data.message || "Failed to join game";
 
-        socket.on('scoreUpdate', (players) => {
-            updatePlayers(players);
-            /*
+    waitingMessage.textContent = "";
+    const errorNotifDiv = document.createElement("div");
+    errorNotifDiv.className = "error-notification";
+    const errIconDiv = document.createElement("div");
+    errIconDiv.className = "error-icon";
+    errIconDiv.textContent = "❌";
+    errorNotifDiv.appendChild(errIconDiv);
+    const errP = document.createElement("p");
+    errP.textContent = errorMessage;
+    errorNotifDiv.appendChild(errP);
+    waitingMessage.appendChild(errorNotifDiv);
+
+    // Only show alert if not a user rejection
+    if (
+      !errorMessage.includes("User rejected") &&
+      !errorMessage.includes("rejected")
+    ) {
+      alert(`Error: ${errorMessage}`);
+    }
+  }
+
+  // Reset UI for retry
+  resetJoinUI();
+  joinGameBtn.disabled = false;
+});
+
+socket.on("matchmakingError", (error) => {
+  logError("matchmaking", error); // ✅ Safe logging
+  resetUIAfterError();
+  alert(getErrorMessage(error)); // ✅ User-friendly message
+  joinGameBtn.disabled = false;
+});
+
+submitAnswerBtn.addEventListener("click", async () => {
+  const selectedOption = document.querySelector('input[name="answer"]:checked');
+  if (!selectedOption) {
+    alert("Please select an answer!");
+    return;
+  }
+
+  const selectedAnswer = parseInt(selectedOption.value);
+
+  console.log("Submitting answer:", {
+    roomId: currentRoomId,
+    questionId: currentQuestionId,
+    answer: selectedAnswer,
+  });
+
+  socket.emit("submitAnswer", {
+    roomId: currentRoomId,
+    questionId: currentQuestionId,
+    answer: selectedAnswer,
+  });
+
+  submitAnswerBtn.disabled = true;
+  waitingMessage.textContent = "Waiting for other player to answer...";
+});
+
+socket.on("botGameReady", (data) => {
+  waitingMessage.textContent = `Playing against ${data.botName} 🤖 (${data.difficulty})`;
+  document.body.classList.add("playing-bot");
+
+  // If there's a bot animation or sound, play it here
+  if (typeof playBotSound === "function") {
+    playBotSound("start");
+  }
+});
+
+socket.on("playerJoined", (username) => {
+  // Clear any waiting timeout
+  if (waitingTimeout) {
+    clearTimeout(waitingTimeout);
+  }
+
+  waitingMessage.textContent = `${username} joined. Game is starting...`;
+
+  // Play sound if available
+  const joinSound = document.getElementById("joinSound");
+  if (joinSound) {
+    joinSound.play();
+  }
+});
+
+socket.on(
+  "gameStart",
+  ({ players, questionCount, singlePlayerMode, botOpponent }) => {
+    if (botOpponent) {
+      waitingMessage.textContent = `Playing against ${botOpponent} 🤖`;
+      document.body.classList.add("playing-bot");
+      playBotSound("start");
+    } else {
+      waitingMessage.textContent = singlePlayerMode
+        ? "No other players found. Starting single player mode..."
+        : "Game started!";
+      document.body.classList.remove("playing-bot");
+    }
+    updatePlayerUI(players);
+  }
+);
+
+socket.on(
+  "nextQuestion",
+  ({
+    questionId,
+    question,
+    options,
+    questionNumber,
+    totalQuestions,
+    questionEndsAt,
+  }) => {
+    currentQuestionId = questionId;
+    waitingMessage.innerHTML = "";
+
+    displayQuestion(question, options, questionNumber, totalQuestions);
+    submitAnswerBtn.disabled = false;
+    submitAnswerBtn.style.display = "block";
+
+    // 1. Calculate the actual milliseconds remaining
+    const clientEndTime = questionEndsAt - serverTimeOffset;
+    const now = Date.now();
+
+    // Use Math.max to ensure we don't get a negative number if the packet is extremely late
+    const msRemaining = Math.max(0, clientEndTime - now);
+
+    // 2. UX Fix: If we are within 1.5s of the start, force the display to "10"
+    let displaySeconds = Math.ceil(msRemaining / 1000);
+    if (msRemaining > 8500 && msRemaining <= 10000) {
+      displaySeconds = 10;
+    }
+
+    // 3. Clear any existing timer
+    if (questionTimer) clearTimeout(questionTimer);
+
+    // 4. Start visual countdown with dynamic tick timing
+    // This will handle both the display AND the button disabling
+    startVisualCountdown(displaySeconds, msRemaining);
+  }
+);
+
+socket.on("scoreUpdate", (players) => {
+  updatePlayers(players);
+  /*
             if (questionTimer) {
                 clearTimeout(questionTimer);
             }
             */
-        });
+});
 
-        socket.on('gameOver', (data) => {
-            console.log('Received game over data:', data);
-            const { players, winner, singlePlayerMode, botOpponent, error, gameMode, tournamentId, prizeAmount } = data;
+socket.on("gameOver", (data) => {
+  console.log("Received game over data:", data);
+  const {
+    players,
+    winner,
+    singlePlayerMode,
+    botOpponent,
+    error,
+    gameMode,
+    tournamentId,
+    prizeAmount,
+  } = data;
 
-            // Clear currentRoomId immediately so a socket drop during the results
-            // display window does not trigger the reconnect overlay
-            currentRoomId = null;
-            inMatchmakingQueue = false;
-            waitingRoomId = null;
+  // Clear currentRoomId immediately so a socket drop during the results
+  // display window does not trigger the reconnect overlay
+  currentRoomId = null;
+  inMatchmakingQueue = false;
+  waitingRoomId = null;
 
-            // Clear timers
-            if (questionTimer) clearTimeout(questionTimer);
-            if (window.syncTimeout) clearTimeout(window.syncTimeout);
-            if (countdownInterval) clearInterval(countdownInterval);
-            questionTimer = null;
-            countdownInterval = null;
+  // Clear timers
+  if (questionTimer) clearTimeout(questionTimer);
+  if (window.syncTimeout) clearTimeout(window.syncTimeout);
+  if (countdownInterval) clearInterval(countdownInterval);
+  questionTimer = null;
+  countdownInterval = null;
 
-            // Update UI
-            questionDiv.textContent = 'Game Over!';
-            submitAnswerBtn.style.display = 'none';
-            countdownTimer.style.display = 'none';
-            optionsDiv.innerHTML = '';
+  // Update UI
+  questionDiv.textContent = "Game Over!";
+  submitAnswerBtn.style.display = "none";
+  countdownTimer.style.display = "none";
+  optionsDiv.innerHTML = "";
 
-            if (error) {
-                waitingMessage.textContent = `Game Over! Error: ${error}`;
-                setTimeout(() => { resetGame(); }, 5000);
-                return;
-            }
+  if (error) {
+    waitingMessage.textContent = `Game Over! Error: ${error}`;
+    setTimeout(() => {
+      resetGame();
+    }, 5000);
+    return;
+  }
 
-            // Display scores
-            playersDiv.textContent = '';
-            const finalScoresHeading = document.createElement('h2');
-            finalScoresHeading.textContent = 'Final Scores:';
-            playersDiv.appendChild(finalScoresHeading);
-            players.forEach(p => {
-                const row = document.createElement('p');
-                row.textContent = `${p.username}${p.isBot ? ' 🤖' : ''}: ${p.score} (Total response time: ${p.totalResponseTime || 0}ms)`;
-                playersDiv.appendChild(row);
-            });
+  // Display scores
+  playersDiv.textContent = "";
+  const finalScoresHeading = document.createElement("h2");
+  finalScoresHeading.textContent = "Final Scores:";
+  playersDiv.appendChild(finalScoresHeading);
+  players.forEach((p) => {
+    const row = document.createElement("p");
+    row.textContent = `${p.username}${p.isBot ? " 🤖" : ""}: ${
+      p.score
+    } (Total response time: ${p.totalResponseTime || 0}ms)`;
+    playersDiv.appendChild(row);
+  });
 
-            const clientIsWinner = winner === connectedWallet;
-            const isTournament = (gameMode === 'tournament' || !!tournamentId);
+  const clientIsWinner = winner === connectedWallet;
+  const isTournament = gameMode === "tournament" || !!tournamentId;
 
-            waitingMessage.textContent = '';
-            if (botOpponent) {
-                const humanPlayer = players.find(p => p.username === connectedWallet && !p.isBot);
-                const botPlayer = players.find(p => p.isBot);
-                if (clientIsWinner) {
-                    waitingMessage.textContent = `🎉 You defeated ${botPlayer ? botPlayer.username : 'the bot'} with ${humanPlayer ? humanPlayer.score : 0} correct answers!`;
-                    if (typeof celebrateWin === 'function') celebrateWin('bot_win');
-                } else {
-                    waitingMessage.textContent = `Game Over! You got ${humanPlayer ? humanPlayer.score : 0} correct answers. Better luck next time!`;
-                }
-            } else if (isTournament) {
-                const clientPlayer = players.find(p => p.username === connectedWallet);
-                if (clientIsWinner) {
-                    waitingMessage.appendChild(document.createTextNode(`🏆 You won this tournament match with a score of ${clientPlayer ? clientPlayer.score : 0}!`));
-                    if (prizeAmount) {
-                        waitingMessage.appendChild(document.createTextNode(' Prize of '));
-                        const strong = document.createElement('strong');
-                        strong.textContent = `${prizeAmount} USDC`;
-                        waitingMessage.appendChild(strong);
-                        waitingMessage.appendChild(document.createTextNode(' will be sent to your wallet.'));
-                    }
-                    if (typeof celebrateWin === 'function') celebrateWin('normal');
-                } else if (winner) {
-                    const winnerPlayer = players.find(p => p.username === winner);
-                    waitingMessage.textContent = `Tournament match over! ${winner} wins with a score of ${winnerPlayer ? winnerPlayer.score : 0}. Keep competing!`;
-                } else {
-                    waitingMessage.textContent = 'Tournament match is a draw!';
-                }
-                if (tournamentId) {
-                    waitingMessage.appendChild(document.createTextNode(' '));
-                    const standingsLink = document.createElement('a');
-                    standingsLink.href = '/tournaments.html';
-                    standingsLink.textContent = 'View tournament standings';
-                    waitingMessage.appendChild(standingsLink);
-                }
-            } else {
-                // Practice mode
-                const clientPlayer = players.find(p => p.username === connectedWallet);
-                if (clientIsWinner) {
-                    waitingMessage.appendChild(document.createTextNode(`🎉 You won with a score of ${clientPlayer ? clientPlayer.score : 0}! Great job! `));
-                    const em = document.createElement('em');
-                    em.appendChild(document.createTextNode('Want to play for real prizes? '));
-                    const upgradeLink = document.createElement('a');
-                    upgradeLink.href = '/subscription.html';
-                    upgradeLink.textContent = 'Upgrade to Premium';
-                    em.appendChild(upgradeLink);
-                    em.appendChild(document.createTextNode(' for tournament access.'));
-                    waitingMessage.appendChild(em);
-                    if (typeof celebrateWin === 'function') celebrateWin('normal');
-                } else if (winner) {
-                    const winnerPlayer = players.find(p => p.username === winner);
-                    waitingMessage.textContent = `Game Over! ${winner} wins with a score of ${winnerPlayer ? winnerPlayer.score : 0}. Better luck next time!`;
-                } else {
-                    waitingMessage.textContent = "Game Over! It's a draw!";
-                }
-            }
+  waitingMessage.textContent = "";
+  if (botOpponent) {
+    const humanPlayer = players.find(
+      (p) => p.username === connectedWallet && !p.isBot
+    );
+    const botPlayer = players.find((p) => p.isBot);
+    if (clientIsWinner) {
+      waitingMessage.textContent = `🎉 You defeated ${
+        botPlayer ? botPlayer.username : "the bot"
+      } with ${humanPlayer ? humanPlayer.score : 0} correct answers!`;
+      if (typeof celebrateWin === "function") celebrateWin("bot_win");
+    } else {
+      waitingMessage.textContent = `Game Over! You got ${
+        humanPlayer ? humanPlayer.score : 0
+      } correct answers. Better luck next time!`;
+    }
+  } else if (isTournament) {
+    const clientPlayer = players.find((p) => p.username === connectedWallet);
+    if (clientIsWinner) {
+      waitingMessage.appendChild(
+        document.createTextNode(
+          `🏆 You won this tournament match with a score of ${
+            clientPlayer ? clientPlayer.score : 0
+          }!`
+        )
+      );
+      if (prizeAmount) {
+        waitingMessage.appendChild(document.createTextNode(" Prize of "));
+        const strong = document.createElement("strong");
+        strong.textContent = `${prizeAmount} USDC`;
+        waitingMessage.appendChild(strong);
+        waitingMessage.appendChild(
+          document.createTextNode(" will be sent to your wallet.")
+        );
+      }
+      if (typeof celebrateWin === "function") celebrateWin("normal");
+    } else if (winner) {
+      const winnerPlayer = players.find((p) => p.username === winner);
+      waitingMessage.textContent = `Tournament match over! ${winner} wins with a score of ${
+        winnerPlayer ? winnerPlayer.score : 0
+      }. Keep competing!`;
+    } else {
+      waitingMessage.textContent = "Tournament match is a draw!";
+    }
+    if (tournamentId) {
+      waitingMessage.appendChild(document.createTextNode(" "));
+      const standingsLink = document.createElement("a");
+      standingsLink.href = "/tournaments.html";
+      standingsLink.textContent = "View tournament standings";
+      waitingMessage.appendChild(standingsLink);
+    }
+  } else {
+    // Practice mode
+    const clientPlayer = players.find((p) => p.username === connectedWallet);
+    if (clientIsWinner) {
+      waitingMessage.appendChild(
+        document.createTextNode(
+          `🎉 You won with a score of ${
+            clientPlayer ? clientPlayer.score : 0
+          }! Great job! `
+        )
+      );
+      const em = document.createElement("em");
+      em.appendChild(document.createTextNode("Want to play for real prizes? "));
+      const upgradeLink = document.createElement("a");
+      upgradeLink.href = "/subscription.html";
+      upgradeLink.textContent = "Upgrade to Premium";
+      em.appendChild(upgradeLink);
+      em.appendChild(document.createTextNode(" for tournament access."));
+      waitingMessage.appendChild(em);
+      if (typeof celebrateWin === "function") celebrateWin("normal");
+    } else if (winner) {
+      const winnerPlayer = players.find((p) => p.username === winner);
+      waitingMessage.textContent = `Game Over! ${winner} wins with a score of ${
+        winnerPlayer ? winnerPlayer.score : 0
+      }. Better luck next time!`;
+    } else {
+      waitingMessage.textContent = "Game Over! It's a draw!";
+    }
+  }
 
-            setTimeout(() => { resetGame(); }, 7000);
-        });
+  setTimeout(() => {
+    resetGame();
+  }, 7000);
+});
 
-        socket.on('playerLeft', (username) => {
-            console.log(`Player ${username} left the game`);
-            questionDiv.textContent = '';
-            const leftMsg = document.createElement('p');
-            leftMsg.style.textAlign = 'center';
-            leftMsg.style.color = '#f59e0b';
-            leftMsg.textContent = `⚠️ ${username} left the game. Determining winner...`;
-            questionDiv.appendChild(leftMsg);
-            optionsDiv.innerHTML = '';
-            submitAnswerBtn.style.display = 'none';
-            if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
-            countdownTimer.style.display = 'none';
-        });
+socket.on("playerLeft", (username) => {
+  console.log(`Player ${username} left the game`);
+  questionDiv.textContent = "";
+  const leftMsg = document.createElement("p");
+  leftMsg.style.textAlign = "center";
+  leftMsg.style.color = "#f59e0b";
+  leftMsg.textContent = `⚠️ ${username} left the game. Determining winner...`;
+  questionDiv.appendChild(leftMsg);
+  optionsDiv.innerHTML = "";
+  submitAnswerBtn.style.display = "none";
+  if (countdownInterval) {
+    clearInterval(countdownInterval);
+    countdownInterval = null;
+  }
+  countdownTimer.style.display = "none";
+});
 
-        socket.on('playerDisconnected', ({ walletAddress }) => {
-            console.log(`Player ${walletAddress} disconnected`);
-            questionDiv.textContent = '';
-            const disconnectMsg = document.createElement('p');
-            disconnectMsg.style.textAlign = 'center';
-            disconnectMsg.style.color = '#f59e0b';
-            disconnectMsg.textContent = `⚠️ ${walletAddress} disconnected. Waiting for reconnection or forfeit...`;
-            questionDiv.appendChild(disconnectMsg);
-            optionsDiv.innerHTML = '';
-            submitAnswerBtn.style.display = 'none';
-            if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
-            countdownTimer.style.display = 'none';
-        });
+socket.on("playerDisconnected", ({ walletAddress }) => {
+  console.log(`Player ${walletAddress} disconnected`);
+  questionDiv.textContent = "";
+  const disconnectMsg = document.createElement("p");
+  disconnectMsg.style.textAlign = "center";
+  disconnectMsg.style.color = "#f59e0b";
+  disconnectMsg.textContent = `⚠️ ${walletAddress} disconnected. Waiting for reconnection or forfeit...`;
+  questionDiv.appendChild(disconnectMsg);
+  optionsDiv.innerHTML = "";
+  submitAnswerBtn.style.display = "none";
+  if (countdownInterval) {
+    clearInterval(countdownInterval);
+    countdownInterval = null;
+  }
+  countdownTimer.style.display = "none";
+});
 
-        socket.on('gameOverForfeit', (data) => {
-            console.log('Forfeit game over:', data);
-            const { winner, disconnectedPlayer, message, gameMode, tournamentId, prizeAmount, betAmount } = data;
+socket.on("gameOverForfeit", (data) => {
+  console.log("Forfeit game over:", data);
+  const {
+    winner,
+    disconnectedPlayer,
+    message,
+    gameMode,
+    tournamentId,
+    prizeAmount,
+    betAmount,
+  } = data;
 
-            resetGame();
+  resetGame();
 
-            const clientIsWinner = winner === connectedWallet;
-            const isTournament = (gameMode === 'tournament' || !!tournamentId);
-            const isRanked = !isTournament && betAmount > 0;
-            // Build forfeit message as DOM nodes — message contains wallet addresses from server
-            function buildForfeitNodes(target) {
-                target.textContent = '';
-                target.appendChild(document.createTextNode(message));
-                if (clientIsWinner) {
-                    if (isTournament && prizeAmount) {
-                        target.appendChild(document.createTextNode(' You win this match! Prize of '));
-                        const strong = document.createElement('strong');
-                        strong.textContent = `${prizeAmount} USDC`;
-                        target.appendChild(strong);
-                        target.appendChild(document.createTextNode(' will be sent to your wallet.'));
-                    } else if (isTournament) {
-                        target.appendChild(document.createTextNode(' You win this tournament match!'));
-                    } else if (isRanked) {
-                        target.appendChild(document.createTextNode(' You win this ranked match!'));
-                    } else {
-                        target.appendChild(document.createTextNode(' You win this practice match! Well played.'));
-                    }
-                }
-            }
+  const clientIsWinner = winner === connectedWallet;
+  const isTournament = gameMode === "tournament" || !!tournamentId;
+  const isRanked = !isTournament && betAmount > 0;
+  // Build forfeit message as DOM nodes — message contains wallet addresses from server
+  function buildForfeitNodes(target) {
+    target.textContent = "";
+    target.appendChild(document.createTextNode(message));
+    if (clientIsWinner) {
+      if (isTournament && prizeAmount) {
+        target.appendChild(
+          document.createTextNode(" You win this match! Prize of ")
+        );
+        const strong = document.createElement("strong");
+        strong.textContent = `${prizeAmount} USDC`;
+        target.appendChild(strong);
+        target.appendChild(
+          document.createTextNode(" will be sent to your wallet.")
+        );
+      } else if (isTournament) {
+        target.appendChild(
+          document.createTextNode(" You win this tournament match!")
+        );
+      } else if (isRanked) {
+        target.appendChild(
+          document.createTextNode(" You win this ranked match!")
+        );
+      } else {
+        target.appendChild(
+          document.createTextNode(" You win this practice match! Well played.")
+        );
+      }
+    }
+  }
 
-            questionDiv.textContent = '';
-            const forfeitP = document.createElement('p');
-            forfeitP.style.textAlign = 'center';
-            forfeitP.style.fontSize = '1.2em';
-            buildForfeitNodes(forfeitP);
-            questionDiv.appendChild(forfeitP);
-            buildForfeitNodes(waitingMessage);
-            if (clientIsWinner && typeof celebrateWin === 'function') celebrateWin('forfeit');
+  questionDiv.textContent = "";
+  const forfeitP = document.createElement("p");
+  forfeitP.style.textAlign = "center";
+  forfeitP.style.fontSize = "1.2em";
+  buildForfeitNodes(forfeitP);
+  questionDiv.appendChild(forfeitP);
+  buildForfeitNodes(waitingMessage);
+  if (clientIsWinner && typeof celebrateWin === "function")
+    celebrateWin("forfeit");
 
-            setTimeout(() => {
-                playersDiv.textContent = '';
-                const endHeading = document.createElement('h2');
-                endHeading.textContent = 'Game Ended Early';
-                const forfeitDiv = document.createElement('div');
-                forfeitDiv.className = 'forfeit-message';
-                const leftP = document.createElement('p');
-                leftP.textContent = `${disconnectedPlayer} left the game.`;
-                const winnerP = document.createElement('p');
-                winnerP.textContent = `${winner} is the winner.`;
-                forfeitDiv.appendChild(leftP);
-                forfeitDiv.appendChild(winnerP);
-                playersDiv.appendChild(endHeading);
-                playersDiv.appendChild(forfeitDiv);
-                joinGameBtn.style.display = 'inline-block';
-            }, 7000);
-        });
+  setTimeout(() => {
+    playersDiv.textContent = "";
+    const endHeading = document.createElement("h2");
+    endHeading.textContent = "Game Ended Early";
+    const forfeitDiv = document.createElement("div");
+    forfeitDiv.className = "forfeit-message";
+    const leftP = document.createElement("p");
+    leftP.textContent = `${disconnectedPlayer} left the game.`;
+    const winnerP = document.createElement("p");
+    winnerP.textContent = `${winner} is the winner.`;
+    forfeitDiv.appendChild(leftP);
+    forfeitDiv.appendChild(winnerP);
+    playersDiv.appendChild(endHeading);
+    playersDiv.appendChild(forfeitDiv);
+    joinGameBtn.style.display = "inline-block";
+  }, 7000);
+});
 
-        socket.on('gameError', (error) => {
-            logError('game', error);  // ✅ Safe logging
-            alert(getErrorMessage(error));  // ✅ User-friendly message
-            resetGame();
-        });
+socket.on("gameError", (error) => {
+  logError("game", error); // ✅ Safe logging
+  alert(getErrorMessage(error)); // ✅ User-friendly message
+  resetGame();
+});
 
-        socket.on('clearQuestionUI', () => {
-            if (!waitingMessage.querySelector('.correct-answer')) {
-                questionDiv.textContent = '';
-                optionsDiv.textContent = '';
-                waitingMessage.textContent = '';
-            }
-        });
+socket.on("clearQuestionUI", () => {
+  if (!waitingMessage.querySelector(".correct-answer")) {
+    questionDiv.textContent = "";
+    optionsDiv.textContent = "";
+    waitingMessage.textContent = "";
+  }
+});
 
-        socket.on('disconnect', () => {
-            console.log('Disconnected from server');
+socket.on("disconnect", () => {
+  console.log("Disconnected from server");
 
-            // Check if player is in active game
-            if (currentRoomId !== null) {
-                // Player was in a game - attempt reconnection
-                console.log('Disconnected during active game. Attempting to reconnect...');
-                isReconnecting = true;
-                reconnectAttempts++;
-                hasGameToRestore = true;
-                showReconnectingOverlay();
-                updateReconnectAttemptDisplay();
-                // Do NOT call resetGame() - we want to preserve state for restoration
-            } else {
-                // Not in a game — silent reset, Socket.IO will auto-reconnect
-                resetGame();
-            }
-        });
+  // Check if player is in active game
+  if (currentRoomId !== null) {
+    // Player was in a game - attempt reconnection
+    console.log("Disconnected during active game. Attempting to reconnect...");
+    isReconnecting = true;
+    reconnectAttempts++;
+    hasGameToRestore = true;
+    showReconnectingOverlay();
+    updateReconnectAttemptDisplay();
+    // Do NOT call resetGame() - we want to preserve state for restoration
+  } else {
+    // Not in a game — silent reset, Socket.IO will auto-reconnect
+    resetGame();
+  }
+});
 
-        // Game state restoration handler for reconnection
-        socket.on('gameStateRestore', (data) => {
-            console.log('Received gameStateRestore:', data);
+// Game state restoration handler for reconnection
+socket.on("gameStateRestore", (data) => {
+  console.log("Received gameStateRestore:", data);
 
-            // Clear any pending reconnect timeout
-            if (window.reconnectTimeoutRef) {
-                clearTimeout(window.reconnectTimeoutRef);
-                window.reconnectTimeoutRef = null;
-            }
+  // Clear any pending reconnect timeout
+  if (window.reconnectTimeoutRef) {
+    clearTimeout(window.reconnectTimeoutRef);
+    window.reconnectTimeoutRef = null;
+  }
 
-            // Hide reconnecting overlay
-            hideReconnectingOverlay();
+  // Hide reconnecting overlay
+  hideReconnectingOverlay();
 
-            // Validate data
-            if (!data || !data.roomId || !Array.isArray(data.players)) {
-                console.error('Invalid gameStateRestore data:', data);
-                showNotification('Failed to restore game state. Starting fresh.', 'error');
-                isReconnecting = false;
-                hasGameToRestore = false;
-                reconnectAttempts = 0;
-                resetGame();
-                return;
-            }
+  // Validate data
+  if (!data || !data.roomId || !Array.isArray(data.players)) {
+    console.error("Invalid gameStateRestore data:", data);
+    showNotification("Failed to restore game state. Starting fresh.", "error");
+    isReconnecting = false;
+    hasGameToRestore = false;
+    reconnectAttempts = 0;
+    resetGame();
+    return;
+  }
 
-            // Restore game state
-            currentRoomId = data.roomId;
-            currentBetAmount = data.betAmount || currentBetAmount;
+  // Restore game state
+  currentRoomId = data.roomId;
+  currentBetAmount = data.betAmount || currentBetAmount;
 
-            console.log('Restoring game state:', {
-                roomId: currentRoomId,
-                gameMode: currentGameMode,
-                tournamentId: currentTournamentId,
-                gameStarted: data.gameStarted,
-                playerCount: data.players.length
-            });
+  console.log("Restoring game state:", {
+    roomId: currentRoomId,
+    gameMode: currentGameMode,
+    tournamentId: currentTournamentId,
+    gameStarted: data.gameStarted,
+    playerCount: data.players.length,
+  });
 
-            if (data.gameStarted) {
-                // Game is in progress - show game screen
-                joinGameBtn.style.display = 'none';
-                // (bet selector removed — subscription model)
+  if (data.gameStarted) {
+    // Game is in progress - show game screen
+    joinGameBtn.style.display = "none";
+    // (bet selector removed — subscription model)
 
-                // Update players display
-                updatePlayerUI(data.players);
+    // Update players display
+    updatePlayerUI(data.players);
 
-                // Handle active question if present (player can still answer)
-                if (data.activeQuestion) {
-                    // Jump directly to the current question content
-                    displayQuestion(
-                        data.activeQuestion.question,
-                        data.activeQuestion.options,
-                        data.activeQuestion.questionNumber,
-                        data.activeQuestion.totalQuestions
-                    );
-                    currentQuestionId = data.activeQuestion.questionId;
-                    submitAnswerBtn.style.display = 'block';
-                    submitAnswerBtn.disabled = false;
-                    waitingMessage.innerHTML = ''; // Clear "Round Results" or "Joined" messages
+    // Handle active question if present (player can still answer)
+    if (data.activeQuestion) {
+      // Jump directly to the current question content
+      displayQuestion(
+        data.activeQuestion.question,
+        data.activeQuestion.options,
+        data.activeQuestion.questionNumber,
+        data.activeQuestion.totalQuestions
+      );
+      currentQuestionId = data.activeQuestion.questionId;
+      submitAnswerBtn.style.display = "block";
+      submitAnswerBtn.disabled = false;
+      waitingMessage.innerHTML = ""; // Clear "Round Results" or "Joined" messages
 
-                    // Calculate remaining time synced with server
-                    const msRemaining = Math.max(0, (data.activeQuestion.questionEndsAt - serverTimeOffset) - Date.now());
-                    startVisualCountdown(Math.ceil(msRemaining / 1000), msRemaining);
+      // Calculate remaining time synced with server
+      const msRemaining = Math.max(
+        0,
+        data.activeQuestion.questionEndsAt - serverTimeOffset - Date.now()
+      );
+      startVisualCountdown(Math.ceil(msRemaining / 1000), msRemaining);
 
-                    // Set up timeout for remaining time
-                    if (questionTimer) {
-                        clearTimeout(questionTimer);
-                    }
-                    questionTimer = setTimeout(() => {
-                        submitAnswerBtn.disabled = true;
-                        waitingMessage.textContent = 'Time\'s up!';
-                    }, msRemaining);
-                } else if (data.currentQuestion) {
-                    // Between questions or question already ended
-                    questionDiv.textContent = '';
-                    const reconnectQHeading = document.createElement('h2');
-                    reconnectQHeading.textContent = `Question ${data.currentQuestion.questionNumber} of ${data.currentQuestion.totalQuestions}`;
-                    questionDiv.appendChild(reconnectQHeading);
-                    waitingMessage.textContent = 'Reconnected! Waiting for next question...';
-                } else {
-                    waitingMessage.textContent = 'Reconnected! Game in progress...';
-                }
+      // Set up timeout for remaining time
+      if (questionTimer) {
+        clearTimeout(questionTimer);
+      }
+      questionTimer = setTimeout(() => {
+        submitAnswerBtn.disabled = true;
+        waitingMessage.textContent = "Time's up!";
+      }, msRemaining);
+    } else if (data.currentQuestion) {
+      // Between questions or question already ended
+      questionDiv.textContent = "";
+      const reconnectQHeading = document.createElement("h2");
+      reconnectQHeading.textContent = `Question ${data.currentQuestion.questionNumber} of ${data.currentQuestion.totalQuestions}`;
+      questionDiv.appendChild(reconnectQHeading);
+      waitingMessage.textContent = "Reconnected! Waiting for next question...";
+    } else {
+      waitingMessage.textContent = "Reconnected! Game in progress...";
+    }
 
-                // Handle bot game indicator
-                if (data.botOpponent) {
-                    document.body.classList.add('playing-bot');
-                }
-            } else {
-                // Game hasn't started yet - show waiting room
-                joinGameBtn.style.display = 'none';
-                // (bet selector removed — subscription model)
+    // Handle bot game indicator
+    if (data.botOpponent) {
+      document.body.classList.add("playing-bot");
+    }
+  } else {
+    // Game hasn't started yet - show waiting room
+    joinGameBtn.style.display = "none";
+    // (bet selector removed — subscription model)
 
-                // Update player list
-                playersDiv.textContent = '';
-                const reconnectHeading = document.createElement('h2');
-                reconnectHeading.textContent = 'Players:';
-                playersDiv.appendChild(reconnectHeading);
-                data.players.forEach(p => {
-                    const row = document.createElement('p');
-                    row.textContent = `${p.username}${p.isBot ? ' 🤖' : ''}: Ready`;
-                    playersDiv.appendChild(row);
-                });
+    // Update player list
+    playersDiv.textContent = "";
+    const reconnectHeading = document.createElement("h2");
+    reconnectHeading.textContent = "Players:";
+    playersDiv.appendChild(reconnectHeading);
+    data.players.forEach((p) => {
+      const row = document.createElement("p");
+      row.textContent = `${p.username}${p.isBot ? " 🤖" : ""}: Ready`;
+      playersDiv.appendChild(row);
+    });
 
-                waitingMessage.textContent = 'Reconnected! Waiting for game to start...';
-            }
+    waitingMessage.textContent = "Reconnected! Waiting for game to start...";
+  }
 
-            // Reset reconnection state
-            isReconnecting = false;
-            hasGameToRestore = false;
-            reconnectAttempts = 0;
+  // Reset reconnection state
+  isReconnecting = false;
+  hasGameToRestore = false;
+  reconnectAttempts = 0;
 
-            // Show success notification
-            showNotification('Successfully reconnected to game!', 'success');
+  // Show success notification
+  showNotification("Successfully reconnected to game!", "success");
 
-            // Log restoration details
-            console.log('Game state restored successfully:', {
-                roomId: currentRoomId,
-                gameMode: currentGameMode,
-                tournamentId: currentTournamentId,
-                players: data.players.map(p => p.username),
-                gameStarted: data.gameStarted
-            });
-        });
+  // Log restoration details
+  console.log("Game state restored successfully:", {
+    roomId: currentRoomId,
+    gameMode: currentGameMode,
+    tournamentId: currentTournamentId,
+    players: data.players.map((p) => p.username),
+    gameStarted: data.gameStarted,
+  });
+});
 
-        socket.on('gameRestoreFailed', () => {
-            hideReconnectingOverlay();
-            isReconnecting = false;
-            hasGameToRestore = false;
-            reconnectAttempts = 0;
-            resetGame();
-            showNotification('Unable to restore game session. Please start a new game.', 'error');
-        });
+socket.on("gameRestoreFailed", () => {
+  hideReconnectingOverlay();
+  isReconnecting = false;
+  hasGameToRestore = false;
+  reconnectAttempts = 0;
+  resetGame();
+  showNotification(
+    "Unable to restore game session. Please start a new game.",
+    "error"
+  );
+});
 
-        const forfeitStyles = document.createElement('style');
-        forfeitStyles.textContent = `
+const forfeitStyles = document.createElement("style");
+forfeitStyles.textContent = `
             .loading-spinner {
                 display: inline-block;
                 animation: spin 2s infinite linear;
@@ -1495,34 +1674,34 @@
                 background-color: rgba(255, 152, 0, 0.1);
             }
         `;
-        document.head.appendChild(forfeitStyles);
+document.head.appendChild(forfeitStyles);
 
-        // Optional celebration effect
-        function celebrateWin(type) {
-            // Simple confetti effect for win celebration
-            const confettiContainer = document.createElement('div');
-            confettiContainer.className = 'confetti-container';
-            document.body.appendChild(confettiContainer);
-            
-            // Create 50 confetti pieces
-            for (let i = 0; i < 50; i++) {
-                const confetti = document.createElement('div');
-                confetti.className = 'confetti';
-                confetti.style.left = `${Math.random() * 100}%`;
-                confetti.style.animationDelay = `${Math.random() * 3}s`;
-                confetti.style.backgroundColor = `hsl(${Math.random() * 360}, 80%, 60%)`;
-                confettiContainer.appendChild(confetti);
-            }
-            
-            // Remove confetti after animation completes
-            setTimeout(() => {
-                confettiContainer.remove();
-            }, 6000);
-        }
+// Optional celebration effect
+function celebrateWin(type) {
+  // Simple confetti effect for win celebration
+  const confettiContainer = document.createElement("div");
+  confettiContainer.className = "confetti-container";
+  document.body.appendChild(confettiContainer);
 
-    // Add the confetti CSS
-        const confettiStyles = document.createElement('style');
-        confettiStyles.textContent = `
+  // Create 50 confetti pieces
+  for (let i = 0; i < 50; i++) {
+    const confetti = document.createElement("div");
+    confetti.className = "confetti";
+    confetti.style.left = `${Math.random() * 100}%`;
+    confetti.style.animationDelay = `${Math.random() * 3}s`;
+    confetti.style.backgroundColor = `hsl(${Math.random() * 360}, 80%, 60%)`;
+    confettiContainer.appendChild(confetti);
+  }
+
+  // Remove confetti after animation completes
+  setTimeout(() => {
+    confettiContainer.remove();
+  }, 6000);
+}
+
+// Add the confetti CSS
+const confettiStyles = document.createElement("style");
+confettiStyles.textContent = `
             .confetti-container {
                 position: fixed;
                 width: 100%;
@@ -1556,581 +1735,614 @@
                 }
             }
         `;
-        document.head.appendChild(confettiStyles);
+document.head.appendChild(confettiStyles);
 
-        socket.on('updateScores', (players) => {
-            updatePlayers(players);
-        });
+socket.on("updateScores", (players) => {
+  updatePlayers(players);
+});
 
-        function displayQuestion(question, options, questionNumber, totalQuestions) {
-            questionDiv.textContent = '';
-            const heading = document.createElement('h2');
-            heading.textContent = `Question ${questionNumber} of ${totalQuestions}`;
-            const body = document.createElement('p');
-            body.textContent = question;
-            questionDiv.appendChild(heading);
-            questionDiv.appendChild(body);
+function displayQuestion(question, options, questionNumber, totalQuestions) {
+  questionDiv.textContent = "";
+  const heading = document.createElement("h2");
+  heading.textContent = `Question ${questionNumber} of ${totalQuestions}`;
+  const body = document.createElement("p");
+  body.textContent = question;
+  questionDiv.appendChild(heading);
+  questionDiv.appendChild(body);
 
-            optionsDiv.textContent = '';
-            options.forEach((option, index) => {
-                const div = document.createElement('div');
-                const input = document.createElement('input');
-                input.type = 'radio';
-                input.id = `option${index}`;
-                input.name = 'answer';
-                input.value = index;
-                const label = document.createElement('label');
-                label.setAttribute('for', `option${index}`);
-                label.textContent = option;
-                div.appendChild(input);
-                div.appendChild(label);
-                optionsDiv.appendChild(div);
-            });
-        }
+  optionsDiv.textContent = "";
+  options.forEach((option, index) => {
+    const div = document.createElement("div");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.id = `option${index}`;
+    input.name = "answer";
+    input.value = index;
+    const label = document.createElement("label");
+    label.setAttribute("for", `option${index}`);
+    label.textContent = option;
+    div.appendChild(input);
+    div.appendChild(label);
+    optionsDiv.appendChild(div);
+  });
+}
 
-        function startVisualCountdown(startTimeInSeconds, actualMsRemaining) {
-            let timeRemaining = startTimeInSeconds;
-            
-            // Clear any existing intervals or timeouts to prevent "doubling up"
-            clearInterval(countdownInterval);
-            if (window.syncTimeout) clearTimeout(window.syncTimeout);
-            if (questionTimer) clearTimeout(questionTimer);
-            
-            // Render the starting number immediately
-            countdownTimer.textContent = `Time remaining: ${timeRemaining} seconds`;
-            countdownTimer.style.display = 'block';
-            
-            // OPTION 2: Dynamic interval timing
-            // Calculate the time per tick to fit all numbers into actual remaining time
-            // Example: If we have 9800ms and need to show 10 numbers,
-            // each tick should be 9800/10 = 980ms instead of 1000ms
-            const tickInterval = actualMsRemaining / timeRemaining;
-            
-            // Helper function to handle countdown tick
-            const tickDown = () => {
-                timeRemaining--;
-                
-                if (timeRemaining <= 0) {
-                    // Countdown complete - show time's up and disable button
-                    countdownTimer.textContent = "Time's up!";
-                    submitAnswerBtn.disabled = true;
-                    if (countdownInterval) clearInterval(countdownInterval);
-                    if (window.syncTimeout) clearTimeout(window.syncTimeout);
-                } else {
-                    // Update display with remaining time
-                    countdownTimer.textContent = `Time remaining: ${timeRemaining} seconds`;
-                }
-            };
-            
-            // Start first tick at the calculated interval
-            window.syncTimeout = setTimeout(() => {
-                tickDown();
-                
-                // If there's still time remaining, continue with regular intervals
-                if (timeRemaining > 0) {
-                    countdownInterval = setInterval(tickDown, tickInterval);
-                }
-            }, tickInterval);
-            
-            // Safety net: Force time's up at the exact moment actual time expires
-            // This ensures button is disabled even if intervals drift slightly
-            questionTimer = setTimeout(() => {
-                if (timeRemaining > 0) {
-                    timeRemaining = 0;
-                    countdownTimer.textContent = "Time's up!";
-                    submitAnswerBtn.disabled = true;
-                    if (countdownInterval) clearInterval(countdownInterval);
-                    if (window.syncTimeout) clearTimeout(window.syncTimeout);
-                }
-            }, actualMsRemaining);
-        }
+function startVisualCountdown(startTimeInSeconds, actualMsRemaining) {
+  let timeRemaining = startTimeInSeconds;
 
-        function updatePlayerUI(players) {
-            playersDiv.textContent = '';
-            const playersHeading = document.createElement('h2');
-            playersHeading.textContent = 'Players:';
-            playersDiv.appendChild(playersHeading);
-            players.forEach(p => {
-                const row = document.createElement('p');
-                if (p.isBot) row.className = 'bot-player';
-                row.appendChild(document.createTextNode(`${p.username}${p.isBot ? ' 🤖' : ''}`));
-                if (p.isBot && p.difficulty) {
-                    const badge = document.createElement('span');
-                    badge.className = `difficulty-badge ${p.difficulty.toLowerCase()}`;
-                    badge.textContent = p.difficulty;
-                    row.appendChild(badge);
-                }
-                row.appendChild(document.createTextNode(`: ${p.score || 0} `));
-                const responseSpan = document.createElement('span');
-                responseSpan.className = 'response-time';
-                responseSpan.textContent = `(Response time: ${p.totalResponseTime || 0}ms)`;
-                row.appendChild(responseSpan);
-                playersDiv.appendChild(row);
-            });
-        }
+  // Clear any existing intervals or timeouts to prevent "doubling up"
+  clearInterval(countdownInterval);
+  if (window.syncTimeout) clearTimeout(window.syncTimeout);
+  if (questionTimer) clearTimeout(questionTimer);
 
-        function updatePlayers(players) {
-            updatePlayerUI(players);
-        }
+  // Render the starting number immediately
+  countdownTimer.textContent = `Time remaining: ${timeRemaining} seconds`;
+  countdownTimer.style.display = "block";
 
-        function resetGame() {
-            // Clear reconnection state first — never block cleanup
-            isReconnecting = false;
-            hasGameToRestore = false;
-            hideReconnectingOverlay();
+  // OPTION 2: Dynamic interval timing
+  // Calculate the time per tick to fit all numbers into actual remaining time
+  // Example: If we have 9800ms and need to show 10 numbers,
+  // each tick should be 9800/10 = 980ms instead of 1000ms
+  const tickInterval = actualMsRemaining / timeRemaining;
 
-            currentRoomId = null;
-            inMatchmakingQueue = false;
-            waitingRoomId = null;
-            playersDiv.innerHTML = '';
-            questionDiv.innerHTML = '';
-            optionsDiv.innerHTML = '';
-            submitAnswerBtn.style.display = 'none';
-            waitingMessage.textContent = '';
-            joinGameBtn.style.display = 'block';
-            joinGameBtn.disabled = false;
-            // (bet selector removed)
+  // Helper function to handle countdown tick
+  const tickDown = () => {
+    timeRemaining--;
 
-            document.body.classList.remove('playing-bot');
+    if (timeRemaining <= 0) {
+      // Countdown complete - show time's up and disable button
+      countdownTimer.textContent = "Time's up!";
+      submitAnswerBtn.disabled = true;
+      if (countdownInterval) clearInterval(countdownInterval);
+      if (window.syncTimeout) clearTimeout(window.syncTimeout);
+    } else {
+      // Update display with remaining time
+      countdownTimer.textContent = `Time remaining: ${timeRemaining} seconds`;
+    }
+  };
 
-            if (questionTimer) {
-                clearTimeout(questionTimer);
-                questionTimer = null;
-            }
+  // Start first tick at the calculated interval
+  window.syncTimeout = setTimeout(() => {
+    tickDown();
 
-            if (window.syncTimeout) clearTimeout(window.syncTimeout);
+    // If there's still time remaining, continue with regular intervals
+    if (timeRemaining > 0) {
+      countdownInterval = setInterval(tickDown, tickInterval);
+    }
+  }, tickInterval);
 
-            if (countdownInterval) {
-                clearInterval(countdownInterval);
-                countdownInterval = null;
-            }
-            countdownTimer.style.display = 'none';
-            countdownTimer.textContent = '';
+  // Safety net: Force time's up at the exact moment actual time expires
+  // This ensures button is disabled even if intervals drift slightly
+  questionTimer = setTimeout(() => {
+    if (timeRemaining > 0) {
+      timeRemaining = 0;
+      countdownTimer.textContent = "Time's up!";
+      submitAnswerBtn.disabled = true;
+      if (countdownInterval) clearInterval(countdownInterval);
+      if (window.syncTimeout) clearTimeout(window.syncTimeout);
+    }
+  }, actualMsRemaining);
+}
 
-            const modal = document.getElementById('gameChoiceModal');
-            if (modal && modal.style.display === 'flex') {
-                modal.style.display = 'none';
-            }
-            if (waitingTimeout) {
-                clearTimeout(waitingTimeout);
-                waitingTimeout = null;
-            }
-            
-            currentQuestionId = null;
-            
-            console.log('Game UI reset.');
-        }
+function updatePlayerUI(players) {
+  playersDiv.textContent = "";
+  const playersHeading = document.createElement("h2");
+  playersHeading.textContent = "Players:";
+  playersDiv.appendChild(playersHeading);
+  players.forEach((p) => {
+    const row = document.createElement("p");
+    if (p.isBot) row.className = "bot-player";
+    row.appendChild(
+      document.createTextNode(`${p.username}${p.isBot ? " 🤖" : ""}`)
+    );
+    if (p.isBot && p.difficulty) {
+      const badge = document.createElement("span");
+      badge.className = `difficulty-badge ${p.difficulty.toLowerCase()}`;
+      badge.textContent = p.difficulty;
+      row.appendChild(badge);
+    }
+    row.appendChild(document.createTextNode(`: ${p.score || 0} `));
+    const responseSpan = document.createElement("span");
+    responseSpan.className = "response-time";
+    responseSpan.textContent = `(Response time: ${p.totalResponseTime || 0}ms)`;
+    row.appendChild(responseSpan);
+    playersDiv.appendChild(row);
+  });
+}
 
-        // Reconnection helper functions
-        function showReconnectingOverlay() {
-            const overlay = document.getElementById('reconnectingOverlay');
-            if (overlay) {
-                overlay.style.display = 'flex';
-            }
-        }
+function updatePlayers(players) {
+  updatePlayerUI(players);
+}
 
-        function hideReconnectingOverlay() {
-            const overlay = document.getElementById('reconnectingOverlay');
-            if (overlay) {
-                overlay.style.display = 'none';
-            }
-        }
+function resetGame() {
+  // Clear reconnection state first — never block cleanup
+  isReconnecting = false;
+  hasGameToRestore = false;
+  hideReconnectingOverlay();
 
-        function updateReconnectAttemptDisplay() {
-            const attemptCounter = document.getElementById('reconnectAttemptCount');
-            if (attemptCounter) {
-                attemptCounter.textContent = `Attempt ${reconnectAttempts} of ${MAX_RECONNECT_ATTEMPTS}`;
-            }
-        }
+  currentRoomId = null;
+  inMatchmakingQueue = false;
+  waitingRoomId = null;
+  playersDiv.innerHTML = "";
+  questionDiv.innerHTML = "";
+  optionsDiv.innerHTML = "";
+  submitAnswerBtn.style.display = "none";
+  waitingMessage.textContent = "";
+  joinGameBtn.style.display = "block";
+  joinGameBtn.disabled = false;
+  // (bet selector removed)
 
-        function showNotification(message, type) {
-            const notification = document.getElementById('notification');
-            if (notification) {
-                notification.textContent = message;
-                notification.style.display = 'block';
+  document.body.classList.remove("playing-bot");
 
-                // Style based on type
-                if (type === 'success') {
-                    notification.style.backgroundColor = '#d4edda';
-                    notification.style.color = '#155724';
-                    notification.style.border = '1px solid #c3e6cb';
-                } else if (type === 'error') {
-                    notification.style.backgroundColor = '#f8d7da';
-                    notification.style.color = '#721c24';
-                    notification.style.border = '1px solid #f5c6cb';
-                } else {
-                    notification.style.backgroundColor = '#f0f0f0';
-                    notification.style.color = '#333';
-                    notification.style.border = '1px solid #ddd';
-                }
+  if (questionTimer) {
+    clearTimeout(questionTimer);
+    questionTimer = null;
+  }
 
-                // Auto-hide after 5 seconds
-                setTimeout(() => {
-                    notification.style.display = 'none';
-                }, 5000);
-            }
-        }
+  if (window.syncTimeout) clearTimeout(window.syncTimeout);
 
-        async function getRecaptchaToken(action) {
-            console.log('getRecaptchaToken called for:', action);
-            
-            if (!window.recaptchaEnabled || !window.grecaptcha || !window.recaptchaSiteKey) {
-                if (window.recaptchaEnabled) {
-                    throw new Error('reCAPTCHA not ready - please refresh the page');
-                }
-                return null;  // Only skip if truly disabled
-            }
+  if (countdownInterval) {
+    clearInterval(countdownInterval);
+    countdownInterval = null;
+  }
+  countdownTimer.style.display = "none";
+  countdownTimer.textContent = "";
 
-            try {
-                // Correct Promise wrapper for grecaptcha.ready()
-                const token = await new Promise((resolve, reject) => {
-                    grecaptcha.ready(() => {
-                        grecaptcha.execute(window.recaptchaSiteKey, { action: action })
-                            .then((token) => {
-                                if (!token) {
-                                    reject(new Error('Empty reCAPTCHA token'));
-                                } else {
-                                    resolve(token);
-                                }
-                            })
-                            .catch(reject);
-                    });
-                });
-                
-                return token;
-            } catch (error) {
-                logError('reCAPTCHA-token-generation', error);
-                throw new Error('Verification failed. Please try again.');
-            }
-        }
+  const modal = document.getElementById("gameChoiceModal");
+  if (modal && modal.style.display === "flex") {
+    modal.style.display = "none";
+  }
+  if (waitingTimeout) {
+    clearTimeout(waitingTimeout);
+    waitingTimeout = null;
+  }
 
+  currentQuestionId = null;
 
-        function showGameChoiceModal() {
-            console.log('Showing game choice modal');
-            const modal = document.getElementById('gameChoiceModal');
-            modal.style.display = 'flex';
+  console.log("Game UI reset.");
+}
 
-            const botBtn = document.getElementById('playAgainstBotBtn');
-            if (botBtn) botBtn.style.display = isPremium ? 'none' : '';
+// Reconnection helper functions
+function showReconnectingOverlay() {
+  const overlay = document.getElementById("reconnectingOverlay");
+  if (overlay) {
+    overlay.style.display = "flex";
+  }
+}
 
-            document.getElementById('waitForPlayerBtn').onclick = async function() {
-                if (isProcessingBet) return;
-                isProcessingBet = true;
-                try {
-                    modal.style.display = 'none';
-                    if (!connectedWallet) throw new Error('Wallet disconnected. Please reconnect.');
+function hideReconnectingOverlay() {
+  const overlay = document.getElementById("reconnectingOverlay");
+  if (overlay) {
+    overlay.style.display = "none";
+  }
+}
 
-                    this.disabled = true;
-                    this.textContent = 'Joining...';
+function updateReconnectAttemptDisplay() {
+  const attemptCounter = document.getElementById("reconnectAttemptCount");
+  if (attemptCounter) {
+    attemptCounter.textContent = `Attempt ${reconnectAttempts} of ${MAX_RECONNECT_ATTEMPTS}`;
+  }
+}
 
-                    if (currentGameMode === 'tournament' && currentTournamentId) {
-                        waitingMessage.textContent = 'Joining tournament matchmaking...';
-                        socket.emit('joinTournamentGame', {
-                            walletAddress: connectedWallet,
-                            tournamentId: currentTournamentId
-                        });
-                    } else if (isPremium) {
-                        waitingMessage.textContent = 'Looking for a ranked opponent...';
-                        socket.emit('joinHumanMatchmaking', {
-                            betAmount: 0
-                        });
-                    } else {
-                        waitingMessage.textContent = 'Looking for another player...';
-                        socket.emit('joinPracticeGame', {
-                            walletAddress: connectedWallet,
-                            gameMode: 'human'
-                        });
-                    }
-                    joinGameBtn.disabled = true;
-                } catch (error) {
-                    logError('human-matchmaking', error);
-                    alert('Error: ' + error.message);
-                    waitingMessage.textContent = 'Error joining game. Please try again.';
-                    resetUIAfterError();
-                } finally {
-                    isProcessingBet = false;
-                    this.disabled = false;
-                    this.textContent = 'Play vs Human';
-                }
-            };
+function showNotification(message, type) {
+  const notification = document.getElementById("notification");
+  if (notification) {
+    notification.textContent = message;
+    notification.style.display = "block";
 
-            document.getElementById('playAgainstBotBtn').onclick = async function() {
-                if (isProcessingBet) return;
-                isProcessingBet = true;
-                try {
-                    modal.style.display = 'none';
-                    if (!connectedWallet) throw new Error('Wallet disconnected. Please reconnect.');
+    // Style based on type
+    if (type === "success") {
+      notification.style.backgroundColor = "#d4edda";
+      notification.style.color = "#155724";
+      notification.style.border = "1px solid #c3e6cb";
+    } else if (type === "error") {
+      notification.style.backgroundColor = "#f8d7da";
+      notification.style.color = "#721c24";
+      notification.style.border = "1px solid #f5c6cb";
+    } else {
+      notification.style.backgroundColor = "#f0f0f0";
+      notification.style.color = "#333";
+      notification.style.border = "1px solid #ddd";
+    }
 
-                    this.disabled = true;
-                    this.textContent = 'Creating game...';
-                    waitingMessage.textContent = 'Starting bot game...';
+    // Auto-hide after 5 seconds
+    setTimeout(() => {
+      notification.style.display = "none";
+    }, 5000);
+  }
+}
 
-                    socket.emit('joinPracticeGame', {
-                        walletAddress: connectedWallet,
-                        gameMode: 'bot'
-                    });
-                    joinGameBtn.disabled = true;
-                } catch (error) {
-                    logError('bot-game', error);
-                    alert('Error: ' + error.message);
-                    waitingMessage.textContent = 'Error starting bot game. Please try again.';
-                    resetUIAfterError();
-                } finally {
-                    isProcessingBet = false;
-                    this.disabled = false;
-                    this.textContent = 'Play Against Bot';
-                }
-            };
-        }
+async function getRecaptchaToken(action) {
+  console.log("getRecaptchaToken called for:", action);
 
+  if (
+    !window.recaptchaEnabled ||
+    !window.grecaptcha ||
+    !window.recaptchaSiteKey
+  ) {
+    if (window.recaptchaEnabled) {
+      throw new Error("reCAPTCHA not ready - please refresh the page");
+    }
+    return null; // Only skip if truly disabled
+  }
 
-        function switchToBotMode() {
-            console.log('Switching to bot mode');
-            waitingForPlayer = false;
-            if (waitingTimeout) {
-                clearTimeout(waitingTimeout);
-            }
-            
-            const modal = document.getElementById('gameChoiceModal');
-            if (modal.style.display === 'flex') {
-                modal.style.display = 'none';
-            }
-            
-            waitingMessage.textContent = 'Starting game against bot...';
-            
-            // Send message to server to start bot game in the current room
-            if (currentRoomId) {
-                console.log('Requesting bot for room:', currentRoomId);
-                socket.emit('requestBotGame', { roomId: currentRoomId });
+  try {
+    // Correct Promise wrapper for grecaptcha.ready()
+    const token = await new Promise((resolve, reject) => {
+      grecaptcha.ready(() => {
+        grecaptcha
+          .execute(window.recaptchaSiteKey, { action: action })
+          .then((token) => {
+            if (!token) {
+              reject(new Error("Empty reCAPTCHA token"));
             } else {
-                console.error('No room ID available when trying to switch to bot mode');
-                waitingMessage.textContent = 'Error starting bot game. Please try again.';
-                resetJoinUI();
+              resolve(token);
             }
-        }
+          })
+          .catch(reject);
+      });
+    });
 
-        const joinSound = document.getElementById('joinSound');
-        const notification = document.getElementById('notification');
+    return token;
+  } catch (error) {
+    logError("reCAPTCHA-token-generation", error);
+    throw new Error("Verification failed. Please try again.");
+  }
+}
 
-        socket.on('playerJoined', (username) => {
-            console.log(`Player ${username} joined the game`);
-            
-            // Clear any waiting timeout
-            if (waitingTimeout) {
-                clearTimeout(waitingTimeout);
-            }
-            
-            // Make sure game choice modal is closed
-            const modal = document.getElementById('gameChoiceModal');
-            if (modal.style.display === 'flex') {
-                modal.style.display = 'none';
-            }
-            
-            waitingMessage.textContent = `${username} joined. Game is starting...`;
-            
-            // Play sound if available
-            const joinSound = document.getElementById('joinSound');
-            if (joinSound) {
-                joinSound.play();
-            }
-            
-            // Show notification
-            notification.textContent = `${username} has joined the lobby!`;
-            notification.style.display = 'block';
-            joinSound.play();
-            setTimeout(() => {
-                notification.style.display = 'none';
-            }, 3000);
+function showGameChoiceModal() {
+  console.log("Showing game choice modal");
+  const modal = document.getElementById("gameChoiceModal");
+  modal.style.display = "flex";
+
+  const botBtn = document.getElementById("playAgainstBotBtn");
+  if (botBtn) botBtn.style.display = isPremium ? "none" : "";
+
+  document.getElementById("waitForPlayerBtn").onclick = async function () {
+    if (isProcessingBet) return;
+    isProcessingBet = true;
+    try {
+      modal.style.display = "none";
+      if (!connectedWallet)
+        throw new Error("Wallet disconnected. Please reconnect.");
+
+      this.disabled = true;
+      this.textContent = "Joining...";
+
+      if (currentGameMode === "tournament" && currentTournamentId) {
+        waitingMessage.textContent = "Joining tournament matchmaking...";
+        socket.emit("joinTournamentGame", {
+          walletAddress: connectedWallet,
+          tournamentId: currentTournamentId,
         });
-
-
-        questionDiv.addEventListener('contextmenu', (event) => {
-            event.preventDefault();
+      } else if (isPremium) {
+        waitingMessage.textContent = "Looking for a ranked opponent...";
+        socket.emit("joinHumanMatchmaking", {
+          betAmount: 0,
         });
-
-        socket.on('answerResult', (data) => {
-            const { username, isCorrect, questionId } = data;
-            try {
-                if (username === connectedWallet && questionId === currentQuestionId) {
-                    const selectedOption = document.querySelector(`input[name="answer"][value="${data.selectedAnswer}"]`);
-                    if (selectedOption && selectedOption.parentElement) {
-                        selectedOption.parentElement.classList.add(isCorrect ? 'correct' : 'incorrect');
-                    }
-                }
-            } catch (error) {
-                logError('update-answer-UI', error);
-            }
+      } else {
+        waitingMessage.textContent = "Looking for another player...";
+        socket.emit("joinPracticeGame", {
+          walletAddress: connectedWallet,
+          gameMode: "human",
         });
+      }
+      joinGameBtn.disabled = true;
+    } catch (error) {
+      logError("human-matchmaking", error);
+      alert("Error: " + error.message);
+      waitingMessage.textContent = "Error joining game. Please try again.";
+      resetUIAfterError();
+    } finally {
+      isProcessingBet = false;
+      this.disabled = false;
+      this.textContent = "Play vs Human";
+    }
+  };
 
-        socket.on('playerAnswered', (data) => {
-            if (typeof data === 'string') {
-                waitingMessage.textContent = `${data} has submitted their answer`;
-                return;
-            }
-            
-            const { username, isBot, responseTime, timedOut } = data;
-            if (username !== connectedWallet) {
-                if (isBot) {
-                    waitingMessage.textContent = '';
-                    const botAnswerDiv = document.createElement('div');
-                    botAnswerDiv.className = 'bot-answer';
-                    botAnswerDiv.appendChild(document.createTextNode(`${username} 🤖 has answered in ${responseTime}ms`));
-                    const thinkingSpan = document.createElement('span');
-                    thinkingSpan.className = 'bot-thinking';
-                    botAnswerDiv.appendChild(thinkingSpan);
-                    waitingMessage.appendChild(botAnswerDiv);
-                    playBotSound('answer');
-                } else {
-                    const responseText = timedOut ? 
-                        `${username} ran out of time!` : 
-                        `${username} has submitted their answer${responseTime ? ` (${responseTime}ms)` : ''}`;
-                    waitingMessage.textContent = responseText;
-                }
-            }
-        });
+  document.getElementById("playAgainstBotBtn").onclick = async function () {
+    if (isProcessingBet) return;
+    isProcessingBet = true;
+    try {
+      modal.style.display = "none";
+      if (!connectedWallet)
+        throw new Error("Wallet disconnected. Please reconnect.");
 
-        socket.on('joinedRoom', (data) => {
-            console.log('Joined room:', data);
-            currentRoomId = data.roomId;
-        });
+      this.disabled = true;
+      this.textContent = "Creating game...";
+      waitingMessage.textContent = "Starting bot game...";
 
-        socket.on('botRoomCreated', (data) => {
-            console.log('Bot room created:', data);
-            currentRoomId = data.roomId;
+      socket.emit("joinPracticeGame", {
+        walletAddress: connectedWallet,
+        gameMode: "bot",
+      });
+      joinGameBtn.disabled = true;
+    } catch (error) {
+      logError("bot-game", error);
+      alert("Error: " + error.message);
+      waitingMessage.textContent = "Error starting bot game. Please try again.";
+      resetUIAfterError();
+    } finally {
+      isProcessingBet = false;
+      this.disabled = false;
+      this.textContent = "Play Against Bot";
+    }
+  };
+}
 
-            // Now request the bot game in this dedicated room
-            switchToBotMode();
-        });
+function switchToBotMode() {
+  console.log("Switching to bot mode");
+  waitingForPlayer = false;
+  if (waitingTimeout) {
+    clearTimeout(waitingTimeout);
+  }
 
-        socket.on('leftRoom', (data) => {
-            console.log(`Left room ${data.roomId}`);
-            // Reset the current room ID if it matches the one we left
-            if (currentRoomId === data.roomId) {
-                currentRoomId = null;
-            }
-        });
+  const modal = document.getElementById("gameChoiceModal");
+  if (modal.style.display === "flex") {
+    modal.style.display = "none";
+  }
 
-        socket.on('matchmakingJoined', (data) => {
-            console.log('Joined matchmaking pool:', data);
-            inMatchmakingQueue = true;
-            waitingRoomId = data.waitingRoomId;
-            // Do NOT set currentRoomId — waitingRoomId is a queue placeholder, not a real room
-            waitingMessage.textContent = 'Waiting for another player...';
+  waitingMessage.textContent = "Starting game against bot...";
 
-            // Start a timeout for bot suggestion
-            if (waitingTimeout) {
-                clearTimeout(waitingTimeout);
-            }
+  // Send message to server to start bot game in the current room
+  if (currentRoomId) {
+    console.log("Requesting bot for room:", currentRoomId);
+    socket.emit("requestBotGame", { roomId: currentRoomId });
+  } else {
+    console.error("No room ID available when trying to switch to bot mode");
+    waitingMessage.textContent = "Error starting bot game. Please try again.";
+    resetJoinUI();
+  }
+}
 
-            waitingTimeout = setTimeout(() => {
-                if (inMatchmakingQueue) {
-                    waitingMessage.textContent = 'Still looking for an opponent...';
-                }
-            }, WAITING_TIMEOUT_DURATION);
-        });
+const joinSound = document.getElementById("joinSound");
+const notification = document.getElementById("notification");
 
-        socket.on('matchFound', async (data) => {
-            console.log('Match found:', data);
-            inMatchmakingQueue = false;
-            waitingRoomId = null;
-            currentRoomId = data.roomId || data.gameRoomId;
-            waitingMessage.textContent = 'Match found! Game is starting...';
+socket.on("playerJoined", (username) => {
+  console.log(`Player ${username} joined the game`);
 
-            if (waitingTimeout) {
-                clearTimeout(waitingTimeout);
-                waitingTimeout = null;
-            }
+  // Clear any waiting timeout
+  if (waitingTimeout) {
+    clearTimeout(waitingTimeout);
+  }
 
-            // Get reCAPTCHA token for playerReady
-            const recaptchaToken = await getRecaptchaToken('player_ready');
-            socket.emit('playerReady', { 
-                roomId: currentRoomId, 
-                preferredMode: 'human',
-                recaptchaToken
-            });
-        });
+  // Make sure game choice modal is closed
+  const modal = document.getElementById("gameChoiceModal");
+  if (modal.style.display === "flex") {
+    modal.style.display = "none";
+  }
 
-        socket.on('botGameCreated', async (data) => {
-            console.log('Bot game created:', data);
-            currentRoomId = data.roomId || data.gameRoomId;
-            waitingMessage.textContent = `Starting game against ${data.botName}...`;
+  waitingMessage.textContent = `${username} joined. Game is starting...`;
 
-            // Get reCAPTCHA token for playerReady
-            const recaptchaToken = await getRecaptchaToken('player_ready');
-            socket.emit('playerReady', { 
-                roomId: currentRoomId, 
-                preferredMode: 'bot',
-                recaptchaToken
-            });
-        });
+  // Play sound if available
+  const joinSound = document.getElementById("joinSound");
+  if (joinSound) {
+    joinSound.play();
+  }
 
-        socket.on('roundComplete', (data) => {
-            const { questionId, playerResults, correctAnswerText } = data;
-            try {
-                if (questionId !== currentQuestionId) {
-                    console.warn('Received roundComplete for incorrect question ID:', questionId);
-                    return;
-                }
+  // Show notification
+  notification.textContent = `${username} has joined the lobby!`;
+  notification.style.display = "block";
+  joinSound.play();
+  setTimeout(() => {
+    notification.style.display = "none";
+  }, 3000);
+});
 
-                // Disable further interactions
-                submitAnswerBtn.disabled = true;
-                submitAnswerBtn.style.display = 'none';
-                if (window.syncTimeout) { clearTimeout(window.syncTimeout); window.syncTimeout = null; }
-                if (countdownInterval) { clearInterval(countdownInterval); countdownTimer.textContent = ''; countdownTimer.style.display = 'none'; }
+questionDiv.addEventListener("contextmenu", (event) => {
+  event.preventDefault();
+});
 
-                // Find this player's result
-                const myResult = playerResults.find(r => r.username === connectedWallet);
+socket.on("answerResult", (data) => {
+  const { username, isCorrect, questionId } = data;
+  try {
+    if (username === connectedWallet && questionId === currentQuestionId) {
+      const selectedOption = document.querySelector(
+        `input[name="answer"][value="${data.selectedAnswer}"]`
+      );
+      if (selectedOption && selectedOption.parentElement) {
+        selectedOption.parentElement.classList.add(
+          isCorrect ? "correct" : "incorrect"
+        );
+      }
+    }
+  } catch (error) {
+    logError("update-answer-UI", error);
+  }
+});
 
-                // Color the answer options
-                const normalizeText = (text) => text.trim().toLowerCase().replace(/\s+/g, ' ');
-                const optionDivs = document.querySelectorAll('#options div');
-                optionDivs.forEach((div) => {
-                    const label = div.querySelector('label');
-                    const input = div.querySelector('input');
-                    if (!label || !input) return;
+socket.on("playerAnswered", (data) => {
+  if (typeof data === "string") {
+    waitingMessage.textContent = `${data} has submitted their answer`;
+    return;
+  }
 
-                    const optionIndex = parseInt(input.value);
-                    const isCorrectOption = normalizeText(label.textContent) === normalizeText(correctAnswerText);
-                    const isMyAnswer = myResult && optionIndex === myResult.answer;
+  const { username, isBot, responseTime, timedOut } = data;
+  if (username !== connectedWallet) {
+    if (isBot) {
+      waitingMessage.textContent = "";
+      const botAnswerDiv = document.createElement("div");
+      botAnswerDiv.className = "bot-answer";
+      botAnswerDiv.appendChild(
+        document.createTextNode(
+          `${username} 🤖 has answered in ${responseTime}ms`
+        )
+      );
+      const thinkingSpan = document.createElement("span");
+      thinkingSpan.className = "bot-thinking";
+      botAnswerDiv.appendChild(thinkingSpan);
+      waitingMessage.appendChild(botAnswerDiv);
+      playBotSound("answer");
+    } else {
+      const responseText = timedOut
+        ? `${username} ran out of time!`
+        : `${username} has submitted their answer${
+            responseTime ? ` (${responseTime}ms)` : ""
+          }`;
+      waitingMessage.textContent = responseText;
+    }
+  }
+});
 
-                    if (isCorrectOption) {
-                        div.classList.add('correct');           // always green the right answer
-                    } else if (isMyAnswer && !myResult.isCorrect) {
-                        div.classList.add('wrong');             // red only MY wrong pick
-                    }
-                });
+socket.on("joinedRoom", (data) => {
+  console.log("Joined room:", data);
+  currentRoomId = data.roomId;
+});
 
-                // Round results text
-                playersDiv.textContent = '';
-                const roundResultsHeading = document.createElement('h2');
-                roundResultsHeading.textContent = 'Round Results:';
-                playersDiv.appendChild(roundResultsHeading);
-                playerResults.forEach(result => {
-                    const status = result.isCorrect ? '✓ Correct' : result.answer === -1 ? '⏰ Timed Out' : '✗ Incorrect';
-                    const row = document.createElement('p');
-                    row.textContent = `${status} ${result.username}${result.isBot ? ' 🤖' : ''}: ${result.responseTime}ms`;
-                    playersDiv.appendChild(row);
-                });
+socket.on("botRoomCreated", (data) => {
+  console.log("Bot room created:", data);
+  currentRoomId = data.roomId;
 
-                waitingMessage.textContent = '';
-                const correctAnswerEl = document.createElement('p');
-                correctAnswerEl.className = 'correct-answer';
-                correctAnswerEl.textContent = `Correct Answer: ${correctAnswerText}`;
-                waitingMessage.appendChild(correctAnswerEl);
+  // Now request the bot game in this dedicated room
+  switchToBotMode();
+});
 
-            } catch (error) {
-                logError('roundComplete', error);
-                waitingMessage.textContent = '';
-                const errEl = document.createElement('p');
-                errEl.className = 'error-message';
-                errEl.textContent = 'Error displaying round results';
-                waitingMessage.appendChild(errEl);
-            }
-        });
-   
-        // Add bot-related CSS
-        const botStyles = document.createElement('style');
-        botStyles.textContent = `
+socket.on("leftRoom", (data) => {
+  console.log(`Left room ${data.roomId}`);
+  // Reset the current room ID if it matches the one we left
+  if (currentRoomId === data.roomId) {
+    currentRoomId = null;
+  }
+});
+
+socket.on("matchmakingJoined", (data) => {
+  console.log("Joined matchmaking pool:", data);
+  inMatchmakingQueue = true;
+  waitingRoomId = data.waitingRoomId;
+  // Do NOT set currentRoomId — waitingRoomId is a queue placeholder, not a real room
+  waitingMessage.textContent = "Waiting for another player...";
+
+  // Start a timeout for bot suggestion
+  if (waitingTimeout) {
+    clearTimeout(waitingTimeout);
+  }
+
+  waitingTimeout = setTimeout(() => {
+    if (inMatchmakingQueue) {
+      waitingMessage.textContent = "Still looking for an opponent...";
+    }
+  }, WAITING_TIMEOUT_DURATION);
+});
+
+socket.on("matchFound", async (data) => {
+  console.log("Match found:", data);
+  inMatchmakingQueue = false;
+  waitingRoomId = null;
+  currentRoomId = data.roomId || data.gameRoomId;
+  waitingMessage.textContent = "Match found! Game is starting...";
+
+  if (waitingTimeout) {
+    clearTimeout(waitingTimeout);
+    waitingTimeout = null;
+  }
+
+  // Get reCAPTCHA token for playerReady
+  const recaptchaToken = await getRecaptchaToken("player_ready");
+  socket.emit("playerReady", {
+    roomId: currentRoomId,
+    preferredMode: "human",
+    recaptchaToken,
+  });
+});
+
+socket.on("botGameCreated", async (data) => {
+  console.log("Bot game created:", data);
+  currentRoomId = data.roomId || data.gameRoomId;
+  waitingMessage.textContent = `Starting game against ${data.botName}...`;
+
+  // Get reCAPTCHA token for playerReady
+  const recaptchaToken = await getRecaptchaToken("player_ready");
+  socket.emit("playerReady", {
+    roomId: currentRoomId,
+    preferredMode: "bot",
+    recaptchaToken,
+  });
+});
+
+socket.on("roundComplete", (data) => {
+  const { questionId, playerResults, correctAnswerText } = data;
+  try {
+    if (questionId !== currentQuestionId) {
+      console.warn(
+        "Received roundComplete for incorrect question ID:",
+        questionId
+      );
+      return;
+    }
+
+    // Disable further interactions
+    submitAnswerBtn.disabled = true;
+    submitAnswerBtn.style.display = "none";
+    if (window.syncTimeout) {
+      clearTimeout(window.syncTimeout);
+      window.syncTimeout = null;
+    }
+    if (countdownInterval) {
+      clearInterval(countdownInterval);
+      countdownTimer.textContent = "";
+      countdownTimer.style.display = "none";
+    }
+
+    // Find this player's result
+    const myResult = playerResults.find((r) => r.username === connectedWallet);
+
+    // Color the answer options
+    const normalizeText = (text) =>
+      text.trim().toLowerCase().replace(/\s+/g, " ");
+    const optionDivs = document.querySelectorAll("#options div");
+    optionDivs.forEach((div) => {
+      const label = div.querySelector("label");
+      const input = div.querySelector("input");
+      if (!label || !input) return;
+
+      const optionIndex = parseInt(input.value);
+      const isCorrectOption =
+        normalizeText(label.textContent) === normalizeText(correctAnswerText);
+      const isMyAnswer = myResult && optionIndex === myResult.answer;
+
+      if (isCorrectOption) {
+        div.classList.add("correct"); // always green the right answer
+      } else if (isMyAnswer && !myResult.isCorrect) {
+        div.classList.add("wrong"); // red only MY wrong pick
+      }
+    });
+
+    // Round results text
+    playersDiv.textContent = "";
+    const roundResultsHeading = document.createElement("h2");
+    roundResultsHeading.textContent = "Round Results:";
+    playersDiv.appendChild(roundResultsHeading);
+    playerResults.forEach((result) => {
+      const status = result.isCorrect
+        ? "✓ Correct"
+        : result.answer === -1
+        ? "⏰ Timed Out"
+        : "✗ Incorrect";
+      const row = document.createElement("p");
+      row.textContent = `${status} ${result.username}${
+        result.isBot ? " 🤖" : ""
+      }: ${result.responseTime}ms`;
+      playersDiv.appendChild(row);
+    });
+
+    waitingMessage.textContent = "";
+    const correctAnswerEl = document.createElement("p");
+    correctAnswerEl.className = "correct-answer";
+    correctAnswerEl.textContent = `Correct Answer: ${correctAnswerText}`;
+    waitingMessage.appendChild(correctAnswerEl);
+  } catch (error) {
+    logError("roundComplete", error);
+    waitingMessage.textContent = "";
+    const errEl = document.createElement("p");
+    errEl.className = "error-message";
+    errEl.textContent = "Error displaying round results";
+    waitingMessage.appendChild(errEl);
+  }
+});
+
+// Add bot-related CSS
+const botStyles = document.createElement("style");
+botStyles.textContent = `
             .bot-player {
                 color: #0078ff;
                 font-weight: bold;
@@ -2186,19 +2398,19 @@
                 margin: 4px 0;
             }
         `;
-        document.head.appendChild(botStyles);
+document.head.appendChild(botStyles);
 
-        // Add bot sound effects (optional)
-        function playBotSound(type) {
-            const sounds = {
-                start: 'bot-start.mp3',
-                answer: 'bot-answer.mp3',
-                win: 'bot-win.mp3',
-                lose: 'bot-lose.mp3'
-            };
-            
-            const sound = sounds[type];
-            if (sound && window.playSound) {
-                window.playSound(sound);
-            }
-        }
+// Add bot sound effects (optional)
+function playBotSound(type) {
+  const sounds = {
+    start: "bot-start.mp3",
+    answer: "bot-answer.mp3",
+    win: "bot-win.mp3",
+    lose: "bot-lose.mp3",
+  };
+
+  const sound = sounds[type];
+  if (sound && window.playSound) {
+    window.playSound(sound);
+  }
+}
