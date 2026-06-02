@@ -254,9 +254,9 @@ async function startServer() {
         // Register all Socket.IO handlers
         registerSocketHandlers(io);
 
-        server.listen(PORT, () => {
+        server.listen(PORT, async () => {
             logger.info(`🚀 Server is running on port ${PORT}`);
-            registerCronJobs(botDetector);
+            await registerCronJobs(botDetector);
         });
     } catch (error) {
         logger.error('❌ Failed to start server:', { error });

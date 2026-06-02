@@ -1,7 +1,7 @@
 let allCycles = [], activeCycleId = null;
 
 function fmtAddr(a) { return a && a.length > 12 ? `${a.slice(0,6)}…${a.slice(-4)}` : (a || 'Unknown'); }
-function fmtDate(d) { return d ? new Date(d).toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'}) : '—'; }
+function fmtDate(d) { return d ? new Date(d).toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric',timeZone:'UTC'}) : '—'; }
 
 async function loadCycles() {
     try {

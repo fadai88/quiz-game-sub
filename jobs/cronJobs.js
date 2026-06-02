@@ -27,7 +27,7 @@ const MIN_TREASURY_USDC = parseFloat(process.env.MIN_TREASURY_USDC) || 50;   // 
 /**
  * Register all cron jobs. Call this inside `server.listen()` callback.
  */
-function registerCronJobs(botDetector = null) {
+async function registerCronJobs(botDetector = null) {
 
     // ── Safety net: refund stuck games every 5 minutes ────────────────────────
     // (unchanged)
@@ -105,6 +105,16 @@ function registerCronJobs(botDetector = null) {
     logger.info('🏆 Tournament start cron job initialized (runs every 5 minutes)');
 
     // ── Weekly prize-cycle rotation: every Monday at 00:00 UTC ───────────────
+    // Startup catch-up: getOrCreateActive() checks the week boundary and rotates
+    // if the stored cycle is stale. Handles the case where the server was down
+    // on Monday midnight and node-cron never fired.
+    try {
+        const cycle = await PrizeCycle.getOrCreateActive();
+        logger.info(`📅 Active prize cycle on startup: "${cycle.label}" (started ${cycle.startedAt.toUTCString()})`);
+    } catch (err) {
+        logger.error('❌ Startup cycle check failed:', { error: err.message });
+    }
+
     // Automatically closes the active cycle and opens a fresh one.
     // Admins can still rotate manually at any time via POST /api/admin/cycles/rotate.
     //
@@ -112,10 +122,11 @@ function registerCronJobs(botDetector = null) {
     //       action so the team can review standings first.
     cron.schedule('0 0 * * 1', async () => {
         try {
-            const now   = new Date();
-            const label = `Week of ${now.toDateString()}`;
-            const { closed, opened } = await PrizeCycle.rotateWeekly(label, []);
-            logger.info(`📅 Weekly cycle rotated — closed: ${closed?._id}, opened: ${opened._id} ("${label}")`);
+            // getOrCreateActive() closes any stale cycle and opens the new
+            // Monday-anchored one. Idempotent: if another path already rotated,
+            // it just returns the current-week cycle without double-closing.
+            const cycle = await PrizeCycle.getOrCreateActive();
+            logger.info(`📅 Weekly cycle ensured — active: ${cycle._id} ("${cycle.label}")`);
         } catch (error) {
             logger.error('❌ Weekly cycle rotation failed:', error);
         }
