@@ -258,11 +258,9 @@ router.post(
       // Validate awards minimally
       for (const a of awards) {
         if (!a.walletAddress || typeof a.rank !== "number") {
-          return res
-            .status(400)
-            .json({
-              error: "Each award needs walletAddress and rank (number).",
-            });
+          return res.status(400).json({
+            error: "Each award needs walletAddress and rank (number).",
+          });
         }
       }
 

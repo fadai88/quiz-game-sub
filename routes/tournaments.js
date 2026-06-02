@@ -156,12 +156,10 @@ adminRouter.post(
           .status(404)
           .json({ success: false, error: "Tournament not found" });
       if (tournament.status === "completed")
-        return res
-          .status(400)
-          .json({
-            success: false,
-            error: "Cannot cancel a completed tournament",
-          });
+        return res.status(400).json({
+          success: false,
+          error: "Cannot cancel a completed tournament",
+        });
       tournament.status = "cancelled";
       await tournament.save();
       logger.info(

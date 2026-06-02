@@ -46,12 +46,10 @@ const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 function makeConn(overrides = {}) {
   return {
     rpcEndpoint: RPC_URL,
-    getLatestBlockhash: sinon
-      .stub()
-      .resolves({
-        blockhash: FAKE_BLOCKHASH,
-        lastValidBlockHeight: LAST_VALID_BH,
-      }),
+    getLatestBlockhash: sinon.stub().resolves({
+      blockhash: FAKE_BLOCKHASH,
+      lastValidBlockHeight: LAST_VALID_BH,
+    }),
     getAccountInfo: sinon.stub().resolves({}), // ATA exists → no createATA needed
     sendRawTransaction: sinon.stub().resolves("ok"),
     confirmTransaction: sinon.stub().resolves({ value: { err: null } }),

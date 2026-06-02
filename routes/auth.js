@@ -53,12 +53,10 @@ router.post("/login", async (req, res) => {
         walletAddress,
         reason: "invalid_or_expired_token",
       });
-      return res
-        .status(401)
-        .json({
-          success: false,
-          error: "Invalid verification. Please try logging in again.",
-        });
+      return res.status(401).json({
+        success: false,
+        error: "Invalid verification. Please try logging in again.",
+      });
     }
     logger.auth(`Verification token validated for ${walletAddress}`);
 
