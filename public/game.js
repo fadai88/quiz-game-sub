@@ -1226,6 +1226,56 @@ socket.on("scoreUpdate", (players) => {
             */
 });
 
+function formatResultTime(ms) {
+  const value = Number(ms) || 0;
+  return value >= 1000 ? `${(value / 1000).toFixed(2)}s` : `${value}ms`;
+}
+
+function buildHeadToHeadResultMessage({
+  players,
+  winner,
+  connectedWallet,
+  isRanked,
+}) {
+  const clientPlayer = players.find((p) => p.username === connectedWallet);
+  const winnerPlayer = players.find((p) => p.username === winner);
+  const opponent = players.find((p) => p.username !== connectedWallet);
+  const clientIsWinner = winner === connectedWallet;
+  const matchLabel = isRanked ? "ranked match" : "game";
+
+  if (!clientPlayer) {
+    return winner
+      ? `Game Over! ${winner} wins. Better luck next time!`
+      : "Game Over! It's a draw!";
+  }
+
+  if (!winner) return "Game Over! It's a draw!";
+
+  const winnerScore = winnerPlayer ? winnerPlayer.score || 0 : 0;
+  const clientScore = clientPlayer.score || 0;
+  const opponentScore = opponent ? opponent.score || 0 : winnerScore;
+  const sameCorrectAnswers =
+    opponent && clientScore === opponentScore && winnerPlayer;
+
+  if (sameCorrectAnswers) {
+    const clientTime = clientPlayer.totalResponseTime || 0;
+    const opponentTime = opponent.totalResponseTime || 0;
+    const opponentName = opponent.username;
+
+    if (clientIsWinner) {
+      return `🎉 You won the tiebreaker! You and ${opponentName} both answered ${clientScore} correctly, and your total response time was faster (${formatResultTime(clientTime)} vs ${formatResultTime(opponentTime)}).`;
+    }
+
+    return `Game Over! You and ${opponentName} both answered ${clientScore} correctly. ${opponentName} wins the tiebreaker with a faster total response time (${formatResultTime(opponentTime)} vs ${formatResultTime(clientTime)}).`;
+  }
+
+  if (clientIsWinner) {
+    return `🎉 You won this ${matchLabel} with ${clientScore} correct answers! Great job!`;
+  }
+
+  return `Game Over! ${winner} wins with ${winnerScore} correct answers. Better luck next time!`;
+}
+
 socket.on("gameOver", (data) => {
   console.log("Received game over data:", data);
   const {
@@ -1235,8 +1285,10 @@ socket.on("gameOver", (data) => {
     botOpponent,
     error,
     gameMode,
+    mode,
     tournamentId,
     prizeAmount,
+    betAmount,
   } = data;
 
   // Clear currentRoomId immediately so a socket drop during the results
@@ -1280,7 +1332,9 @@ socket.on("gameOver", (data) => {
   });
 
   const clientIsWinner = winner === connectedWallet;
-  const isTournament = gameMode === "tournament" || !!tournamentId;
+  const normalizedGameMode = gameMode || mode;
+  const isTournament = normalizedGameMode === "tournament" || !!tournamentId;
+  const isRanked = normalizedGameMode === "ranked" || betAmount > 0;
 
   waitingMessage.textContent = "";
   if (botOpponent) {
@@ -1334,30 +1388,39 @@ socket.on("gameOver", (data) => {
       waitingMessage.appendChild(standingsLink);
     }
   } else {
-    // Practice mode
-    const clientPlayer = players.find((p) => p.username === connectedWallet);
+    // Ranked/practice head-to-head mode
     if (clientIsWinner) {
       waitingMessage.appendChild(
         document.createTextNode(
-          `🎉 You won with a score of ${
-            clientPlayer ? clientPlayer.score : 0
-          }! Great job! `
+          buildHeadToHeadResultMessage({
+            players,
+            winner,
+            connectedWallet,
+            isRanked,
+          })
         )
       );
-      const em = document.createElement("em");
-      em.appendChild(document.createTextNode("Want to play for real prizes? "));
-      const upgradeLink = document.createElement("a");
-      upgradeLink.href = "/subscription.html";
-      upgradeLink.textContent = "Upgrade to Premium";
-      em.appendChild(upgradeLink);
-      em.appendChild(document.createTextNode(" for tournament access."));
-      waitingMessage.appendChild(em);
+      if (!isRanked) {
+        waitingMessage.appendChild(document.createTextNode(" "));
+        const em = document.createElement("em");
+        em.appendChild(
+          document.createTextNode("Want to play for real prizes? ")
+        );
+        const upgradeLink = document.createElement("a");
+        upgradeLink.href = "/subscription.html";
+        upgradeLink.textContent = "Upgrade to Premium";
+        em.appendChild(upgradeLink);
+        em.appendChild(document.createTextNode(" for tournament access."));
+        waitingMessage.appendChild(em);
+      }
       if (typeof celebrateWin === "function") celebrateWin("normal");
     } else if (winner) {
-      const winnerPlayer = players.find((p) => p.username === winner);
-      waitingMessage.textContent = `Game Over! ${winner} wins with a score of ${
-        winnerPlayer ? winnerPlayer.score : 0
-      }. Better luck next time!`;
+      waitingMessage.textContent = buildHeadToHeadResultMessage({
+        players,
+        winner,
+        connectedWallet,
+        isRanked,
+      });
     } else {
       waitingMessage.textContent = "Game Over! It's a draw!";
     }
