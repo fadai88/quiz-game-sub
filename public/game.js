@@ -42,6 +42,13 @@ function logError(context, error) {
     });
   }
 }
+
+function displayWallet(value) {
+  if (!value || typeof value !== "string") return value || "Unknown";
+  if (value.includes(" ") || value.length <= 8) return value;
+  return `${value.slice(0, 2)}...${value.slice(-2)}`;
+}
+
 const AccountLayout = {
   decode(buffer) {
     const accountInfo = {
@@ -535,10 +542,7 @@ async function checkSession() {
       if (document.getElementById("walletStatus")) {
         document.getElementById(
           "walletStatus"
-        ).textContent = `Connected: ${connectedWallet.slice(
-          0,
-          4
-        )}...${connectedWallet.slice(-4)}`;
+        ).textContent = `Connected: ${displayWallet(connectedWallet)}`;
       }
 
       return true;
@@ -583,10 +587,7 @@ async function initializeFromSession() {
   // Update wallet status UI
   document.getElementById(
     "walletStatus"
-  ).textContent = `Connected: ${connectedWallet.slice(
-    0,
-    4
-  )}...${connectedWallet.slice(-4)}`;
+  ).textContent = `Connected: ${displayWallet(connectedWallet)}`;
 
   // NO walletReconnect needed - cookie authenticates Socket.IO automatically
 
@@ -825,13 +826,9 @@ async function connectWallet() {
 function updateWalletStatus() {
   if (connectedWallet) {
     // Update UI to show connected wallet
-    const shortAddress = `${connectedWallet.slice(
-      0,
-      4
-    )}...${connectedWallet.slice(-4)}`;
     document.getElementById(
       "walletStatus"
-    ).textContent = `Connected: ${shortAddress}`;
+    ).textContent = `Connected: ${displayWallet(connectedWallet)}`;
   }
 }
 
@@ -1152,7 +1149,7 @@ socket.on("playerJoined", (username) => {
     clearTimeout(waitingTimeout);
   }
 
-  waitingMessage.textContent = `${username} joined. Game is starting...`;
+  waitingMessage.textContent = `${displayWallet(username)} joined. Game is starting...`;
 
   // Play sound if available
   const joinSound = document.getElementById("joinSound");
@@ -1245,7 +1242,7 @@ function buildHeadToHeadResultMessage({
 
   if (!clientPlayer) {
     return winner
-      ? `Game Over! ${winner} wins. Better luck next time!`
+      ? `Game Over! ${displayWallet(winner)} wins. Better luck next time!`
       : "Game Over! It's a draw!";
   }
 
@@ -1260,7 +1257,7 @@ function buildHeadToHeadResultMessage({
   if (sameCorrectAnswers) {
     const clientTime = clientPlayer.totalResponseTime || 0;
     const opponentTime = opponent.totalResponseTime || 0;
-    const opponentName = opponent.username;
+    const opponentName = displayWallet(opponent.username);
 
     if (clientIsWinner) {
       return `🎉 You won the tiebreaker! You and ${opponentName} both answered ${clientScore} correctly, and your total response time was faster (${formatResultTime(clientTime)} vs ${formatResultTime(opponentTime)}).`;
@@ -1273,7 +1270,7 @@ function buildHeadToHeadResultMessage({
     return `🎉 You won this ${matchLabel} with ${clientScore} correct answers! Great job!`;
   }
 
-  return `Game Over! ${winner} wins with ${winnerScore} correct answers. Better luck next time!`;
+  return `Game Over! ${displayWallet(winner)} wins with ${winnerScore} correct answers. Better luck next time!`;
 }
 
 socket.on("gameOver", (data) => {
@@ -1325,7 +1322,7 @@ socket.on("gameOver", (data) => {
   playersDiv.appendChild(finalScoresHeading);
   players.forEach((p) => {
     const row = document.createElement("p");
-    row.textContent = `${p.username}${p.isBot ? " 🤖" : ""}: ${
+    row.textContent = `${displayWallet(p.username)}${p.isBot ? " 🤖" : ""}: ${
       p.score
     } (Total response time: ${p.totalResponseTime || 0}ms)`;
     playersDiv.appendChild(row);
@@ -1344,7 +1341,7 @@ socket.on("gameOver", (data) => {
     const botPlayer = players.find((p) => p.isBot);
     if (clientIsWinner) {
       waitingMessage.textContent = `🎉 You defeated ${
-        botPlayer ? botPlayer.username : "the bot"
+        botPlayer ? displayWallet(botPlayer.username) : "the bot"
       } with ${humanPlayer ? humanPlayer.score : 0} correct answers!`;
       if (typeof celebrateWin === "function") celebrateWin("bot_win");
     } else {
@@ -1374,7 +1371,7 @@ socket.on("gameOver", (data) => {
       if (typeof celebrateWin === "function") celebrateWin("normal");
     } else if (winner) {
       const winnerPlayer = players.find((p) => p.username === winner);
-      waitingMessage.textContent = `Tournament match over! ${winner} wins with a score of ${
+      waitingMessage.textContent = `Tournament match over! ${displayWallet(winner)} wins with a score of ${
         winnerPlayer ? winnerPlayer.score : 0
       }. Keep competing!`;
     } else {
@@ -1437,7 +1434,7 @@ socket.on("playerLeft", (username) => {
   const leftMsg = document.createElement("p");
   leftMsg.style.textAlign = "center";
   leftMsg.style.color = "#f59e0b";
-  leftMsg.textContent = `⚠️ ${username} left the game. Determining winner...`;
+  leftMsg.textContent = `⚠️ ${displayWallet(username)} left the game. Determining winner...`;
   questionDiv.appendChild(leftMsg);
   optionsDiv.innerHTML = "";
   submitAnswerBtn.style.display = "none";
@@ -1454,7 +1451,7 @@ socket.on("playerDisconnected", ({ walletAddress }) => {
   const disconnectMsg = document.createElement("p");
   disconnectMsg.style.textAlign = "center";
   disconnectMsg.style.color = "#f59e0b";
-  disconnectMsg.textContent = `⚠️ ${walletAddress} disconnected. Waiting for reconnection or forfeit...`;
+  disconnectMsg.textContent = `⚠️ ${displayWallet(walletAddress)} disconnected. Waiting for reconnection or forfeit...`;
   questionDiv.appendChild(disconnectMsg);
   optionsDiv.innerHTML = "";
   submitAnswerBtn.style.display = "none";
@@ -1467,25 +1464,19 @@ socket.on("playerDisconnected", ({ walletAddress }) => {
 
 socket.on("gameOverForfeit", (data) => {
   console.log("Forfeit game over:", data);
-  const {
-    winner,
-    disconnectedPlayer,
-    message,
-    gameMode,
-    tournamentId,
-    prizeAmount,
-    betAmount,
-  } = data;
+  const { winner, disconnectedPlayer, gameMode, tournamentId, prizeAmount, betAmount } =
+    data;
 
   resetGame();
 
   const clientIsWinner = winner === connectedWallet;
   const isTournament = gameMode === "tournament" || !!tournamentId;
   const isRanked = !isTournament && betAmount > 0;
-  // Build forfeit message as DOM nodes — message contains wallet addresses from server
+  const forfeitMessage = `${displayWallet(disconnectedPlayer)} left the game. ${displayWallet(winner)} wins by forfeit.`;
+  // Build forfeit message as DOM nodes so wallet addresses are shortened on screen.
   function buildForfeitNodes(target) {
     target.textContent = "";
-    target.appendChild(document.createTextNode(message));
+    target.appendChild(document.createTextNode(forfeitMessage));
     if (clientIsWinner) {
       if (isTournament && prizeAmount) {
         target.appendChild(
@@ -1530,9 +1521,9 @@ socket.on("gameOverForfeit", (data) => {
     const forfeitDiv = document.createElement("div");
     forfeitDiv.className = "forfeit-message";
     const leftP = document.createElement("p");
-    leftP.textContent = `${disconnectedPlayer} left the game.`;
+    leftP.textContent = `${displayWallet(disconnectedPlayer)} left the game.`;
     const winnerP = document.createElement("p");
-    winnerP.textContent = `${winner} is the winner.`;
+    winnerP.textContent = `${displayWallet(winner)} is the winner.`;
     forfeitDiv.appendChild(leftP);
     forfeitDiv.appendChild(winnerP);
     playersDiv.appendChild(endHeading);
@@ -1674,7 +1665,7 @@ socket.on("gameStateRestore", (data) => {
     playersDiv.appendChild(reconnectHeading);
     data.players.forEach((p) => {
       const row = document.createElement("p");
-      row.textContent = `${p.username}${p.isBot ? " 🤖" : ""}: Ready`;
+      row.textContent = `${displayWallet(p.username)}${p.isBot ? " 🤖" : ""}: Ready`;
       playersDiv.appendChild(row);
     });
 
@@ -1896,7 +1887,7 @@ function updatePlayerUI(players) {
     const row = document.createElement("p");
     if (p.isBot) row.className = "bot-player";
     row.appendChild(
-      document.createTextNode(`${p.username}${p.isBot ? " 🤖" : ""}`)
+      document.createTextNode(`${displayWallet(p.username)}${p.isBot ? " 🤖" : ""}`)
     );
     if (p.isBot && p.difficulty) {
       const badge = document.createElement("span");
@@ -2175,7 +2166,7 @@ socket.on("playerJoined", (username) => {
     modal.style.display = "none";
   }
 
-  waitingMessage.textContent = `${username} joined. Game is starting...`;
+  waitingMessage.textContent = `${displayWallet(username)} joined. Game is starting...`;
 
   // Play sound if available
   const joinSound = document.getElementById("joinSound");
@@ -2184,7 +2175,7 @@ socket.on("playerJoined", (username) => {
   }
 
   // Show notification
-  notification.textContent = `${username} has joined the lobby!`;
+  notification.textContent = `${displayWallet(username)} has joined the lobby!`;
   notification.style.display = "block";
   joinSound.play();
   setTimeout(() => {
@@ -2216,7 +2207,7 @@ socket.on("answerResult", (data) => {
 
 socket.on("playerAnswered", (data) => {
   if (typeof data === "string") {
-    waitingMessage.textContent = `${data} has submitted their answer`;
+    waitingMessage.textContent = `${displayWallet(data)} has submitted their answer`;
     return;
   }
 
@@ -2228,7 +2219,7 @@ socket.on("playerAnswered", (data) => {
       botAnswerDiv.className = "bot-answer";
       botAnswerDiv.appendChild(
         document.createTextNode(
-          `${username} 🤖 has answered in ${responseTime}ms`
+          `${displayWallet(username)} 🤖 has answered in ${responseTime}ms`
         )
       );
       const thinkingSpan = document.createElement("span");
@@ -2238,8 +2229,8 @@ socket.on("playerAnswered", (data) => {
       playBotSound("answer");
     } else {
       const responseText = timedOut
-        ? `${username} ran out of time!`
-        : `${username} has submitted their answer${
+        ? `${displayWallet(username)} ran out of time!`
+        : `${displayWallet(username)} has submitted their answer${
             responseTime ? ` (${responseTime}ms)` : ""
           }`;
       waitingMessage.textContent = responseText;
@@ -2382,7 +2373,7 @@ socket.on("roundComplete", (data) => {
         ? "⏰ Timed Out"
         : "✗ Incorrect";
       const row = document.createElement("p");
-      row.textContent = `${status} ${result.username}${
+      row.textContent = `${status} ${displayWallet(result.username)}${
         result.isBot ? " 🤖" : ""
       }: ${result.responseTime}ms`;
       playersDiv.appendChild(row);
