@@ -1149,7 +1149,9 @@ socket.on("playerJoined", (username) => {
     clearTimeout(waitingTimeout);
   }
 
-  waitingMessage.textContent = `${displayWallet(username)} joined. Game is starting...`;
+  waitingMessage.textContent = `${displayWallet(
+    username
+  )} joined. Game is starting...`;
 
   // Play sound if available
   const joinSound = document.getElementById("joinSound");
@@ -1260,17 +1262,23 @@ function buildHeadToHeadResultMessage({
     const opponentName = displayWallet(opponent.username);
 
     if (clientIsWinner) {
-      return `🎉 You won the tiebreaker! You and ${opponentName} both answered ${clientScore} correctly, and your total response time was faster (${formatResultTime(clientTime)} vs ${formatResultTime(opponentTime)}).`;
+      return `🎉 You won the tiebreaker! You and ${opponentName} both answered ${clientScore} correctly, and your total response time was faster (${formatResultTime(
+        clientTime
+      )} vs ${formatResultTime(opponentTime)}).`;
     }
 
-    return `Game Over! You and ${opponentName} both answered ${clientScore} correctly. ${opponentName} wins the tiebreaker with a faster total response time (${formatResultTime(opponentTime)} vs ${formatResultTime(clientTime)}).`;
+    return `Game Over! You and ${opponentName} both answered ${clientScore} correctly. ${opponentName} wins the tiebreaker with a faster total response time (${formatResultTime(
+      opponentTime
+    )} vs ${formatResultTime(clientTime)}).`;
   }
 
   if (clientIsWinner) {
     return `🎉 You won this ${matchLabel} with ${clientScore} correct answers! Great job!`;
   }
 
-  return `Game Over! ${displayWallet(winner)} wins with ${winnerScore} correct answers. Better luck next time!`;
+  return `Game Over! ${displayWallet(
+    winner
+  )} wins with ${winnerScore} correct answers. Better luck next time!`;
 }
 
 socket.on("gameOver", (data) => {
@@ -1371,7 +1379,9 @@ socket.on("gameOver", (data) => {
       if (typeof celebrateWin === "function") celebrateWin("normal");
     } else if (winner) {
       const winnerPlayer = players.find((p) => p.username === winner);
-      waitingMessage.textContent = `Tournament match over! ${displayWallet(winner)} wins with a score of ${
+      waitingMessage.textContent = `Tournament match over! ${displayWallet(
+        winner
+      )} wins with a score of ${
         winnerPlayer ? winnerPlayer.score : 0
       }. Keep competing!`;
     } else {
@@ -1434,7 +1444,9 @@ socket.on("playerLeft", (username) => {
   const leftMsg = document.createElement("p");
   leftMsg.style.textAlign = "center";
   leftMsg.style.color = "#f59e0b";
-  leftMsg.textContent = `⚠️ ${displayWallet(username)} left the game. Determining winner...`;
+  leftMsg.textContent = `⚠️ ${displayWallet(
+    username
+  )} left the game. Determining winner...`;
   questionDiv.appendChild(leftMsg);
   optionsDiv.innerHTML = "";
   submitAnswerBtn.style.display = "none";
@@ -1451,7 +1463,9 @@ socket.on("playerDisconnected", ({ walletAddress }) => {
   const disconnectMsg = document.createElement("p");
   disconnectMsg.style.textAlign = "center";
   disconnectMsg.style.color = "#f59e0b";
-  disconnectMsg.textContent = `⚠️ ${displayWallet(walletAddress)} disconnected. Waiting for reconnection or forfeit...`;
+  disconnectMsg.textContent = `⚠️ ${displayWallet(
+    walletAddress
+  )} disconnected. Waiting for reconnection or forfeit...`;
   questionDiv.appendChild(disconnectMsg);
   optionsDiv.innerHTML = "";
   submitAnswerBtn.style.display = "none";
@@ -1464,15 +1478,23 @@ socket.on("playerDisconnected", ({ walletAddress }) => {
 
 socket.on("gameOverForfeit", (data) => {
   console.log("Forfeit game over:", data);
-  const { winner, disconnectedPlayer, gameMode, tournamentId, prizeAmount, betAmount } =
-    data;
+  const {
+    winner,
+    disconnectedPlayer,
+    gameMode,
+    tournamentId,
+    prizeAmount,
+    betAmount,
+  } = data;
 
   resetGame();
 
   const clientIsWinner = winner === connectedWallet;
   const isTournament = gameMode === "tournament" || !!tournamentId;
   const isRanked = !isTournament && betAmount > 0;
-  const forfeitMessage = `${displayWallet(disconnectedPlayer)} left the game. ${displayWallet(winner)} wins by forfeit.`;
+  const forfeitMessage = `${displayWallet(
+    disconnectedPlayer
+  )} left the game. ${displayWallet(winner)} wins by forfeit.`;
   // Build forfeit message as DOM nodes so wallet addresses are shortened on screen.
   function buildForfeitNodes(target) {
     target.textContent = "";
@@ -1665,7 +1687,9 @@ socket.on("gameStateRestore", (data) => {
     playersDiv.appendChild(reconnectHeading);
     data.players.forEach((p) => {
       const row = document.createElement("p");
-      row.textContent = `${displayWallet(p.username)}${p.isBot ? " 🤖" : ""}: Ready`;
+      row.textContent = `${displayWallet(p.username)}${
+        p.isBot ? " 🤖" : ""
+      }: Ready`;
       playersDiv.appendChild(row);
     });
 
@@ -1887,7 +1911,9 @@ function updatePlayerUI(players) {
     const row = document.createElement("p");
     if (p.isBot) row.className = "bot-player";
     row.appendChild(
-      document.createTextNode(`${displayWallet(p.username)}${p.isBot ? " 🤖" : ""}`)
+      document.createTextNode(
+        `${displayWallet(p.username)}${p.isBot ? " 🤖" : ""}`
+      )
     );
     if (p.isBot && p.difficulty) {
       const badge = document.createElement("span");
@@ -2166,7 +2192,9 @@ socket.on("playerJoined", (username) => {
     modal.style.display = "none";
   }
 
-  waitingMessage.textContent = `${displayWallet(username)} joined. Game is starting...`;
+  waitingMessage.textContent = `${displayWallet(
+    username
+  )} joined. Game is starting...`;
 
   // Play sound if available
   const joinSound = document.getElementById("joinSound");
@@ -2207,7 +2235,9 @@ socket.on("answerResult", (data) => {
 
 socket.on("playerAnswered", (data) => {
   if (typeof data === "string") {
-    waitingMessage.textContent = `${displayWallet(data)} has submitted their answer`;
+    waitingMessage.textContent = `${displayWallet(
+      data
+    )} has submitted their answer`;
     return;
   }
 
