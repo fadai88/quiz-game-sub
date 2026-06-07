@@ -913,6 +913,7 @@ async function handleGameOver(room, roomId) {
     } else {
       io.to(roomId).emit("gameOver", {
         ...basePayload,
+        gameMode,
         betAmount: room.betAmount,
         message: "Game complete",
       });

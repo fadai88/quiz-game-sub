@@ -1491,7 +1491,7 @@ socket.on("gameOverForfeit", (data) => {
 
   const clientIsWinner = winner === connectedWallet;
   const isTournament = gameMode === "tournament" || !!tournamentId;
-  const isRanked = !isTournament && betAmount > 0;
+  const isRanked = !isTournament && (gameMode === "ranked" || betAmount > 0);
   const forfeitMessage = `${displayWallet(
     disconnectedPlayer
   )} left the game. ${displayWallet(winner)} wins by forfeit.`;
