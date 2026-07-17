@@ -12,6 +12,9 @@ const state = {
     paymentProcessor: null,
     subscriptionService: null,
     tournamentService: null,
+    // Shared via context so gameService can consult it at payout time without
+    // requiring socket/index.js (which already requires gameService).
+    botDetector: null,
 };
 
 module.exports = {
@@ -24,4 +27,5 @@ module.exports = {
     get paymentProcessor()    { return state.paymentProcessor; },
     get subscriptionService() { return state.subscriptionService; },
     get tournamentService()   { return state.tournamentService; },
+    get botDetector()         { return state.botDetector; },
 };

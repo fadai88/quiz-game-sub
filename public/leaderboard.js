@@ -1,6 +1,20 @@
 let allCycles = [],
   activeCycleId = null;
 
+// Pot deployments sell no subscriptions or tournaments — drop those nav links.
+(async function hideSubscriptionChrome() {
+  try {
+    const cfg = await (await fetch("/api/config")).json();
+    if (cfg.monetization === "pot") {
+      document
+        .querySelectorAll("[data-subscription-only]")
+        .forEach((el) => (el.style.display = "none"));
+    }
+  } catch (e) {
+    console.error("Config load failed:", e);
+  }
+})();
+
 function fmtAddr(a) {
   return a && a.length > 12
     ? `${a.slice(0, 6)}…${a.slice(-4)}`

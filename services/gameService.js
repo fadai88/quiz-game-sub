@@ -10,7 +10,14 @@ const context = require("../context");
 const User = require("../models/User");
 const GameSession = require("../models/GameSession");
 const { shuffleArray } = require("../utils/helpers");
-const { GAME_MODES } = require("../config/constants");
+const {
+  GAME_MODES,
+  POT_MULTIPLIERS,
+  FRAUD_SUSPICION_THRESHOLD,
+  isPotMode,
+} = require("../config/constants");
+const { calculateWinnings, formatUSDC } = require("../utils/usdcUtils");
+const { trackPayoutBlocked, trackFailedPayout } = require("../config/alerts");
 const {
   getGameRoom,
   updateGameRoom,
@@ -54,6 +61,127 @@ async function abortGameWithRefund(roomId, reason) {
   } catch (err) {
     logger.error(`Failed to process abort refund for room ${roomId}:`, err);
   }
+}
+
+// ─── Pot settlement ───────────────────────────────────────────────────────────
+
+/**
+ * Settle a pot-mode game by queueing the winner's payout.
+ *
+ * Ported from the pre-refactor monolith (server.js @ 9e0f96d), which paid the
+ * winner a multiple of their own stake: 1.8× against a human (both players
+ * staked, so the pot is 2× and the house keeps a 10% rake) or 1.5× against a
+ * bot (no second stake — the treasury funds it).
+ *
+ * Payouts are withheld rather than sent when the winner's play looks automated;
+ * an on-chain transfer cannot be clawed back, so anything suspicious is flagged
+ * for review instead. A missing botDetector or paymentProcessor is treated the
+ * same way: never pay out when the checks that gate the payout aren't running.
+ *
+ * @returns {Promise<{paymentId: string|null, withheld: boolean, withheldReason: string|null}>}
+ */
+async function settlePotGame(roomId, room, winner, botOpponent) {
+  const outcome = { paymentId: null, withheld: false, withheldReason: null };
+
+  // Bots never get paid, and a game with no winner has nothing to settle.
+  const winnerIsHuman =
+    winner && !room.players.some((p) => p.username === winner && p.isBot);
+  if (!winnerIsHuman) return outcome;
+
+  // No stake, nothing to pay. Free bot/practice rooms are created with
+  // betAmount 0 and must never reach the payment queue.
+  if (!room.betAmount || room.betAmount <= 0) return outcome;
+
+  const botDetector = context.botDetector;
+  const paymentProcessor = context.paymentProcessor;
+
+  if (!botDetector || !paymentProcessor) {
+    const missing = !botDetector ? "botDetector" : "paymentProcessor";
+    logger.error(
+      `[PAYOUT] ${missing} unavailable — withholding payout for ${winner} in room ${roomId}`
+    );
+    await trackPayoutBlocked(winner, {
+      message: `Payout withheld: ${missing} unavailable`,
+      walletAddress: winner,
+      roomId,
+      betAmount: room.betAmount,
+    });
+    outcome.withheld = true;
+    outcome.withheldReason = "unavailable";
+    return outcome;
+  }
+
+  const suspicionScore = botDetector.getSuspicionScore(winner);
+  logger.info(`[SECURITY] Audit for winner ${winner}: Score ${suspicionScore}`);
+
+  if (suspicionScore >= FRAUD_SUSPICION_THRESHOLD) {
+    const botAnalysis = botDetector.getBotAnalysis(winner);
+    const flags = botAnalysis.flags || [];
+    logger.warn(
+      `🚨 FRAUD DETECTED: Withholding payout for ${winner}. Score: ${suspicionScore}. Flags: ${JSON.stringify(
+        flags
+      )}`
+    );
+
+    await User.findOneAndUpdate(
+      { walletAddress: winner },
+      {
+        $set: {
+          isFlagged: true,
+          flagReason: `Bot Score ${suspicionScore}: ${flags.join(",")}`,
+        },
+      }
+    );
+
+    await trackPayoutBlocked(winner, {
+      message: `Payout blocked for bot behavior: ${winner}`,
+      walletAddress: winner,
+      roomId,
+      suspicionScore,
+      flags,
+      betAmount: room.betAmount,
+    });
+
+    outcome.withheld = true;
+    outcome.withheldReason = "fraud";
+    return outcome;
+  }
+
+  const multiplier = botOpponent
+    ? POT_MULTIPLIERS.BOT_OPPONENT
+    : POT_MULTIPLIERS.HUMAN_OPPONENT;
+  const winningAmount = calculateWinnings(room.betAmount, multiplier);
+
+  try {
+    const queuedPayment = await paymentProcessor.queuePayment(
+      winner,
+      Number(winningAmount),
+      roomId, // roomId doubles as the gameId for idempotency
+      room.betAmount,
+      { botOpponent, singlePlayerMode: room.roomMode === "bot" }
+    );
+    outcome.paymentId = queuedPayment._id.toString();
+    logger.info(
+      `Payout queued for ${winner}: Payment ID ${
+        outcome.paymentId
+      }, Amount ${formatUSDC(winningAmount)}`
+    );
+  } catch (error) {
+    // The stake is already collected, so a failed queue must not look like a
+    // completed game — surface it and let the caller tell the player.
+    logger.error(`[PAYOUT] Failed to queue payout for ${winner}:`, { error });
+    await trackFailedPayout({
+      message: `Failed to queue payout for ${winner}`,
+      walletAddress: winner,
+      roomId,
+      betAmount: room.betAmount,
+      error: error.message,
+    });
+    outcome.withheld = true;
+    outcome.withheldReason = "error";
+  }
+
+  return outcome;
 }
 
 // ─── Start game (human vs human) ─────────────────────────────────────────────
@@ -910,6 +1038,35 @@ async function handleGameOver(room, roomId) {
         tournamentId: room.tournamentId,
         message: "Tournament match complete!",
       });
+    } else if (isPotMode()) {
+      const { paymentId, withheld, withheldReason } = await settlePotGame(
+        roomId,
+        room,
+        winner,
+        botOpponent
+      );
+
+      let message;
+      if (withheldReason === "fraud") {
+        message =
+          "Victory under review. Account flagged for suspicious activity.";
+      } else if (withheld) {
+        message =
+          "Your win is confirmed but the payout could not be queued. Support has been alerted — please contact us with this game ID.";
+      } else if (paymentId) {
+        message = `Payout queued! Check status with ID: ${paymentId}`;
+      } else {
+        message = "No payout required";
+      }
+
+      io.to(roomId).emit("gameOver", {
+        ...basePayload,
+        gameMode,
+        betAmount: room.betAmount,
+        paymentId,
+        payoutWithheld: withheld,
+        message,
+      });
     } else {
       io.to(roomId).emit("gameOver", {
         ...basePayload,
@@ -946,4 +1103,5 @@ module.exports = {
   handleGameOver,
   abortGameWithRefund,
   restartCurrentQuestion,
+  settlePotGame,
 };

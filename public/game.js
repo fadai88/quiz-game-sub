@@ -170,7 +170,49 @@ socket.on("loginSuccess", (data) => {
 let connectedWallet = null;
 let currentRoomId = null;
 let isPremium = false; // set by initGameMode()
-let currentBetAmount = null; // kept for compatibility, not used for betting
+let currentBetAmount = null; // pot mode: the staked amount, in atomic units
+
+// ── Monetization mode ────────────────────────────────────────────────────
+// The server serves both products from one codebase; /api/config says which one
+// this deployment is. Pot mode stakes USDC per game, subscription mode sells
+// memberships. Defaults to subscription to match the server-side default.
+let potMode = false;
+let validBetAmountsAtomic = [];
+
+async function loadMonetizationConfig() {
+  try {
+    const res = await fetch("/api/config");
+    const cfg = await res.json();
+    potMode = cfg.monetization === "pot";
+    validBetAmountsAtomic = cfg.validBetAmounts || [];
+  } catch (e) {
+    console.error("Config load failed, assuming subscription mode:", e);
+  }
+}
+
+/** Hide every subscription/tournament surface when this is a pot deployment. */
+function applyMonetizationToChrome() {
+  if (!potMode) return;
+  document
+    .querySelectorAll("[data-subscription-only]")
+    .forEach((el) => (el.style.display = "none"));
+}
+
+/** Populate and reveal the stake dropdown. Pot mode only. */
+function initBetSelector() {
+  const wrap = document.getElementById("betSelector");
+  const select = document.getElementById("betAmount");
+  if (!wrap || !select || !potMode) return;
+
+  select.innerHTML = "";
+  for (const atomic of validBetAmountsAtomic) {
+    const opt = document.createElement("option");
+    opt.value = String(atomic);
+    opt.textContent = `${fromAtomicUnits(atomic)} USDC`;
+    select.appendChild(opt);
+  }
+  wrap.style.display = "";
+}
 
 // ── Subscription / Game Mode ─────────────────────────────────────────────
 const urlParams = new URLSearchParams(window.location.search);
@@ -184,6 +226,21 @@ const currentGameMode = currentTournamentId ? "tournament" : "practice";
   const botReward = document.getElementById("botRewardInfo");
   const botBtn = document.getElementById("playAgainstBotBtn");
   const humanBtn = document.getElementById("waitForPlayerBtn");
+
+  await loadMonetizationConfig();
+  applyMonetizationToChrome();
+
+  // ── Pot mode ───────────────────────────────────────────────────────────
+  // No membership tiers and no tournaments: every wallet can stake, and the
+  // subscription endpoints are not even mounted, so never call them.
+  if (potMode) {
+    initBetSelector();
+    const multiplier = 1.8;
+    modeEl.innerHTML = "💰 <strong>Stake Mode</strong> — winner takes the pot.";
+    if (humanReward) humanReward.textContent = `Win ${multiplier}× your stake`;
+    if (botReward) botReward.textContent = "Practice vs AI — free, no stake";
+    return;
+  }
 
   if (currentGameMode === "tournament") {
     // Verify premium access before allowing tournament play
@@ -923,7 +980,18 @@ joinGameBtn.addEventListener("click", async () => {
       alert("Please connect your wallet first");
       return;
     }
-    // No bet needed - just show game mode modal
+    // Pot mode: fail here, before the modal, if the stake is not a valid one —
+    // cheaper than discovering it after the wallet prompt.
+    if (potMode) {
+      const betAmount = parseInt(
+        document.getElementById("betAmount")?.value,
+        10
+      );
+      if (!validBetAmountsAtomic.includes(betAmount)) {
+        alert("Please choose a valid stake amount");
+        return;
+      }
+    }
     updateUIForJoining();
     waitingMessage.textContent = "Waiting for game mode selection...";
     showGameChoiceModal();
@@ -1101,11 +1169,19 @@ socket.on("joinGameFailure", (data) => {
   joinGameBtn.disabled = false;
 });
 
-socket.on("matchmakingError", (error) => {
+socket.on("matchmakingError", async (error) => {
   logError("matchmaking", error); // ✅ Safe logging
   resetUIAfterError();
   alert(getErrorMessage(error)); // ✅ User-friendly message
   joinGameBtn.disabled = false;
+
+  // Pot mode: the server refunds a verified stake when matchmaking fails after
+  // payment. Pull the new balance so the player can see their money came back
+  // instead of having to trust the message.
+  if (error && error.code === "REFUNDED_TO_BALANCE") {
+    currentBetAmount = null;
+    await updateBalance();
+  }
 });
 
 submitAnswerBtn.addEventListener("click", async () => {
@@ -1294,6 +1370,8 @@ socket.on("gameOver", (data) => {
     tournamentId,
     prizeAmount,
     betAmount,
+    payoutWithheld,
+    message, // pot mode: payout status (queued / withheld / under review)
   } = data;
 
   // Clear currentRoomId immediately so a socket drop during the results
@@ -1407,7 +1485,18 @@ socket.on("gameOver", (data) => {
           })
         )
       );
-      if (!isRanked) {
+      // Pot mode: tell the winner what they won and whether it is on its way.
+      if (potMode && isRanked && betAmount > 0) {
+        const multiplier = botOpponent ? 1.5 : 1.8;
+        const winnings = fromAtomicUnits(betAmount) * multiplier;
+        waitingMessage.appendChild(document.createTextNode(" "));
+        const strong = document.createElement("strong");
+        strong.textContent = `You win ${winnings} USDC.`;
+        waitingMessage.appendChild(strong);
+        if (message) {
+          waitingMessage.appendChild(document.createTextNode(` ${message}`));
+        }
+      } else if (!isRanked && !potMode) {
         waitingMessage.appendChild(document.createTextNode(" "));
         const em = document.createElement("em");
         em.appendChild(
@@ -1420,7 +1509,9 @@ socket.on("gameOver", (data) => {
         em.appendChild(document.createTextNode(" for tournament access."));
         waitingMessage.appendChild(em);
       }
-      if (typeof celebrateWin === "function") celebrateWin("normal");
+      // A withheld payout is not a celebration.
+      if (typeof celebrateWin === "function" && !payoutWithheld)
+        celebrateWin("normal");
     } else if (winner) {
       waitingMessage.textContent = buildHeadToHeadResultMessage({
         players,
@@ -2070,13 +2161,61 @@ async function getRecaptchaToken(action) {
   }
 }
 
+/**
+ * Pot mode: move the stake on-chain, then join the queue with proof of it.
+ *
+ * Order matters and mirrors the pre-refactor client: reCAPTCHA runs *before* any
+ * USDC moves, so a failed security check costs the player nothing. Once the
+ * transfer is broadcast the money is gone, and the server owns the refund path
+ * from there.
+ */
+async function stakeAndJoinMatchmaking() {
+  const select = document.getElementById("betAmount");
+  const betAmount = parseInt(select?.value, 10);
+  if (!validBetAmountsAtomic.includes(betAmount)) {
+    throw new Error("Please choose a valid stake amount");
+  }
+
+  let recaptchaToken = null;
+  if (window.recaptchaEnabled) {
+    waitingMessage.textContent = "Verifying security...";
+    recaptchaToken = await getRecaptchaToken("place_bet");
+  }
+
+  waitingMessage.textContent =
+    "Please confirm the transaction in your wallet...";
+  const nonce = generateUUID();
+  const transaction = await usdcManager.createTransferTransaction(
+    connectedWallet,
+    betAmount,
+    nonce
+  );
+  const signedTransaction = await window.solana.signTransaction(transaction);
+
+  waitingMessage.textContent = "Sending transaction...";
+  const txSignature = await connection.sendRawTransaction(
+    signedTransaction.serialize()
+  );
+
+  currentBetAmount = betAmount;
+  waitingMessage.textContent = "Looking for an opponent...";
+  socket.emit("joinHumanMatchmaking", {
+    betAmount,
+    transactionSignature: txSignature,
+    nonce,
+    recaptchaToken,
+  });
+}
+
 function showGameChoiceModal() {
   console.log("Showing game choice modal");
   const modal = document.getElementById("gameChoiceModal");
   modal.style.display = "flex";
 
   const botBtn = document.getElementById("playAgainstBotBtn");
-  if (botBtn) botBtn.style.display = isPremium ? "none" : "";
+  // Pot mode keeps the free bot game available; only subscription mode hides it
+  // from premium members to steer them to ranked.
+  if (botBtn) botBtn.style.display = !potMode && isPremium ? "none" : "";
 
   document.getElementById("waitForPlayerBtn").onclick = async function () {
     if (isProcessingBet) return;
@@ -2089,7 +2228,9 @@ function showGameChoiceModal() {
       this.disabled = true;
       this.textContent = "Joining...";
 
-      if (currentGameMode === "tournament" && currentTournamentId) {
+      if (potMode) {
+        await stakeAndJoinMatchmaking();
+      } else if (currentGameMode === "tournament" && currentTournamentId) {
         waitingMessage.textContent = "Joining tournament matchmaking...";
         socket.emit("joinTournamentGame", {
           walletAddress: connectedWallet,

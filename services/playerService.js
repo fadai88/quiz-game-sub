@@ -16,7 +16,7 @@ const {
   logGameRoomsState,
 } = require("./roomManager");
 const { acquireIdempotencyLock } = require("../utils/idempotency");
-const { alertManager } = require("../config/alerts");
+const { trackRefundFailed } = require("../config/alerts");
 const { GAME_MODES } = require("../config/constants");
 
 // ─── Virtual balance refund ───────────────────────────────────────────────────
@@ -52,13 +52,14 @@ async function refundToVirtualBalance(walletAddress, amount, reason) {
   } catch (err) {
     logger.error(`❌ CRITICAL: Failed to refund ${walletAddress}:`, err);
     if (global.refundMetrics) global.refundMetrics.failed++;
-    alertManager.sendAlert({
-      severity: "critical",
-      category: "refund_failed",
+    await trackRefundFailed(walletAddress, {
       message: `URGENT: Failed to refund ${fromAtomicUnits(
         amount
       )} USDC to ${walletAddress}`,
-      details: { walletAddress, amount, reason, error: err.message },
+      walletAddress,
+      amount,
+      reason,
+      error: err.message,
     });
     return false;
   }

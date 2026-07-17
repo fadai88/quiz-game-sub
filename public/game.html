@@ -416,8 +416,8 @@
             <ul>
                 <li><a href="index.html">Home</a></li>
                 <li><a href="game.html">Practice</a></li>
-                <li><a href="tournaments.html">🏆 Tournaments</a></li>
-                <li><a href="subscription.html">💳 Subscription</a></li>
+                <li data-subscription-only><a href="tournaments.html">🏆 Tournaments</a></li>
+                <li data-subscription-only><a href="subscription.html">💳 Subscription</a></li>
                 <li><a href="leaderboard.html">Leaderboard</a></li>
             </ul>
         </nav>
@@ -429,6 +429,11 @@
         <div id="countdownTimer"></div>
         <div id="gameArea">
             <div id="gameModeInfo" style="margin-bottom:12px;"></div>
+            <!-- Pot mode only: populated and revealed by game.js from /api/config -->
+            <div id="betSelector" style="display:none; margin-bottom:12px;">
+                <label for="betAmount">Stake:</label>
+                <select id="betAmount"></select>
+            </div>
             <button id="joinGameBtn" type="button">Join Game</button>
             <div id="waitingMessage"></div>
             <div id="players"></div>

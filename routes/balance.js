@@ -31,6 +31,8 @@ const { authenticate, requireAdmin } = require("../middleware/authenticate");
 const { getClientIpFromRequest } = require("../middleware/trustedProxy");
 const { SecurityLogger } = require("../utils/securityLogger");
 const { trackValidationFailure } = require("../config/alerts");
+const { MONETIZATION, isPotMode } = require("../config/constants");
+const { VALID_BET_AMOUNTS_ATOMIC } = require("../utils/usdcUtils");
 
 // ─── GET /api/balance/:walletAddress (authenticated) ─────────────────────────
 // (unchanged from original)
@@ -319,6 +321,17 @@ router.get("/config", (req, res) => {
     res.json({
       recaptchaEnabled: process.env.ENABLE_RECAPTCHA === "true",
       recaptchaSiteKey: process.env.RECAPTCHA_SITE_KEY || "",
+      // Lets the client render the right product: stake controls in pot mode,
+      // subscription/tournament entry points otherwise.
+      monetization: MONETIZATION,
+      validBetAmounts: isPotMode() ? VALID_BET_AMOUNTS_ATOMIC : [],
+      treasuryWallet: isPotMode()
+        ? process.env.TREASURY_WALLET_ADDRESS || ""
+        : "",
+      usdcMint: isPotMode()
+        ? process.env.USDC_MINT_ADDRESS ||
+          "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        : "",
     });
   } catch (error) {
     logger.error("[CONFIG] Error serving config:", { error });

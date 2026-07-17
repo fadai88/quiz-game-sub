@@ -5,14 +5,60 @@
 
 const ENVIRONMENT = process.env.NODE_ENV || "development";
 
+// ─── Monetization model ──────────────────────────────────────────────────────
+// This codebase serves two products from one tree:
+//
+//   subscription — premium members play ranked; prizes paid from weekly cycles
+//   pot          — any wallet may stake USDC; winner takes the pot minus rake
+//
+// Defaults to "subscription" so an unconfigured deployment keeps its existing
+// behaviour. The pot deployment must opt in explicitly via MONETIZATION=pot.
+const MONETIZATION_MODELS = {
+  SUBSCRIPTION: "subscription",
+  POT: "pot",
+};
+
+const MONETIZATION =
+  process.env.MONETIZATION || MONETIZATION_MODELS.SUBSCRIPTION;
+
+if (!Object.values(MONETIZATION_MODELS).includes(MONETIZATION)) {
+  console.error(
+    `❌ FATAL: MONETIZATION must be one of ${Object.values(
+      MONETIZATION_MODELS
+    ).join(" | ")} (got "${MONETIZATION}")`
+  );
+  process.exit(1);
+}
+
+const isPotMode = () => MONETIZATION === MONETIZATION_MODELS.POT;
+const isSubscriptionMode = () =>
+  MONETIZATION === MONETIZATION_MODELS.SUBSCRIPTION;
+
+// Winner's multiple of their own stake. Two players stake `bet` each (pot =
+// 2×bet) and the winner takes 1.8×bet, leaving a 10% rake. Bot games have no
+// second stake, so the 1.5× payout is funded by the treasury.
+const POT_MULTIPLIERS = {
+  HUMAN_OPPONENT: 1.8,
+  BOT_OPPONENT: 1.5,
+};
+
+// Suspicion score at or above which a payout is withheld and the account flagged.
+const FRAUD_SUSPICION_THRESHOLD = 70;
+
 const GAME_MODES = {
   PRACTICE: "practice", // Free users — bot or single-player
-  RANKED: "ranked", // Premium users — human vs human with bet
+  RANKED: "ranked", // Subscription mode: premium members. Pot mode: any staked wallet.
   BOT: "bot", // Bot game room mode
-  TOURNAMENT: "tournament", // Premium users — tournament bracket
+  TOURNAMENT: "tournament", // Premium users — tournament bracket (subscription mode only)
 };
 
 // ─── Startup validation ──────────────────────────────────────────────────────
+
+console.log(
+  MONETIZATION === MONETIZATION_MODELS.POT
+    ? "💰 Monetization: POT (stake-based, winner takes pot minus rake)"
+    : "🎟️  Monetization: SUBSCRIPTION (premium ranked + tournaments)"
+);
 
 if (ENVIRONMENT === "production") {
   console.log("🚀 Starting in PRODUCTION mode");
@@ -60,4 +106,14 @@ const COOKIE_OPTIONS = {
   maxAge: 24 * 60 * 60 * 1000, // 24 hours
 };
 
-module.exports = { ENVIRONMENT, GAME_MODES, COOKIE_OPTIONS };
+module.exports = {
+  ENVIRONMENT,
+  GAME_MODES,
+  COOKIE_OPTIONS,
+  MONETIZATION,
+  MONETIZATION_MODELS,
+  POT_MULTIPLIERS,
+  FRAUD_SUSPICION_THRESHOLD,
+  isPotMode,
+  isSubscriptionMode,
+};

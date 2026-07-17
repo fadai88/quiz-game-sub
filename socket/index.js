@@ -24,11 +24,12 @@ const { SecurityLogger } = require("../utils/securityLogger");
 const { verifyRecaptcha } = require("../utils/helpers");
 const { orphanedPlayerMetrics } = require("../utils/idempotency");
 const {
-  alertManager,
   trackValidationFailure,
   trackRateLimitViolation,
   trackFailedTransaction,
   trackFailedLogin,
+  trackOrphanedPlayer,
+  trackRecaptchaFailure,
 } = require("../config/alerts");
 
 const {
@@ -42,8 +43,10 @@ const {
   matchFoundSchema,
   joinPracticeGameSchema,
   joinHumanMatchmakingSchema,
+  joinHumanMatchmakingPotSchema,
   joinTournamentGameSchema,
 } = require("../config/schemas");
+const { isPotMode, isSubscriptionMode } = require("../config/constants");
 
 const {
   createGameRoom,
@@ -71,6 +74,7 @@ const {
   updatePlayerStats,
   findPlayerActiveRoom,
   handlePlayerLeftWin,
+  refundToVirtualBalance,
 } = require("../services/playerService");
 const {
   verifyAndValidateTransaction,
@@ -89,6 +93,52 @@ const botDetector = new BotDetector();
 // Cancelled when the player reconnects within DISCONNECT_GRACE_MS.
 const disconnectTimers = new Map();
 const DISCONNECT_GRACE_MS = 12_000;
+
+// ─── Pot-mode stake refund ────────────────────────────────────────────────────
+
+/**
+ * Return a verified stake after a failure that happened past the point of no
+ * return — the USDC is already in the treasury, so the player must not be left
+ * both out of pocket and out of the queue.
+ *
+ * Mirrors the pre-refactor safety net (server.js @ 9e0f96d): refunds land in the
+ * player's virtual balance, and a refund that itself fails is escalated rather
+ * than swallowed.
+ */
+async function refundStakeAfterFailure(
+  socket,
+  walletAddress,
+  betAmount,
+  reason
+) {
+  logger.error(
+    `⚠️ Matchmaking failed AFTER payment for ${walletAddress}. Refunding to virtual balance.`,
+    { reason }
+  );
+
+  const refunded = await refundToVirtualBalance(
+    walletAddress,
+    betAmount,
+    reason
+  );
+
+  if (refunded) {
+    socket.emit("matchmakingError", {
+      error:
+        "Matchmaking error, but your funds were saved to your Virtual Balance. Please refresh and check balance.",
+      code: "REFUNDED_TO_BALANCE",
+      refundReason: reason,
+    });
+  } else {
+    // refundToVirtualBalance already raised a critical REFUND_FAILED alert.
+    socket.emit("matchmakingError", {
+      error:
+        "Matchmaking failed. Our team has been notified and will process your refund manually within 24 hours.",
+      code: "REFUND_FAILED",
+      contactSupport: true,
+    });
+  }
+}
 
 // ─── Socket.IO auth middleware ────────────────────────────────────────────────
 
@@ -602,14 +652,25 @@ function registerConnectionHandler(io) {
       // 1. Remove from matchmaking pool
       if (socket.matchmakingPool) {
         try {
+          const stakedAmount = socket.matchmakingPool;
           const removed = await removeFromMatchmakingPool(
             socket.matchmakingPool,
             socket.id
           );
-          if (removed)
+          if (removed) {
             logger.info(
               `Player ${removed.walletAddress} removed from matchmaking pool`
             );
+            // Pot mode collects the stake up front, so a player who leaves the
+            // queue before being matched must get it back — no game was played.
+            if (isPotMode() && stakedAmount > 0) {
+              await refundToVirtualBalance(
+                removed.walletAddress,
+                stakedAmount,
+                "Left matchmaking queue before match"
+              );
+            }
+          }
           socket.matchmakingPool = null;
           await logMatchmakingState();
         } catch (error) {
@@ -635,15 +696,11 @@ function registerConnectionHandler(io) {
           if (activeGame) {
             roomId = activeGame.roomId;
             orphanedPlayerMetrics.totalOrphaned++;
-            alertManager.sendAlert({
-              severity: "medium",
-              category: "orphaned_player",
+            await trackOrphanedPlayer(socket.user.walletAddress, {
               message: `Orphaned player detected: ${socket.user.walletAddress} in room ${roomId}`,
-              details: {
-                walletAddress: socket.user.walletAddress,
-                socketId: socket.id,
-                roomId,
-              },
+              walletAddress: socket.user.walletAddress,
+              socketId: socket.id,
+              roomId,
             });
           }
         }
@@ -936,16 +993,21 @@ async function handleGameEvent(socket, event, args) {
       return;
     }
 
-    const practiceUser = await User.findOne({ walletAddress });
-    if (
-      practiceUser &&
-      (await Subscription.hasActiveSubscription(practiceUser._id))
-    ) {
-      socket.emit(
-        "joinGameFailure",
-        "Premium subscribers cannot join practice games. Use ranked matchmaking instead."
-      );
-      return;
+    // Subscription mode steers premium members to ranked so the practice pool
+    // stays free-tier. Pot mode has no membership tiers — practice is open to
+    // everyone, and staking is a per-game choice.
+    if (isSubscriptionMode()) {
+      const practiceUser = await User.findOne({ walletAddress });
+      if (
+        practiceUser &&
+        (await Subscription.hasActiveSubscription(practiceUser._id))
+      ) {
+        socket.emit(
+          "joinGameFailure",
+          "Premium subscribers cannot join practice games. Use ranked matchmaking instead."
+        );
+        return;
+      }
     }
 
     const { generateRoomId } = require("../utils/helpers");
@@ -1549,13 +1611,17 @@ async function handleGameEvent(socket, event, args) {
 
   // ── joinHumanMatchmaking ───────────────────────────────────────────────────
   if (event === "joinHumanMatchmaking") {
-    const { error } = joinHumanMatchmakingSchema.validate(data);
+    // Pot mode requires proof the stake moved on-chain; subscription mode only
+    // needs the pool bucket.
+    const { error } = (
+      isPotMode() ? joinHumanMatchmakingPotSchema : joinHumanMatchmakingSchema
+    ).validate(data);
     if (error) {
       socket.emit("matchmakingError", "Invalid input format");
       return;
     }
     const walletAddress = socket.user.walletAddress;
-    const { betAmount } = data;
+    const { betAmount, transactionSignature, nonce, recaptchaToken } = data;
     const clientIP = getClientIpFromSocket(socket);
     await rateLimitEvent(
       walletAddress,
@@ -1564,153 +1630,245 @@ async function handleGameEvent(socket, event, args) {
       socket
     );
 
-    const matchUser = await User.findOne({ walletAddress });
-    if (!matchUser || !matchUser.hasPremiumAccess()) {
-      socket.emit(
-        "matchmakingError",
-        "A subscription is required to play ranked games. Practice games are available for free."
-      );
-      return;
-    }
-
-    const pool = await getMatchmakingPool(betAmount);
-    const existingEntry = pool.find((p) => p.walletAddress === walletAddress);
-    if (existingEntry) {
-      const existingSocket = io.sockets.sockets.get(existingEntry.socketId);
-      if (existingSocket) {
-        socket.emit("matchmakingError", "Already in queue");
+    if (isPotMode()) {
+      if ((await isBlockedFn(walletAddress)) || (await isBlockedFn(clientIP))) {
+        socket.emit("matchmakingError", "Access denied");
         return;
       }
-      // Stale entry from a dead socket (e.g. refresh race) — remove and re-queue
-      await removeFromMatchmakingPool(betAmount, existingEntry.socketId);
-    }
-
-    await addToMatchmakingPool(betAmount, {
-      walletAddress,
-      socketId: socket.id,
-      joinTime: Date.now(),
-    });
-    socket.matchmakingPool = betAmount;
-
-    const fullPool = await getMatchmakingPool(betAmount);
-    const premiumPool = [];
-    for (const entry of fullPool) {
-      // Remove stale entries from server restarts or ungraceful disconnects
-      const entrySocket = io.sockets.sockets.get(entry.socketId);
-      if (!entrySocket) {
-        await removeFromMatchmakingPool(betAmount, entry.socketId);
-        logger.info(
-          `[matchmaking] Removed stale entry for disconnected player ${entry.walletAddress}`
-        );
-        continue;
-      }
-      const entryUser = await User.findOne({
-        walletAddress: entry.walletAddress,
-      });
-      const hasActiveSub = entryUser
-        ? await Subscription.hasActiveSubscription(entryUser._id)
-        : false;
-      if (hasActiveSub) {
-        premiumPool.push(entry);
-      } else {
-        await removeFromMatchmakingPool(betAmount, entry.socketId);
-        entrySocket.emit(
-          "matchmakingError",
-          "Your subscription has expired. Please renew to continue playing ranked games."
-        );
-      }
-    }
-
-    if (premiumPool.length >= 2) {
-      const p1 = premiumPool[0];
-      const p2 = premiumPool[1];
-      await removeFromMatchmakingPool(betAmount, p1.socketId);
-      await removeFromMatchmakingPool(betAmount, p2.socketId);
-
-      // Re-check liveness after removal — a socket can die in the gap
-      const p1Socket = io.sockets.sockets.get(p1.socketId);
-      const p2Socket = io.sockets.sockets.get(p2.socketId);
-      if (!p1Socket || !p2Socket) {
-        // Put the live one back in the queue and bail out
-        if (p1Socket) {
-          await addToMatchmakingPool(betAmount, p1);
-          p1Socket.matchmakingPool = betAmount;
-          p1Socket.emit("matchmakingJoined", {
-            waitingRoomId: "ranked-queue",
-            position: 1,
-            mode: "ranked",
-          });
-        }
-        if (p2Socket) {
-          await addToMatchmakingPool(betAmount, p2);
-          p2Socket.matchmakingPool = betAmount;
-          p2Socket.emit("matchmakingJoined", {
-            waitingRoomId: "ranked-queue",
-            position: 1,
-            mode: "ranked",
-          });
-        }
-        await logMatchmakingState();
-        return;
-      }
-
-      const { generateRoomId } = require("../utils/helpers");
-      const roomId = generateRoomId();
-      const room = await createGameRoom(roomId, betAmount, "human", {
-        gameMode: "ranked",
-        isPractice: false,
-      });
-      room.players.push(
-        {
-          id: p1.socketId,
-          username: p1.walletAddress,
-          score: 0,
-          totalResponseTime: 0,
-          answered: false,
-          lastAnswer: null,
-          lastResponseTime: null,
-          isBot: false,
-        },
-        {
-          id: p2.socketId,
-          username: p2.walletAddress,
-          score: 0,
-          totalResponseTime: 0,
-          answered: false,
-          lastAnswer: null,
-          lastResponseTime: null,
-          isBot: false,
-        }
-      );
-      await updateGameRoom(roomId, room);
-
-      p1Socket.join(roomId);
-      p1Socket.roomId = roomId;
-      p1Socket.matchmakingPool = null;
-      p2Socket.join(roomId);
-      p2Socket.roomId = roomId;
-      p2Socket.matchmakingPool = null;
-
-      io.to(p1.socketId).emit("matchFound", {
-        roomId,
-        opponent: p2.walletAddress,
-        betAmount,
-      });
-      io.to(p2.socketId).emit("matchFound", {
-        roomId,
-        opponent: p1.walletAddress,
-        betAmount,
-      });
-
-      await startGame(roomId);
     } else {
-      socket.emit("matchmakingJoined", {
-        waitingRoomId: "ranked-queue",
-        position: premiumPool.length,
-        mode: "ranked",
-      });
+      const matchUser = await User.findOne({ walletAddress });
+      if (!matchUser || !matchUser.hasPremiumAccess()) {
+        socket.emit(
+          "matchmakingError",
+          "A subscription is required to play ranked games. Practice games are available for free."
+        );
+        return;
+      }
     }
-    await logMatchmakingState();
+
+    // ── Pot mode: verify the stake before queueing ───────────────────────────
+    // Everything after a verified transfer is past the point of no return: the
+    // player's USDC is in the treasury, so any later failure must refund rather
+    // than just error out.
+    let stakeVerified = false;
+    if (isPotMode()) {
+      try {
+        await verifyAndValidateTransaction(
+          transactionSignature,
+          betAmount,
+          walletAddress,
+          context.config.TREASURY_WALLET.toBase58(),
+          nonce
+        );
+        stakeVerified = true;
+        logger.info(
+          `✅ Stake verified for ${walletAddress} (${betAmount}). Point of no return — must refund if anything fails from here.`
+        );
+      } catch (txError) {
+        trackFailedTransaction(walletAddress, {
+          error: txError.message,
+          betAmount,
+          transactionSignature,
+        });
+        socket.emit("matchmakingError", txError.message);
+        return;
+      }
+
+      try {
+        await verifyRecaptcha(recaptchaToken);
+      } catch (recaptchaError) {
+        // Refund first: the stake is already collected, so returning it must not
+        // depend on the bookkeeping calls below succeeding.
+        await refundStakeAfterFailure(
+          socket,
+          walletAddress,
+          betAmount,
+          "Backend reCAPTCHA validation failed"
+        );
+        trackRecaptchaFailure(walletAddress, {
+          error: recaptchaError.message,
+          event: "joinHumanMatchmaking",
+        });
+        await rateLimitFailedRecaptcha(clientIP);
+        return;
+      }
+    }
+
+    try {
+      const pool = await getMatchmakingPool(betAmount);
+      const existingEntry = pool.find((p) => p.walletAddress === walletAddress);
+      if (existingEntry) {
+        const existingSocket = io.sockets.sockets.get(existingEntry.socketId);
+        if (existingSocket) {
+          // In pot mode this stake was already collected, so a duplicate queue
+          // attempt must hand the money back rather than just report the clash.
+          if (stakeVerified) {
+            await refundStakeAfterFailure(
+              socket,
+              walletAddress,
+              betAmount,
+              "Already in queue"
+            );
+          } else {
+            socket.emit("matchmakingError", "Already in queue");
+          }
+          return;
+        }
+        // Stale entry from a dead socket (e.g. refresh race) — remove and re-queue
+        await removeFromMatchmakingPool(betAmount, existingEntry.socketId);
+      }
+
+      await addToMatchmakingPool(betAmount, {
+        walletAddress,
+        socketId: socket.id,
+        joinTime: Date.now(),
+      });
+      socket.matchmakingPool = betAmount;
+
+      const fullPool = await getMatchmakingPool(betAmount);
+      const eligiblePool = [];
+      for (const entry of fullPool) {
+        // Remove stale entries from server restarts or ungraceful disconnects
+        const entrySocket = io.sockets.sockets.get(entry.socketId);
+        if (!entrySocket) {
+          await removeFromMatchmakingPool(betAmount, entry.socketId);
+          logger.info(
+            `[matchmaking] Removed stale entry for disconnected player ${entry.walletAddress}`
+          );
+          continue;
+        }
+
+        // In pot mode the stake itself is the entitlement — everyone in the pool
+        // has already paid, so there is no subscription to re-check.
+        if (isPotMode()) {
+          eligiblePool.push(entry);
+          continue;
+        }
+
+        const entryUser = await User.findOne({
+          walletAddress: entry.walletAddress,
+        });
+        const hasActiveSub = entryUser
+          ? await Subscription.hasActiveSubscription(entryUser._id)
+          : false;
+        if (hasActiveSub) {
+          eligiblePool.push(entry);
+        } else {
+          await removeFromMatchmakingPool(betAmount, entry.socketId);
+          entrySocket.emit(
+            "matchmakingError",
+            "Your subscription has expired. Please renew to continue playing ranked games."
+          );
+        }
+      }
+
+      if (eligiblePool.length >= 2) {
+        const p1 = eligiblePool[0];
+        const p2 = eligiblePool[1];
+        await removeFromMatchmakingPool(betAmount, p1.socketId);
+        await removeFromMatchmakingPool(betAmount, p2.socketId);
+
+        // Re-check liveness after removal — a socket can die in the gap
+        const p1Socket = io.sockets.sockets.get(p1.socketId);
+        const p2Socket = io.sockets.sockets.get(p2.socketId);
+        if (!p1Socket || !p2Socket) {
+          // Put the live one back in the queue and bail out
+          if (p1Socket) {
+            await addToMatchmakingPool(betAmount, p1);
+            p1Socket.matchmakingPool = betAmount;
+            p1Socket.emit("matchmakingJoined", {
+              waitingRoomId: "ranked-queue",
+              position: 1,
+              mode: "ranked",
+            });
+          }
+          if (p2Socket) {
+            await addToMatchmakingPool(betAmount, p2);
+            p2Socket.matchmakingPool = betAmount;
+            p2Socket.emit("matchmakingJoined", {
+              waitingRoomId: "ranked-queue",
+              position: 1,
+              mode: "ranked",
+            });
+          }
+          await logMatchmakingState();
+          return;
+        }
+
+        const { generateRoomId } = require("../utils/helpers");
+        const roomId = generateRoomId();
+        const room = await createGameRoom(roomId, betAmount, "human", {
+          gameMode: "ranked",
+          isPractice: false,
+        });
+        room.players.push(
+          {
+            id: p1.socketId,
+            username: p1.walletAddress,
+            score: 0,
+            totalResponseTime: 0,
+            answered: false,
+            lastAnswer: null,
+            lastResponseTime: null,
+            isBot: false,
+          },
+          {
+            id: p2.socketId,
+            username: p2.walletAddress,
+            score: 0,
+            totalResponseTime: 0,
+            answered: false,
+            lastAnswer: null,
+            lastResponseTime: null,
+            isBot: false,
+          }
+        );
+        await updateGameRoom(roomId, room);
+
+        p1Socket.join(roomId);
+        p1Socket.roomId = roomId;
+        p1Socket.matchmakingPool = null;
+        p2Socket.join(roomId);
+        p2Socket.roomId = roomId;
+        p2Socket.matchmakingPool = null;
+
+        io.to(p1.socketId).emit("matchFound", {
+          roomId,
+          opponent: p2.walletAddress,
+          betAmount,
+        });
+        io.to(p2.socketId).emit("matchFound", {
+          roomId,
+          opponent: p1.walletAddress,
+          betAmount,
+        });
+
+        await startGame(roomId);
+      } else {
+        socket.emit("matchmakingJoined", {
+          waitingRoomId: "ranked-queue",
+          position: eligiblePool.length,
+          mode: "ranked",
+        });
+      }
+      await logMatchmakingState();
+    } catch (queueError) {
+      logger.error(`[matchmaking] Failed to queue ${walletAddress}:`, {
+        error: queueError,
+      });
+      // The stake is already in the treasury at this point, so an error here
+      // must return the money rather than just report a failure.
+      if (stakeVerified) {
+        await refundStakeAfterFailure(
+          socket,
+          walletAddress,
+          betAmount,
+          "Matchmaking error after payment"
+        );
+      } else {
+        socket.emit("matchmakingError", "Failed to join matchmaking queue.");
+      }
+    }
     return;
   }
 
@@ -1760,6 +1918,11 @@ async function handleGameEvent(socket, event, args) {
 
   // ── joinTournamentGame ─────────────────────────────────────────────────────
   if (event === "joinTournamentGame") {
+    // Tournaments are a subscription-mode product; pot mode does not run them.
+    if (isPotMode()) {
+      socket.emit("joinGameFailure", "Tournaments are not available");
+      return;
+    }
     const { error } = joinTournamentGameSchema.validate(data);
     if (error) {
       socket.emit("joinGameFailure", "Invalid input format");

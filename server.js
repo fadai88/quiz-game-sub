@@ -44,7 +44,7 @@ const crypto       = require('crypto');
 require('dotenv').config();
 
 // ─── App config & shared state ────────────────────────────────────────────────
-const { ENVIRONMENT }       = require('./config/constants');
+const { ENVIRONMENT, MONETIZATION, isPotMode, isSubscriptionMode } = require('./config/constants');
 const context               = require('./context');
 const logger                = require('./logger');
 const { authenticate, requireAdmin } = require('./middleware/authenticate');
@@ -128,9 +128,18 @@ app.get('/login.html', (req, res) => {
         window.recaptchaSiteKey = "${safeSiteKey}";
     </script></head>`));
 });
-app.get('/admin-tournaments.html', authenticate, requireAdmin, (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'admin-tournaments.html'));
-});
+if (isSubscriptionMode()) {
+    app.get('/admin-tournaments.html', authenticate, requireAdmin, (req, res) => {
+        res.sendFile(path.join(__dirname, 'public', 'admin-tournaments.html'));
+    });
+} else {
+    // Pot mode: these pages describe a product this deployment does not sell.
+    // Must be registered before express.static, which would otherwise serve them.
+    app.get(
+        ['/subscription.html', '/tournaments.html', '/admin-tournaments.html'],
+        (req, res) => res.redirect('/')
+    );
+}
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── HTTP rate limiting ───────────────────────────────────────────────────────
@@ -157,9 +166,17 @@ async function httpRateLimit(req, res, next) {
 // ─── API routes ───────────────────────────────────────────────────────────────
 app.use('/api/auth',         httpRateLimit, authRoutes);
 app.use('/api',              httpRateLimit, balanceRoutes);
-app.use('/api/subscription', httpRateLimit, subscriptionRoutes);
-app.use('/api/tournaments',       httpRateLimit, tournamentRouter);
-app.use('/api/admin/tournaments', httpRateLimit, adminTournamentRouter);
+
+// Subscriptions and tournaments are a subscription-mode product surface. In pot
+// mode they are not mounted at all — an unmounted route 404s, which is a
+// stronger guarantee than a UI that merely hides the link.
+if (isSubscriptionMode()) {
+    app.use('/api/subscription', httpRateLimit, subscriptionRoutes);
+    app.use('/api/tournaments',       httpRateLimit, tournamentRouter);
+    app.use('/api/admin/tournaments', httpRateLimit, adminTournamentRouter);
+} else {
+    logger.info('💰 Pot mode: subscription and tournament routes not mounted');
+}
 
 // ─── Admin honeypot ───────────────────────────────────────────────────────────
 // Log only — do NOT auto-block. Auto-blocking on a single GET lets an attacker
@@ -225,16 +242,25 @@ mongoose.connection.once('open', async () => {
         context.set('paymentProcessor', paymentProcessor);
         console.log('✅ PaymentProcessor initialized');
 
-        const serviceConfig = {
-            SOLANA_RPC_URL:              process.env.SOLANA_RPC_URL,
-            TREASURY_WALLET:             process.env.TREASURY_WALLET_ADDRESS,
-            USDC_MINT:                   process.env.USDC_MINT_ADDRESS,
-            MONTHLY_SUBSCRIPTION_PRICE: parseFloat(process.env.MONTHLY_SUBSCRIPTION_PRICE) || 15,
-            YEARLY_SUBSCRIPTION_PRICE:  parseFloat(process.env.YEARLY_SUBSCRIPTION_PRICE)  || 150,
-        };
-        context.set('subscriptionService', new SubscriptionService(serviceConfig));
-        context.set('tournamentService',   new TournamentService(serviceConfig));
-        logger.info('✅ Subscription and Tournament services initialized');
+        // gameService consults this at payout time; share it via context rather
+        // than importing socket/index.js, which already requires gameService.
+        context.set('botDetector', botDetector);
+
+        // Pot mode leaves these unset: the routes, crons and socket events that
+        // use them are all disabled, so anything that still reaches for one is a
+        // bug and should surface as a null rather than quietly work.
+        if (isSubscriptionMode()) {
+            const serviceConfig = {
+                SOLANA_RPC_URL:              process.env.SOLANA_RPC_URL,
+                TREASURY_WALLET:             process.env.TREASURY_WALLET_ADDRESS,
+                USDC_MINT:                   process.env.USDC_MINT_ADDRESS,
+                MONTHLY_SUBSCRIPTION_PRICE: parseFloat(process.env.MONTHLY_SUBSCRIPTION_PRICE) || 15,
+                YEARLY_SUBSCRIPTION_PRICE:  parseFloat(process.env.YEARLY_SUBSCRIPTION_PRICE)  || 150,
+            };
+            context.set('subscriptionService', new SubscriptionService(serviceConfig));
+            context.set('tournamentService',   new TournamentService(serviceConfig));
+            logger.info('✅ Subscription and Tournament services initialized');
+        }
     } catch (error) {
         logger.error('❌ FATAL: Service initialization failed:', { error });
         process.exit(1);

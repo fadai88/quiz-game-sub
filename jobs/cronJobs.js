@@ -19,6 +19,7 @@ const {
   trackLowTreasurySol,
   trackLowTreasuryUsdc,
 } = require("../config/alerts");
+const { isSubscriptionMode } = require("../config/constants");
 
 // Thresholds — override via env vars if needed
 const MIN_TREASURY_SOL = parseFloat(process.env.MIN_TREASURY_SOL) || 0.05; // lamports → SOL
@@ -71,19 +72,23 @@ async function registerCronJobs(botDetector = null) {
   logger.info("🛡️ Safety Net cron job initialized (runs every 5 minutes)");
 
   // ── Subscription expiry: every hour ───────────────────────────────────────
-  // (unchanged)
-  cron.schedule("0 * * * *", async () => {
-    try {
-      const ss = context.subscriptionService;
-      if (ss) {
-        const expired = await ss.expireOldSubscriptions();
-        if (expired > 0) logger.info(`Expired ${expired} subscriptions`);
+  // Subscription mode only — pot mode sells no subscriptions to expire.
+  if (isSubscriptionMode()) {
+    cron.schedule("0 * * * *", async () => {
+      try {
+        const ss = context.subscriptionService;
+        if (ss) {
+          const expired = await ss.expireOldSubscriptions();
+          if (expired > 0) logger.info(`Expired ${expired} subscriptions`);
+        }
+      } catch (error) {
+        logger.error("Failed to expire subscriptions:", error);
       }
-    } catch (error) {
-      logger.error("Failed to expire subscriptions:", error);
-    }
-  });
-  logger.info("📅 Subscription expiry cron job initialized (runs every hour)");
+    });
+    logger.info(
+      "📅 Subscription expiry cron job initialized (runs every hour)"
+    );
+  }
 
   // ── BotDetector memory cleanup: every hour ────────────────────────────────
   if (botDetector) {
@@ -100,24 +105,26 @@ async function registerCronJobs(botDetector = null) {
   }
 
   // ── Tournament starts: every 5 minutes ───────────────────────────────────
-  // (unchanged)
-  cron.schedule("*/5 * * * *", async () => {
-    try {
-      const ts = context.tournamentService;
-      if (ts) {
-        const started = await ts.startScheduledTournaments();
-        if (started?.length > 0) {
-          for (const t of started)
-            logger.info(`Started tournament: ${t._id || t}`);
+  // Subscription mode only — pot mode runs no tournaments.
+  if (isSubscriptionMode()) {
+    cron.schedule("*/5 * * * *", async () => {
+      try {
+        const ts = context.tournamentService;
+        if (ts) {
+          const started = await ts.startScheduledTournaments();
+          if (started?.length > 0) {
+            for (const t of started)
+              logger.info(`Started tournament: ${t._id || t}`);
+          }
         }
+      } catch (error) {
+        logger.error("Failed to check/start tournaments:", error);
       }
-    } catch (error) {
-      logger.error("Failed to check/start tournaments:", error);
-    }
-  });
-  logger.info(
-    "🏆 Tournament start cron job initialized (runs every 5 minutes)"
-  );
+    });
+    logger.info(
+      "🏆 Tournament start cron job initialized (runs every 5 minutes)"
+    );
+  }
 
   // ── Weekly prize-cycle rotation: every Monday at 00:00 UTC ───────────────
   // Startup catch-up: getOrCreateActive() checks the week boundary and rotates

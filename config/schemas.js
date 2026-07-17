@@ -117,6 +117,22 @@ const joinHumanMatchmakingSchema = Joi.object({
     .optional(),
 });
 
+// Pot mode: entering the queue means real USDC has already moved to the
+// treasury, so the stake proof is mandatory and the bet cannot be zero.
+//
+// recaptchaToken is shape-checked but not required here: verifyRecaptcha() is
+// the policy owner and short-circuits when ENABLE_RECAPTCHA is off, so making
+// it required would reject every dev request before that check could run.
+const joinHumanMatchmakingPotSchema = Joi.object({
+  betAmount: Joi.number()
+    .integer()
+    .valid(...VALID_BET_AMOUNTS_ATOMIC)
+    .required(),
+  transactionSignature: Joi.string().required(),
+  nonce: nonceSchema,
+  recaptchaToken: Joi.string().allow(null, "").optional(),
+});
+
 const joinTournamentGameSchema = Joi.object({
   tournamentId: Joi.string()
     .pattern(/^[a-f0-9]{24}$/)
@@ -197,6 +213,7 @@ module.exports = {
   matchFoundSchema,
   joinPracticeGameSchema,
   joinHumanMatchmakingSchema,
+  joinHumanMatchmakingPotSchema,
   joinTournamentGameSchema,
   subscribeSchema,
   // HTTP schemas

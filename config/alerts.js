@@ -85,6 +85,9 @@ const ALERT_THRESHOLDS = {
   // Payment health — any single occurrence warrants attention
   FAILED_PAYOUTS: { count: 1, window: 3600000, severity: "critical" },
   STUCK_PAYMENTS: { count: 1, window: 3600000, severity: "high" },
+  REFUND_FAILED: { count: 1, window: 3600000, severity: "critical" },
+  PAYOUT_BLOCKED: { count: 1, window: 3600000, severity: "high" },
+  ORPHANED_PLAYER: { count: 1, window: 3600000, severity: "medium" },
 
   // Treasury balance thresholds (overrideable via env)
   LOW_TREASURY_SOL: { count: 1, window: 1800000, severity: "critical" },
@@ -757,6 +760,12 @@ const trackLowTreasurySol = (data) =>
   alertManager.track("LOW_TREASURY_SOL", "treasury", data);
 const trackLowTreasuryUsdc = (data) =>
   alertManager.track("LOW_TREASURY_USDC", "treasury", data);
+const trackRefundFailed = (identifier, data) =>
+  alertManager.track("REFUND_FAILED", identifier, data);
+const trackPayoutBlocked = (identifier, data) =>
+  alertManager.track("PAYOUT_BLOCKED", identifier, data);
+const trackOrphanedPlayer = (identifier, data) =>
+  alertManager.track("ORPHANED_PLAYER", identifier, data);
 
 // ============================================================================
 // EXPORT
@@ -779,4 +788,7 @@ module.exports = {
   trackStuckPayment,
   trackLowTreasurySol,
   trackLowTreasuryUsdc,
+  trackRefundFailed,
+  trackPayoutBlocked,
+  trackOrphanedPlayer,
 };
