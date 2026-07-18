@@ -47,40 +47,14 @@ async function getCleanActiveRooms() {
 
 // ─── Matchmaking pool tracking ────────────────────────────────────────────────
 
-async function trackMatchmakingPlayer(betAmount, walletAddress) {
-  try {
-    await context.redisClient.sadd(
-      `active:matchmaking:${betAmount}`,
-      walletAddress
-    );
-  } catch (error) {
-    logger.error("Error tracking matchmaking player:", { error });
-  }
-}
-
-async function untrackMatchmakingPlayer(betAmount, walletAddress) {
-  try {
-    await context.redisClient.srem(
-      `active:matchmaking:${betAmount}`,
-      walletAddress
-    );
-  } catch (error) {
-    logger.error("Error untracking matchmaking player:", { error });
-  }
-}
-
+// The wallet addresses waiting at a given stake, derived from the queue list
+// itself (the source of truth). An earlier implementation kept a parallel
+// wallet-keyed Redis SET, but nothing pruned it by socket liveness, so it leaked
+// orphaned wallets across restarts and showed phantom "N players waiting" counts.
+// Reading straight from the list can never drift from the real queue.
 async function getMatchmakingPoolWallets(betAmount) {
-  try {
-    return await context.redisClient.smembers(
-      `active:matchmaking:${betAmount}`
-    );
-  } catch (error) {
-    logger.error("Error getting matchmaking pool wallets:", {
-      error,
-      betAmount,
-    });
-    return [];
-  }
+  const pool = await getMatchmakingPool(betAmount);
+  return [...new Set(pool.map((p) => p.walletAddress))];
 }
 
 async function getAllMatchmakingPools() {
@@ -428,7 +402,6 @@ async function addToMatchmakingPool(betAmount, playerData) {
       `matchmaking:human:${betAmount}`,
       JSON.stringify(playerData)
     );
-    await trackMatchmakingPlayer(betAmount, playerData.walletAddress);
     logger.info(
       `Added player ${playerData.walletAddress} to matchmaking pool for ${betAmount}`
     );
@@ -468,7 +441,6 @@ async function removeFromMatchmakingPool(betAmount, socketId) {
       pool[playerIndex]
     );
     const playerData = JSON.parse(pool[playerIndex]);
-    await untrackMatchmakingPlayer(betAmount, playerData.walletAddress);
     logger.info(
       `Removed player with socketId ${socketId} from matchmaking pool for ${betAmount}`
     );
@@ -536,8 +508,6 @@ async function logMatchmakingState() {
 
 module.exports = {
   getCleanActiveRooms,
-  trackMatchmakingPlayer,
-  untrackMatchmakingPlayer,
   getMatchmakingPoolWallets,
   getAllMatchmakingPools,
   addWaitingRoom,
