@@ -14,10 +14,16 @@ const { formatUSDC } = require("../utils/usdcUtils");
 
 async function verifyTransactionWithStatus(
   signature,
-  maxRetries = 3,
-  retryDelay = 500
+  maxRetries = 12,
+  retryDelay = 1000
 ) {
   const cfg = context.config;
+  // "confirmed" means a supermajority of the cluster has voted on the block;
+  // it is safe enough to accept a stake and lands within a few seconds. Waiting
+  // for "finalized" (32 slots, ~15-30s) would make every player wait that long
+  // and, with a short retry budget, fail outright before finalization is even
+  // possible.
+  const ACCEPTABLE_STATUSES = new Set(["confirmed", "finalized"]);
   for (let i = 0; i < maxRetries; i++) {
     logger.info(
       `🔍 Verification attempt ${i + 1}/${maxRetries} for ${signature}`
@@ -26,8 +32,18 @@ async function verifyTransactionWithStatus(
       searchTransactionHistory: true,
     });
     const status = statuses.value[0];
-    if (status?.confirmationStatus === "finalized") {
-      logger.info("✅ Transaction finalized on blockchain");
+    // A transaction that landed but failed on-chain still has a status; surface
+    // it immediately instead of burning the whole retry budget waiting.
+    if (status?.err) {
+      logger.error(
+        `❌ Transaction failed on-chain: ${JSON.stringify(status.err)}`
+      );
+      return await cfg.connection.getTransaction(signature, {
+        maxSupportedTransactionVersion: 0,
+      });
+    }
+    if (status && ACCEPTABLE_STATUSES.has(status.confirmationStatus)) {
+      logger.info(`✅ Transaction ${status.confirmationStatus} on blockchain`);
       return await cfg.connection.getTransaction(signature, {
         maxSupportedTransactionVersion: 0,
       });
@@ -51,8 +67,8 @@ async function verifyAndValidateTransaction(
   senderAddress,
   recipientAddress,
   nonce,
-  maxRetries = 3,
-  retryDelay = 500
+  maxRetries = 12,
+  retryDelay = 1000
 ) {
   const cfg = context.config;
   const redisClient = context.redisClient;

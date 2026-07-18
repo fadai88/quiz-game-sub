@@ -185,6 +185,21 @@ async function loadMonetizationConfig() {
     const cfg = await res.json();
     potMode = cfg.monetization === "pot";
     validBetAmountsAtomic = cfg.validBetAmounts || [];
+
+    // The USDC mint and treasury depend on the deployment's network (devnet vs
+    // mainnet). Take them from the server so the client can never drift from the
+    // configured network — a mismatch makes every stake transfer fail simulation
+    // with "invalid account data for instruction". Fall back to the built-in
+    // defaults only when the server omits them.
+    if (cfg.usdcMint) {
+      config.USDC_MINT = new solanaWeb3.PublicKey(cfg.usdcMint);
+      if (typeof usdcManager !== "undefined") {
+        usdcManager.usdcMint = config.USDC_MINT;
+      }
+    }
+    if (cfg.treasuryWallet) {
+      config.TREASURY_WALLET = new solanaWeb3.PublicKey(cfg.treasuryWallet);
+    }
   } catch (e) {
     console.error("Config load failed, assuming subscription mode:", e);
   }
