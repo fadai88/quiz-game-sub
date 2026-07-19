@@ -9,6 +9,7 @@ const logger = require("../logger");
 const context = require("../context");
 const User = require("../models/User");
 const GameSession = require("../models/GameSession");
+const WithheldPayout = require("../models/WithheldPayout");
 const { shuffleArray } = require("../utils/helpers");
 const {
   GAME_MODES,
@@ -80,6 +81,49 @@ async function abortGameWithRefund(roomId, reason) {
  *
  * @returns {Promise<{paymentId: string|null, withheld: boolean, withheldReason: string|null}>}
  */
+// Escrow / audit record for a withheld pot. Idempotent per room (unique roomId),
+// so a duplicate settlement cannot create a second row. Writing this never moves
+// funds and never changes the payout outcome — a failure here is logged and
+// swallowed. It exists so a withheld pot becomes an operator worklist item
+// instead of being silently kept in the treasury (M1).
+async function recordWithheldPayout({
+  roomId,
+  walletAddress,
+  stakeAmount,
+  intendedPayout = null,
+  reason,
+  flags = [],
+  suspicionScore = null,
+}) {
+  try {
+    await WithheldPayout.findOneAndUpdate(
+      { roomId },
+      {
+        $setOnInsert: {
+          roomId,
+          walletAddress,
+          stakeAmount,
+          intendedPayout,
+          reason,
+          flags,
+          suspicionScore,
+          status: "pending_review",
+        },
+      },
+      { upsert: true, new: false }
+    );
+    logger.info(
+      `[PAYOUT] Withheld pot recorded for review — room ${roomId}, winner ${walletAddress}, reason ${reason}, stake ${formatUSDC(
+        stakeAmount
+      )}`
+    );
+  } catch (err) {
+    logger.error(`[PAYOUT] Failed to record withheld pot for room ${roomId}:`, {
+      error: err.message,
+    });
+  }
+}
+
 async function settlePotGame(roomId, room, winner, botOpponent) {
   const outcome = { paymentId: null, withheld: false, withheldReason: null };
 
@@ -91,6 +135,45 @@ async function settlePotGame(roomId, room, winner, botOpponent) {
   // No stake, nothing to pay. Free bot/practice rooms are created with
   // betAmount 0 and must never reach the payment queue.
   if (!room.betAmount || room.betAmount <= 0) return outcome;
+
+  // Winnings this game would have paid — recorded on every withhold so an
+  // operator can see what was owed when resolving the held pot.
+  const intendedPayout = Number(
+    calculateWinnings(
+      room.betAmount,
+      botOpponent
+        ? POT_MULTIPLIERS.BOT_OPPONENT
+        : POT_MULTIPLIERS.HUMAN_OPPONENT
+    )
+  );
+
+  // Defense-in-depth: a staked bot game pays 1.5× from the treasury with no
+  // opposing stake to fund it, so it must not exist in pot mode — the bot-
+  // routing socket events (joinGame / switchToBot / requestBotGame) are gated to
+  // enforce this. If a staked bot game still reaches settlement, a gate was
+  // bypassed: refuse the payout and flag for manual review rather than draining
+  // the treasury.
+  if (botOpponent) {
+    logger.error(
+      `[PAYOUT] Refusing treasury-funded bot payout for a staked pot game — winner ${winner}, room ${roomId}. This path should be unreachable; a bot-routing gate was bypassed.`
+    );
+    await trackPayoutBlocked(winner, {
+      message: `Staked bot game reached settlement in pot mode (gate bypass)`,
+      walletAddress: winner,
+      roomId,
+      betAmount: room.betAmount,
+    });
+    await recordWithheldPayout({
+      roomId,
+      walletAddress: winner,
+      stakeAmount: room.betAmount,
+      intendedPayout,
+      reason: "staked_bot_game",
+    });
+    outcome.withheld = true;
+    outcome.withheldReason = "staked_bot_game";
+    return outcome;
+  }
 
   const botDetector = context.botDetector;
   const paymentProcessor = context.paymentProcessor;
@@ -105,6 +188,13 @@ async function settlePotGame(roomId, room, winner, botOpponent) {
       walletAddress: winner,
       roomId,
       betAmount: room.betAmount,
+    });
+    await recordWithheldPayout({
+      roomId,
+      walletAddress: winner,
+      stakeAmount: room.betAmount,
+      intendedPayout,
+      reason: "unavailable",
     });
     outcome.withheld = true;
     outcome.withheldReason = "unavailable";
@@ -141,6 +231,15 @@ async function settlePotGame(roomId, room, winner, botOpponent) {
       flags,
       betAmount: room.betAmount,
     });
+    await recordWithheldPayout({
+      roomId,
+      walletAddress: winner,
+      stakeAmount: room.betAmount,
+      intendedPayout,
+      reason: "fraud",
+      flags,
+      suspicionScore,
+    });
 
     outcome.withheld = true;
     outcome.withheldReason = "fraud";
@@ -176,6 +275,13 @@ async function settlePotGame(roomId, room, winner, botOpponent) {
       roomId,
       betAmount: room.betAmount,
       error: error.message,
+    });
+    await recordWithheldPayout({
+      roomId,
+      walletAddress: winner,
+      stakeAmount: room.betAmount,
+      intendedPayout,
+      reason: "error",
     });
     outcome.withheld = true;
     outcome.withheldReason = "error";
@@ -504,6 +610,18 @@ async function startNextQuestion(roomId) {
     questionEndsAt,
   });
 
+  // [QTIMING] Diagnostic: how much of the 10s window is already gone by the time
+  // the question actually reaches players. `questionStartTime` (the client's
+  // countdown anchor) is stamped before the Redis write + validation above, so a
+  // large emitDelayMs means players see fewer than 10s on their screen. Remove
+  // once the question-timer investigation is closed.
+  const emitDelayMs = Date.now() - room.questionStartTime;
+  logger.info(
+    `[QTIMING] room=${roomId} q=${room.currentQuestionIndex} emitted: ` +
+      `startTime=${room.questionStartTime} emitDelayMs=${emitDelayMs} ` +
+      `clientVisibleMs=${Math.max(0, questionEndsAt - Date.now())}`
+  );
+
   // Question timeout handler
   const timeoutForIndex = room.currentQuestionIndex;
   room.questionTimeout = setTimeout(async () => {
@@ -551,6 +669,14 @@ async function startNextQuestion(roomId) {
         await logGameRoomsState();
         return;
       }
+      // [QTIMING] Diagnostic: actual elapsed time when the timeout fires. Should
+      // be ~10000ms; a value well under 10000 means the round ended early on the
+      // server. Remove once the question-timer investigation is closed.
+      const elapsedMs = Date.now() - updatedRoom.questionStartTime;
+      logger.info(
+        `[QTIMING] room=${roomId} q=${timeoutForIndex} TIMEOUT fired: ` +
+          `elapsedMs=${elapsedMs} (expected ~10000)`
+      );
       updatedRoom._timedOutPlayers?.forEach((p) => {
         io.to(roomId).emit("playerAnswered", {
           username: p.username,

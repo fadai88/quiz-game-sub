@@ -72,7 +72,14 @@ async function verifyRecaptcha(token) {
 
     return { success: true, score: response.data.score };
   } catch (error) {
-    logger.error("reCAPTCHA verification error:", { error });
+    // Never log the raw error: axios attaches error.config.params.secret (the
+    // reCAPTCHA secret key), which would be written to disk. Log only a
+    // sanitized summary. The siteverify response body carries no secret.
+    logger.error("reCAPTCHA verification error:", {
+      message: error.message,
+      status: error.response?.status,
+      errorCodes: error.response?.data?.["error-codes"],
+    });
     throw new Error(
       "Verification service unavailable. Please try again later."
     );

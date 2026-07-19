@@ -84,32 +84,82 @@ async function verifyAndValidateTransaction(
   const key = `tx:${signature}`;
   const nonceKey = `nonce:${nonce}`;
 
-  // Step 1 — Replay prevention (MongoDB atomic upsert)
+  // Step 1 — Replay prevention (MongoDB).
+  // A signature is only a genuine replay once it has been *fully* verified.
+  // A 'failed' row (or a 'pending' row left behind by a crashed attempt) means a
+  // prior attempt did not complete — most importantly, a stake whose transaction
+  // confirmed on-chain later than our retry budget. Allowing those to retry is
+  // what prevents a transient RPC/confirmation failure from permanently
+  // stranding USDC that is already in the treasury.
+  //
+  // Single-flight is preserved: a *fresh* 'pending' row means another request
+  // for this exact signature is currently in-flight, so a concurrent duplicate
+  // is rejected. Only once that row is older than STALE_PENDING_MS (i.e. the
+  // owning attempt must have died) is a retry allowed. (Mirrors
+  // SubscriptionService, with added protection against concurrent double-spend.)
+  const STALE_PENDING_MS = 120_000; // > any single verification attempt (~12-40s)
   try {
-    const result = await TransactionLog.findOneAndUpdate(
-      { signature },
-      {
-        $setOnInsert: {
-          signature,
-          walletAddress: senderAddress,
-          betAmount: expectedAmount,
-          verifiedAt: new Date(),
-          status: "verified",
-        },
-      },
-      { upsert: true, new: false, runValidators: true }
-    );
-    if (result !== null) {
-      logger.error(`❌ REPLAY ATTACK DETECTED: ${signature} already processed`);
-      throw new Error(
-        "Transaction already processed - replay attack prevented"
+    const existing = await TransactionLog.findOne({ signature });
+    if (existing !== null) {
+      if (existing.status === "verified") {
+        logger.error(
+          `❌ REPLAY ATTACK DETECTED: ${signature} already processed`
+        );
+        throw new Error(
+          "Transaction already processed - replay attack prevented"
+        );
+      }
+      if (existing.status === "pending") {
+        const ageMs = Date.now() - new Date(existing.verifiedAt).getTime();
+        if (ageMs < STALE_PENDING_MS) {
+          // Another verification for this signature is still in-flight.
+          logger.warn(
+            `⏳ CONCURRENT SUBMISSION: ${signature} already being processed (${Math.round(
+              ageMs / 1000
+            )}s ago)`
+          );
+          throw new Error("Transaction already being processed");
+        }
+        logger.warn(
+          `♻️  Reclaiming stale pending signature ${signature} (${Math.round(
+            ageMs / 1000
+          )}s old — prior attempt did not finish)`
+        );
+      } else {
+        // 'failed' — a prior attempt failed on-chain/verification; allow retry.
+        logger.info(
+          `ℹ️  Retrying previously ${existing.status} signature ${signature}`
+        );
+      }
+      // Re-arm the sentinel so this attempt owns the in-flight window.
+      await TransactionLog.updateOne(
+        { signature },
+        { $set: { status: "pending", verifiedAt: new Date() } }
       );
+    } else {
+      // First sighting — insert a 'pending' sentinel. The unique index makes a
+      // concurrent duplicate submission fail with 11000 (handled below).
+      await TransactionLog.create({
+        signature,
+        walletAddress: senderAddress,
+        betAmount: expectedAmount,
+        verifiedAt: new Date(),
+        status: "pending",
+      });
+      logger.info("✅ MongoDB: New transaction recorded (pending)");
     }
-    logger.info("✅ MongoDB: New transaction recorded");
   } catch (dbErr) {
     if (dbErr.code === 11000) {
+      // Lost the insert race — another request created the sentinel first.
       logger.error(`❌ RACE CONDITION: ${signature} duplicate key error`);
-      throw new Error("Transaction already processed");
+      throw new Error("Transaction already being processed");
+    }
+    if (
+      dbErr.message.includes("replay") ||
+      dbErr.message.includes("already processed") ||
+      dbErr.message.includes("already being processed")
+    ) {
+      throw dbErr;
     }
     logger.error("❌ MongoDB audit failed:", { error: dbErr.message });
     throw new Error("Audit service unavailable");
@@ -128,7 +178,11 @@ async function verifyAndValidateTransaction(
     "Redis signature check"
   );
 
-  // Step 2B — Nonce check (strict)
+  // Step 2B — Nonce check (strict). We only *check* the nonce here; it is
+  // registered as used at the very end, together with promoting the signature
+  // to 'verified'. Registering it up-front would burn it on a transient failure
+  // and block the legitimate retry of a stake already sitting in the treasury —
+  // the retry reuses the same nonce (it is bound into the on-chain memo).
   try {
     const storedNonce = await redisClient.get(nonceKey);
     if (storedNonce) {
@@ -139,8 +193,7 @@ async function verifyAndValidateTransaction(
       );
       throw new Error("Nonce already used - duplicate request prevented");
     }
-    await redisClient.set(nonceKey, "used", "EX", 86400);
-    logger.info(`✅ Nonce registered: ${nonce}`);
+    logger.info(`✅ Nonce accepted (pending): ${nonce}`);
   } catch (error) {
     if (error.message.includes("Nonce already used")) throw error;
     logger.error("❌ CRITICAL: Redis nonce service unavailable");
@@ -339,7 +392,26 @@ async function verifyAndValidateTransaction(
   }
   logger.info(`✅ Transaction age: ${Math.round(txAge / 1000)}s`);
 
-  // Step 11 — Cache in Redis (best-effort)
+  // Step 11 — Finalize. Only now that every check has passed do we burn the
+  // signature and nonce: promote the row to 'verified' (this is what makes any
+  // future submission a genuine replay) and mark the nonce used. Promotion is
+  // awaited (not best-effort) — if it fails we would rather fail the join and
+  // let the caller retry than leave a stake credited with the row still
+  // 'pending'. The stake is safe in the treasury and the retry will succeed.
+  await TransactionLog.findOneAndUpdate(
+    { signature },
+    { status: "verified", verifiedAt: new Date() }
+  );
+
+  try {
+    await redisClient.set(nonceKey, "used", "EX", 86400);
+  } catch (err) {
+    logger.error("⚠️  Redis nonce registration failed (non-blocking):", {
+      error: err.message,
+    });
+  }
+
+  // Cache the signature in Redis (best-effort second-layer replay guard)
   try {
     await redisClient.set(key, "1", "EX", 604800);
     logger.info("✅ Transaction cached in Redis");

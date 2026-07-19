@@ -10,7 +10,7 @@
  * that move real money:
  *
  *   1. winner beating a human is paid 1.8× their stake (10% rake on the 2× pot)
- *   2. winner beating a bot is paid 1.5× (treasury-funded — no second stake)
+ *   2. a staked bot game is refused (no treasury-funded payout — anti-drain)
  *   3. a bot "winner" is never paid
  *   4. a zero-stake room never reaches the payment queue
  *   5. a suspicious winner has the payout withheld and the account flagged
@@ -26,6 +26,7 @@ const sinon = require("sinon");
 
 const context = require("../context");
 const User = require("../models/User");
+const WithheldPayout = require("../models/WithheldPayout");
 const { settlePotGame } = require("../services/gameService");
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -88,6 +89,7 @@ beforeEach(() => {
 
   // Never touch the database in these tests.
   sandbox.stub(User, "findOneAndUpdate").resolves({});
+  sandbox.stub(WithheldPayout, "findOneAndUpdate").resolves(null);
 });
 
 afterEach(() => sandbox.restore());
@@ -113,13 +115,20 @@ describe("gameService — pot settlement", () => {
     });
   });
 
-  it("pays a human winner 1.5× their stake against a bot opponent", async () => {
+  it("withholds treasury-funded bot payouts for a staked pot game (anti-drain)", async () => {
+    // A staked bot game pays 1.5× from the treasury with no opposing stake, so
+    // it must never settle in pot mode. The bot-routing socket events are gated
+    // to prevent one from being created; settlePotGame refuses it as a backstop.
     useContext();
 
-    await settlePotGame(ROOM_ID, botRoom(), WINNER, true);
+    const outcome = await settlePotGame(ROOM_ID, botRoom(), WINNER, true);
 
-    expect(queuePayment.calledOnce).to.equal(true);
-    expect(queuePayment.firstCall.args[1]).to.equal(15_000_000); // 1.5 × 10 USDC
+    expect(queuePayment.called).to.equal(false);
+    expect(outcome).to.deep.include({
+      paymentId: null,
+      withheld: true,
+      withheldReason: "staked_bot_game",
+    });
   });
 
   it("passes a plain number to the payment queue, never a bigint", async () => {
@@ -227,5 +236,36 @@ describe("gameService — pot settlement", () => {
       withheld: true,
       withheldReason: "error",
     });
+  });
+
+  it("records a withheld pot for operator review (escrow, not silent confiscation)", async () => {
+    // Every withhold must leave a queryable record so a false-positive hold
+    // isn't silently kept in the treasury (M1). Use the botDetector-unavailable
+    // branch to trigger a withhold.
+    useContext({ withBotDetector: false });
+
+    await settlePotGame(ROOM_ID, humanRoom(), WINNER, false);
+
+    expect(WithheldPayout.findOneAndUpdate.calledOnce).to.equal(true);
+    const [filter, update] = WithheldPayout.findOneAndUpdate.firstCall.args;
+    expect(filter).to.deep.equal({ roomId: ROOM_ID }); // idempotent per room
+    const doc = update.$setOnInsert;
+    expect(doc).to.include({
+      roomId: ROOM_ID,
+      walletAddress: WINNER,
+      stakeAmount: STAKE,
+      reason: "unavailable",
+      status: "pending_review",
+    });
+    expect(doc.intendedPayout).to.equal(18_000_000); // 1.8 × 10 USDC that was owed
+  });
+
+  it("does not record a withheld pot on a successful payout", async () => {
+    useContext();
+
+    await settlePotGame(ROOM_ID, humanRoom(), WINNER, false);
+
+    expect(queuePayment.calledOnce).to.equal(true);
+    expect(WithheldPayout.findOneAndUpdate.called).to.equal(false);
   });
 });

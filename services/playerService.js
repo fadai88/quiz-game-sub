@@ -17,7 +17,7 @@ const {
 } = require("./roomManager");
 const { acquireIdempotencyLock } = require("../utils/idempotency");
 const { trackRefundFailed } = require("../config/alerts");
-const { GAME_MODES } = require("../config/constants");
+const { GAME_MODES, isPotMode } = require("../config/constants");
 
 // ─── Virtual balance refund ───────────────────────────────────────────────────
 
@@ -159,6 +159,41 @@ async function handlePlayerLeftWin(
   try {
     const room = await getGameRoom(roomId);
 
+    // Pot-mode forfeit payout. settlePotGame is otherwise only reached from
+    // gameService.handleGameOver, which every forfeit path bypasses — without
+    // this the winner is announced but never paid and BOTH stakes stay stranded
+    // in the treasury. Settled before the emit so the client learns the payout
+    // status. Idempotent: PaymentQueue enforces a unique gameId (roomId), so a
+    // race with any other settlement for this room cannot double-pay. Required
+    // lazily to avoid a circular import (gameService already requires this file).
+    let forfeitPayout = { paymentId: null, withheld: false };
+    if (
+      isPotMode() &&
+      !botOpponent &&
+      betAmount > 0 &&
+      room &&
+      room.gameMode !== GAME_MODES.TOURNAMENT
+    ) {
+      try {
+        const { settlePotGame } = require("./gameService");
+        const { paymentId, withheld } = await settlePotGame(
+          roomId,
+          room,
+          remainingPlayer.username,
+          botOpponent
+        );
+        forfeitPayout = { paymentId, withheld };
+      } catch (settleErr) {
+        // settlePotGame already alerts on failure; never let a payout problem
+        // abort the forfeit resolution (the room still needs cleaning up).
+        logger.error(
+          `[FORFEIT] Pot settlement failed for winner ${remainingPlayer.username} in room ${roomId}:`,
+          { error: settleErr.message }
+        );
+        forfeitPayout = { paymentId: null, withheld: true };
+      }
+    }
+
     io.to(roomId).emit("gameOverForfeit", {
       winner: remainingPlayer.username,
       disconnectedPlayer: disconnectedPlayer.username,
@@ -166,6 +201,8 @@ async function handlePlayerLeftWin(
       botOpponent,
       gameMode: room?.gameMode || null,
       tournamentId: room?.tournamentId || null,
+      paymentId: forfeitPayout.paymentId,
+      payoutWithheld: forfeitPayout.withheld,
       message: `${disconnectedPlayer.username} left the game. ${remainingPlayer.username} wins by forfeit!`,
     });
 

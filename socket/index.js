@@ -1153,6 +1153,18 @@ async function handleGameEvent(socket, event, args) {
 
   // ── joinGame (legacy / bet-based) ──────────────────────────────────────────
   if (event === "joinGame") {
+    // Pot-mode stakes go exclusively through joinHumanMatchmaking (human vs
+    // human). joinGame carries a 30s auto-switch-to-bot fallback whose winner is
+    // paid 1.5× their stake from the treasury — with no opposing stake funding
+    // it, that lets a staker farm the treasury. The pot client never emits this
+    // event; block it so a crafted socket cannot reach the bot-payout path.
+    if (isPotMode()) {
+      socket.emit(
+        "joinGameFailure",
+        "Staking is only available through ranked matchmaking."
+      );
+      return;
+    }
     const { error } = transactionSchema.validate(data);
     if (error) {
       trackValidationFailure(
@@ -1318,6 +1330,20 @@ async function handleGameEvent(socket, event, args) {
     if (socket.roomId !== data.roomId) {
       socket.emit("gameError", "Unauthorized room access");
       return;
+    }
+    // In pot mode a bot game pays the winner 1.5× from the treasury. That is
+    // fine for free practice (betAmount 0) but must never run on a staked room,
+    // or a staker could farm the treasury with no opposing stake. Practice is
+    // unaffected.
+    if (isPotMode()) {
+      const botTargetRoom = await getGameRoom(data.roomId);
+      if (botTargetRoom && botTargetRoom.betAmount > 0) {
+        socket.emit(
+          "gameError",
+          "Bot games are not available for staked matches."
+        );
+        return;
+      }
     }
     await startSinglePlayerGame(data.roomId);
     return;
@@ -1593,6 +1619,16 @@ async function handleGameEvent(socket, event, args) {
     const room = await getGameRoom(roomId);
     if (!room) {
       socket.emit("gameError", "Room not found");
+      return;
+    }
+
+    // Same treasury-drain guard as requestBotGame: a staked room must never be
+    // switched to a bot game in pot mode.
+    if (isPotMode() && room.betAmount > 0) {
+      socket.emit(
+        "gameError",
+        "Bot games are not available for staked matches."
+      );
       return;
     }
 
