@@ -34,10 +34,21 @@ const withheldPayoutSchema = new mongoose.Schema(
     suspicionScore: { type: Number, default: null },
     status: {
       type: String,
-      enum: ["pending_review", "resolved_refunded", "resolved_paid", "resolved_denied"],
+      enum: [
+        "pending_review",
+        "resolving", // transient: an operator has claimed it and the action is in flight
+        "resolved_refunded",
+        "resolved_paid",
+        "resolved_denied",
+      ],
       default: "pending_review",
       index: true,
     },
+    // Set when an operator resolves the hold.
+    resolvedBy: { type: String, default: null }, // admin wallet address
+    resolvedAt: { type: Date, default: null },
+    resolutionNote: { type: String, default: null },
+    payoutId: { type: String, default: null }, // PaymentQueue id when released
   },
   { timestamps: true }
 );

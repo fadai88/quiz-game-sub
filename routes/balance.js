@@ -23,6 +23,8 @@ const Subscription = require("../models/Subscription");
 const PaymentQueue = require("../models/PaymentQueue");
 const PrizeCycle = require("../models/PrizeCycle");
 const CycleStat = require("../models/CycleStat");
+const WithheldPayout = require("../models/WithheldPayout");
+const { refundToVirtualBalance } = require("../services/playerService");
 const {
   walletParamSchema,
   paymentIdParamSchema,
@@ -304,6 +306,192 @@ router.get(
     }
   }
 );
+
+// ─── Withheld-payout operator flow (admin only) ──────────────────────────────
+// settlePotGame writes a WithheldPayout row whenever it holds a pot (fraud,
+// missing dependency, staked-bot backstop, or a failed queue). These endpoints
+// let an operator review and resolve each hold rather than the funds sitting in
+// the treasury indefinitely.
+
+// GET /api/admin/withheld-payouts?status=pending_review&limit=100
+router.get(
+  "/admin/withheld-payouts",
+  authenticate,
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const status = req.query.status || "pending_review";
+      const allowed = [
+        "pending_review",
+        "resolving",
+        "resolved_refunded",
+        "resolved_paid",
+        "resolved_denied",
+        "all",
+      ];
+      if (!allowed.includes(status)) {
+        return res.status(400).json({ error: "Invalid status filter" });
+      }
+      const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+      const filter = status === "all" ? {} : { status };
+      const rows = await WithheldPayout.find(filter)
+        .sort({ createdAt: -1 })
+        .limit(limit)
+        .lean();
+      res.json({ count: rows.length, rows });
+    } catch (error) {
+      logger.error("[WITHHELD] Error listing withheld payouts:", {
+        error: error.message,
+      });
+      res.status(500).json({ error: "Failed to list withheld payouts" });
+    }
+  }
+);
+
+// POST /api/admin/withheld-payouts/:id/resolve
+// Body: { action: "refund" | "release" | "deny", note?: string }
+//   refund  — return the winner's own stake to their virtual balance
+//   release — queue the full withheld payout on-chain (treasury → winner)
+//   deny    — close the hold with no money movement (confirmed abuse)
+router.post(
+  "/admin/withheld-payouts/:id/resolve",
+  authenticate,
+  requireAdmin,
+  async (req, res) => {
+    const { id } = req.params;
+    const { action, note } = req.body || {};
+    if (!["refund", "release", "deny"].includes(action)) {
+      return res
+        .status(400)
+        .json({ error: "action must be refund | release | deny" });
+    }
+    if (!/^[a-f0-9]{24}$/.test(id || "")) {
+      return res.status(400).json({ error: "Invalid record id" });
+    }
+
+    // Atomically claim the record so two operators can't resolve it twice (and a
+    // release can't double-queue the payout). Only a pending_review row can be
+    // claimed; anything else means it's already resolved or in flight.
+    let record;
+    try {
+      record = await WithheldPayout.findOneAndUpdate(
+        { _id: id, status: "pending_review" },
+        { $set: { status: "resolving" } },
+        { new: true }
+      );
+    } catch (error) {
+      logger.error("[WITHHELD] Error claiming record:", {
+        error: error.message,
+      });
+      return res.status(500).json({ error: "Failed to claim record" });
+    }
+    if (!record) {
+      return res
+        .status(409)
+        .json({ error: "Record not found or already resolved" });
+    }
+
+    // Revert the claim if the money action fails, so the hold stays actionable.
+    const revert = async () => {
+      await WithheldPayout.updateOne(
+        { _id: id, status: "resolving" },
+        { $set: { status: "pending_review" } }
+      );
+    };
+
+    try {
+      if (action === "deny") {
+        await finalizeResolution(record, "resolved_denied", req.user, note);
+        return res.json({ success: true, status: "resolved_denied" });
+      }
+
+      if (action === "refund") {
+        const ok = await refundToVirtualBalance(
+          record.walletAddress,
+          record.stakeAmount,
+          `Withheld pot resolved (refund) — room ${record.roomId}`
+        );
+        if (!ok) {
+          await revert();
+          return res
+            .status(502)
+            .json({ error: "Refund failed; hold left open for retry" });
+        }
+        await finalizeResolution(record, "resolved_refunded", req.user, note);
+        return res.json({ success: true, status: "resolved_refunded" });
+      }
+
+      // action === "release" — queue the full payout on-chain.
+      const paymentProcessor = context.paymentProcessor;
+      if (!paymentProcessor) {
+        await revert();
+        return res
+          .status(503)
+          .json({ error: "Payment processor unavailable" });
+      }
+      if (!record.intendedPayout || record.intendedPayout <= 0) {
+        await revert();
+        return res
+          .status(400)
+          .json({ error: "Record has no payable amount; use refund or deny" });
+      }
+      let payment;
+      try {
+        payment = await paymentProcessor.queuePayment(
+          record.walletAddress,
+          Number(record.intendedPayout),
+          record.roomId, // gameId — unique, so this can't double-queue
+          record.stakeAmount,
+          { source: "withheld_payout_release", withheldId: id }
+        );
+      } catch (queueErr) {
+        await revert();
+        logger.error("[WITHHELD] Release queue failed:", {
+          error: queueErr.message,
+        });
+        return res
+          .status(502)
+          .json({ error: `Failed to queue payout: ${queueErr.message}` });
+      }
+      await finalizeResolution(
+        record,
+        "resolved_paid",
+        req.user,
+        note,
+        payment._id.toString()
+      );
+      return res.json({
+        success: true,
+        status: "resolved_paid",
+        paymentId: payment._id.toString(),
+      });
+    } catch (error) {
+      await revert();
+      logger.error("[WITHHELD] Error resolving record:", {
+        error: error.message,
+      });
+      return res.status(500).json({ error: "Failed to resolve record" });
+    }
+  }
+);
+
+async function finalizeResolution(record, status, adminUser, note, payoutId) {
+  await WithheldPayout.updateOne(
+    { _id: record._id },
+    {
+      $set: {
+        status,
+        resolvedBy: adminUser.walletAddress,
+        resolvedAt: new Date(),
+        resolutionNote: typeof note === "string" ? note.slice(0, 500) : null,
+        ...(payoutId ? { payoutId } : {}),
+      },
+    }
+  );
+  logger.info(
+    `[WITHHELD] Record ${record._id} (room ${record.roomId}) resolved as ${status} by ${adminUser.walletAddress}`
+  );
+}
 
 // ─── GET /api/tokens.json (honeypot — unchanged) ─────────────────────────────
 
