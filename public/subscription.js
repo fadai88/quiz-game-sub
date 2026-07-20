@@ -22,10 +22,24 @@ const config = {
   ),
 };
 
-const connection = new solanaWeb3.Connection(
-  "https://devnet.helius-rpc.com/?api-key=961d5e62-871f-447a-bda0-0d61ce151d6e",
-  "confirmed"
-);
+// RPC endpoint comes from the server (/api/config → rpcUrl) so no RPC key is
+// baked into this file. Start with a keyless public devnet endpoint; loadClientConfig()
+// swaps in the configured endpoint at startup, before any subscription tx is built.
+let RPC_URL = "https://api.devnet.solana.com";
+let connection = new solanaWeb3.Connection(RPC_URL, "confirmed");
+
+async function loadClientConfig() {
+  try {
+    const res = await fetch("/api/config");
+    const cfg = await res.json();
+    if (cfg.rpcUrl) {
+      RPC_URL = cfg.rpcUrl;
+      connection = new solanaWeb3.Connection(RPC_URL, "confirmed");
+    }
+  } catch (e) {
+    console.error("Client config load failed; using default RPC endpoint:", e);
+  }
+}
 
 // Helper to find associated token address (manual PDA derivation)
 async function findAssociatedTokenAddress(walletAddress, tokenMintAddress) {
@@ -393,5 +407,6 @@ document
   .addEventListener("click", cancelSubscription);
 
 // Initialize
+loadClientConfig();
 loadPrices();
 loadSubscriptionStatus();

@@ -200,6 +200,16 @@ async function loadMonetizationConfig() {
     if (cfg.treasuryWallet) {
       config.TREASURY_WALLET = new solanaWeb3.PublicKey(cfg.treasuryWallet);
     }
+    // Swap in the server-configured RPC endpoint and re-point usdcManager at it,
+    // so no RPC key is hardcoded in this file and it stays on the deployment's
+    // network (a devnet/mainnet mismatch makes every stake transfer fail).
+    if (cfg.rpcUrl) {
+      RPC_URL = cfg.rpcUrl;
+      connection = new solanaWeb3.Connection(RPC_URL, "confirmed");
+      if (typeof usdcManager !== "undefined") {
+        usdcManager.connection = connection;
+      }
+    }
   } catch (e) {
     console.error("Config load failed, assuming subscription mode:", e);
   }
@@ -590,10 +600,12 @@ class USDCManager {
   }
 }
 
-const connection = new solanaWeb3.Connection(
-  "https://devnet.helius-rpc.com/?api-key=961d5e62-871f-447a-bda0-0d61ce151d6e",
-  "confirmed"
-);
+// RPC endpoint comes from the server (/api/config → rpcUrl) so no RPC key is
+// baked into this file. Start with a keyless public devnet endpoint; loadMonetizationConfig()
+// swaps in the configured endpoint (and re-points usdcManager) before any stake
+// transaction is built.
+let RPC_URL = "https://api.devnet.solana.com";
+let connection = new solanaWeb3.Connection(RPC_URL, "confirmed");
 
 const usdcManager = new USDCManager(connection);
 

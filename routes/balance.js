@@ -509,6 +509,12 @@ router.get("/config", (req, res) => {
     res.json({
       recaptchaEnabled: process.env.ENABLE_RECAPTCHA === "true",
       recaptchaSiteKey: process.env.RECAPTCHA_SITE_KEY || "",
+      // Client-facing Solana RPC endpoint. Served from config (env var) instead
+      // of hardcoded in public/*.js so no RPC key is baked into shipped source or
+      // git, and it can be rotated without a client redeploy. This endpoint is
+      // visible to the browser by nature (the client builds/sends stake txs), so
+      // it must be a client-scoped endpoint — never the server's privileged RPC.
+      rpcUrl: process.env.CLIENT_RPC_URL || "",
       // Lets the client render the right product: stake controls in pot mode,
       // subscription/tournament entry points otherwise.
       monetization: MONETIZATION,

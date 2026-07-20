@@ -38,7 +38,7 @@ function securityHeaders(req, res, next) {
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: https:",
     "font-src 'self' data:",
-    "connect-src 'self' wss: ws: https://courtnay-0wegdq-fast-mainnet.helius-rpc.com https://devnet.helius-rpc.com https://mainnet.helius-rpc.com https://api.anthropic.com https://www.google.com https://www.gstatic.com",
+    "connect-src 'self' wss: ws: https://courtnay-0wegdq-fast-mainnet.helius-rpc.com https://devnet.helius-rpc.com https://mainnet.helius-rpc.com https://api.devnet.solana.com https://api.mainnet-beta.solana.com https://api.anthropic.com https://www.google.com https://www.gstatic.com",
     "frame-src 'self' https://www.google.com https://recaptcha.google.com https://www.recaptcha.net",
     "child-src 'self' https://www.google.com https://recaptcha.google.com",
     "frame-ancestors 'none'",
