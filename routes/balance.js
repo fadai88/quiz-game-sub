@@ -425,9 +425,7 @@ router.post(
       const paymentProcessor = context.paymentProcessor;
       if (!paymentProcessor) {
         await revert();
-        return res
-          .status(503)
-          .json({ error: "Payment processor unavailable" });
+        return res.status(503).json({ error: "Payment processor unavailable" });
       }
       if (!record.intendedPayout || record.intendedPayout <= 0) {
         await revert();
