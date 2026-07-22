@@ -1,0 +1,26 @@
+#!/bin/sh
+#
+# Pre-commit hook: auto-format staged JS/TS with Prettier so unformatted code
+# can't reach CI. The CI "Lint" job runs `prettier --check` and fails the build
+# on any file that isn't formatted; this formats them before the commit lands.
+#
+# Enabled via a versioned hooks dir:  git config core.hooksPath .githooks
+# (setup.sh does this, or run that command once per clone.)
+#
+# NOTE: after formatting it re-stages the whole file. If you stage partial hunks
+# with `git add -p`, this will also stage the rest of that file's changes.
+
+# Staged, non-deleted JS/TS files (NUL-delimited to tolerate odd names).
+# Prettier honors .prettierignore, so vendored/ignored files are skipped.
+changed=$(git diff --cached --name-only --diff-filter=ACM -z -- '*.js' '*.ts')
+
+if [ -z "$changed" ]; then
+  exit 0
+fi
+
+# Format, then re-stage. --no-install uses the repo's local prettier (never fetches).
+printf '%s' "$changed" | xargs -0 -r npx --no-install prettier --write
+printf '%s' "$changed" | xargs -0 -r git add
+
+echo "✓ pre-commit: formatted staged JS/TS with Prettier"
+exit 0

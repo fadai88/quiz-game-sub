@@ -978,7 +978,12 @@ async function handleGameEvent(socket, event, args) {
 
   // ── joinPracticeGame ───────────────────────────────────────────────────────
   if (event === "joinPracticeGame") {
-    const { error } = joinPracticeGameSchema.validate(data);
+    // stripUnknown: the client also sends walletAddress, but the server trusts
+    // only the session wallet (below), so drop the redundant field instead of
+    // rejecting the whole payload as "Invalid input format".
+    const { error } = joinPracticeGameSchema.validate(data, {
+      stripUnknown: true,
+    });
     if (error) {
       socket.emit("joinGameFailure", "Invalid input format");
       return;
@@ -1959,7 +1964,11 @@ async function handleGameEvent(socket, event, args) {
       socket.emit("joinGameFailure", "Tournaments are not available");
       return;
     }
-    const { error } = joinTournamentGameSchema.validate(data);
+    // stripUnknown: the client also sends walletAddress; the server uses only
+    // the session wallet, so drop the extra field rather than reject the payload.
+    const { error } = joinTournamentGameSchema.validate(data, {
+      stripUnknown: true,
+    });
     if (error) {
       socket.emit("joinGameFailure", "Invalid input format");
       return;
