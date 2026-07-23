@@ -10,17 +10,18 @@
 # NOTE: after formatting it re-stages the whole file. If you stage partial hunks
 # with `git add -p`, this will also stage the rest of that file's changes.
 
-# Staged, non-deleted JS/TS files (NUL-delimited to tolerate odd names).
-# Prettier honors .prettierignore, so vendored/ignored files are skipped.
-changed=$(git diff --cached --name-only --diff-filter=ACM -z -- '*.js' '*.ts')
+# Emptiness check only — a shell variable cannot hold the NUL bytes from -z, so
+# it must NOT be used to feed xargs (that merges all filenames into one blob).
+staged=$(git diff --cached --name-only --diff-filter=ACM -- '*.js' '*.ts')
+[ -z "$staged" ] && exit 0
 
-if [ -z "$changed" ]; then
-  exit 0
-fi
-
-# Format, then re-stage. --no-install uses the repo's local prettier (never fetches).
-printf '%s' "$changed" | xargs -0 -r npx --no-install prettier --write
-printf '%s' "$changed" | xargs -0 -r git add
+# Do the real work by piping the NUL-delimited list straight into xargs — never
+# through a variable. Prettier honors .prettierignore, so vendored files are
+# skipped. --no-install uses the repo's local prettier (never fetches).
+git diff --cached --name-only --diff-filter=ACM -z -- '*.js' '*.ts' \
+  | xargs -0 npx --no-install prettier --write
+git diff --cached --name-only --diff-filter=ACM -z -- '*.js' '*.ts' \
+  | xargs -0 git add
 
 echo "✓ pre-commit: formatted staged JS/TS with Prettier"
 exit 0

@@ -41,7 +41,9 @@ function resolveConfig() {
 
   const target = TARGETS[targetKey];
   if (!target) {
-    console.error(`❌ Unknown target "${targetKey}". Use "quiz" or "practice".`);
+    console.error(
+      `❌ Unknown target "${targetKey}". Use "quiz" or "practice".`
+    );
     process.exit(1);
   }
   const jsonPath = path.isAbsolute(jsonArg)
