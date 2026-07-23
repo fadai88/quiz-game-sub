@@ -1,106 +1,170 @@
-import copy
-import random
+#!/usr/bin/env python3
+"""
+Build a quiz SQLite database from a plain-text question file.
+
+Input format — one block per question, blank lines between blocks are fine:
+
+    Some question text ending in a question mark?
+    A) first option
+    B) second option
+    C) third option
+    D) fourth option
+    Correct: B
+
+Usage:
+    python scripts/quiz_db.py <input.txt> <output.db>
+    python scripts/quiz_db.py                       # defaults: quiz.txt -> quiz.db
+
+    # Recommended — write straight into data/ so the next step finds it:
+    python scripts/quiz_db.py quiz.txt data/quiz.db
+
+Robustness (vs. the original):
+  - A malformed question is REPORTED and SKIPPED; parsing continues. The old
+    version stopped silently at the first bad block and dropped every question
+    after it, with no error.
+  - No unused imports (the old `import pandas` crashed the script when pandas
+    wasn't installed).
+  - The output DB is overwritten cleanly, so re-runs never append duplicates.
+
+Output schema (unchanged, so db_to_json.py stays compatible):
+    questions(question_id INTEGER PRIMARY KEY, question TEXT)
+    answers(answer_id INTEGER PRIMARY KEY, question_id INTEGER, answer TEXT, is_correct BOOLEAN)
+  Answers keep the "A) ..." prefix to match the existing data and game display.
+"""
+import re
 import sqlite3
-import pandas as pd
-import csv
-
-"""
+import sys
 import os
-os.chdir('C:/Users/user/Documents/Python Scripts/Python Scripts')
-"""
-def question_table():
-    question_list = []
-    quiz_dict = {}
-    file = open("quiz.txt", encoding="utf8")
-    content = file.read()
-    question_mark_index = content.find("?")
-    question = content[:question_mark_index+1].strip()
-    quiz_dict['question'] = question
-    options = content[question_mark_index+1:content.find("Correct")].strip()
-    quiz_dict['options'] = options
-    correct = content[content.find("Correct:") + 9].strip()
-    quiz_dict['correct'] = correct
-    dict_copy = copy.deepcopy(quiz_dict)
-    question_list.append(dict_copy)
-    # update the content by removing the already read question. Maybe I have to create a copy of the file.
-    while True:
-        try:
-            content = content[content.index("Correct")+10:].strip()
-            question_mark_index = content.find("?")
-            question = content[:question_mark_index+1].strip()
-            options = content[question_mark_index+1:content.find("Correct")].strip()
-            correct = content[content.find("Correct:") + 9].strip()
-            quiz_dict['question'] = question
-            quiz_dict['options'] = options
-            quiz_dict['correct'] = correct
-            dict_copy = copy.deepcopy(quiz_dict)
-            question_list.append(dict_copy)
-        except:
-            break
-    return question_list
-question_list = question_table()
 
-# select a random question from the database
-# print(question_list[random.randint(0, len(question_list))])
+# A question block is everything up to a line that starts with "Correct: <letter>".
+# "Correct:" must be at the start of a line so the word appearing inside a
+# question or option can't end a block early.
+BLOCK_RE = re.compile(
+    r"(?P<body>.*?)^[ \t]*Correct:[ \t]*(?P<letter>[A-Za-z])\b",
+    re.DOTALL | re.MULTILINE,
+)
+# First "A)" option marker (line start) — marks where the question ends.
+FIRST_A_RE = re.compile(r"^[ \t]*A\)", re.MULTILINE)
+# Each option: a letter marker at line start, text up to the next marker or end.
+OPTION_RE = re.compile(
+    r"^[ \t]*([A-D])\)[ \t]*(.*?)\s*(?=^[ \t]*[A-D]\)|\Z)",
+    re.DOTALL | re.MULTILINE,
+)
 
 
-def options_dictionary(df):
-    options_dict = {}
-    for i in range(len(df)):
-        options_list = []
-        question = df[i]['options']
-        question = question.replace('\t', ' ').replace('\n', ' ')
-        options_list.append(question[question.index('A)'):question.index('B)')-1])
-        options_list.append(question[question.index('B)'):question.index('C)')-1])
-        options_list.append(question[question.index('C)'):question.index('D)')-1])
-        options_list.append(question[question.index('D)'):])
-        options_dict[i] = options_list
-        print(options_list)
-    return options_dict
-options = options_dictionary(question_list)
+def snippet(text, n=60):
+    s = " ".join(str(text).split())
+    return (s[:n] + "…") if len(s) > n else s
 
-    
-def correct_answer(db, options_dict):
-    answer_list = []
-    for i in range(len(db)):
-        if i not in options_dict or len(options_dict[i]) < 4:
-            print(f"⚠️ Skipping question {i}: \"{db[i]['question']}\" due to missing options.")
-            continue  # Skip questions without 4 valid options
 
-        for j in range(4):
-            answer_text = options_dict[i][j]
-            if len(answer_text) == 0:
-                print(f"⚠️ Skipping empty option for question {i}: \"{db[i]['question']}\" (option {j})")
-                continue  # Skip empty answer choices
+def parse(content):
+    """Return (questions, errors). Never raises on a bad block — records it."""
+    questions, errors = [], []
+    qnum = 0
+    for m in BLOCK_RE.finditer(content):
+        qnum += 1
+        body = m.group("body")
+        letter = m.group("letter").upper()
 
-            is_correct = db[i]['correct'].upper() == chr(65 + j)  # 'A', 'B', 'C', or 'D'
-            row = [j, i, answer_text, is_correct]
-            answer_list.append(row)
-    
-    return answer_list
-answer_list = correct_answer(question_list, options)
+        a = FIRST_A_RE.search(body)
+        if not a:
+            errors.append((qnum, "no 'A)' option marker found", snippet(body)))
+            continue
 
-def create_tables(questions, answers):
-    connection = sqlite3.connect('quiz.db', timeout=5)
-    cursor = connection.cursor()
-    command1 = """ CREATE TABLE IF NOT EXISTS
-    questions(question_id INTEGER PRIMARY KEY, question TEXT)"""
-    cursor.execute(command1)
-    
-    command2 = """ CREATE TABLE IF NOT EXISTS
-    answers (answer_id INTEGER PRIMARY KEY, question_id INTEGER, answer TEXT, is_correct BOOLEAN,
-    FOREIGN KEY(question_id) REFERENCES questions(question_id))"""
-    cursor.execute(command2)
-    
-    for i in range (len(questions)):
-        cursor.execute("INSERT into questions(question_id, question) VALUES(?, ?)", (i, questions[i]['question']))
-    for i in range(len(answers)):
-        cursor.execute("INSERT into answers(answer_id, question_id, answer, is_correct) VALUES(?, ?, ?, ?)", 
-                       (i, answers[i][1], answers[i][2], answers[i][3]))
-        
-    connection.commit()
-    cursor.close()
-    connection.close()
+        question = body[: a.start()].strip()
+        options = {
+            om.group(1): om.group(2).strip()
+            for om in OPTION_RE.finditer(body[a.start():])
+        }
 
-create_tables(question_list, answer_list)
+        problems = []
+        if not question:
+            problems.append("empty question")
+        for letter_key in "ABCD":
+            if not options.get(letter_key):
+                problems.append(f"missing option {letter_key}")
+        if letter not in "ABCD":
+            problems.append(f"invalid correct letter '{letter}'")
 
+        if problems:
+            errors.append((qnum, "; ".join(problems), snippet(question or body)))
+            continue
+
+        questions.append(
+            {
+                "question": question,
+                # keep the "A) ..." prefix to match the existing DB / game display
+                "answers": [f"{L}) {options[L]}" for L in "ABCD"],
+                "correct_index": "ABCD".index(letter),
+            }
+        )
+    return questions, errors
+
+
+def write_db(questions, db_path):
+    # Overwrite cleanly so re-runs don't append duplicates.
+    parent = os.path.dirname(db_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    conn = sqlite3.connect(db_path, timeout=5)
+    cur = conn.cursor()
+    cur.execute(
+        "CREATE TABLE questions (question_id INTEGER PRIMARY KEY, question TEXT)"
+    )
+    cur.execute(
+        "CREATE TABLE answers ("
+        "answer_id INTEGER PRIMARY KEY, question_id INTEGER, answer TEXT, "
+        "is_correct BOOLEAN, FOREIGN KEY(question_id) REFERENCES questions(question_id))"
+    )
+
+    answer_id = 0
+    for qid, q in enumerate(questions):
+        cur.execute(
+            "INSERT INTO questions (question_id, question) VALUES (?, ?)",
+            (qid, q["question"]),
+        )
+        for j, ans in enumerate(q["answers"]):
+            cur.execute(
+                "INSERT INTO answers (answer_id, question_id, answer, is_correct) "
+                "VALUES (?, ?, ?, ?)",
+                (answer_id, qid, ans, 1 if j == q["correct_index"] else 0),
+            )
+            answer_id += 1
+
+    conn.commit()
+    conn.close()
+
+
+def main():
+    in_path = sys.argv[1] if len(sys.argv) > 1 else "quiz.txt"
+    out_path = sys.argv[2] if len(sys.argv) > 2 else "quiz.db"
+
+    if not os.path.exists(in_path):
+        print(f"ERROR: input file not found: {in_path}")
+        sys.exit(1)
+
+    with open(in_path, encoding="utf-8") as f:
+        content = f.read()
+
+    questions, errors = parse(content)
+
+    for qnum, reason, where in errors:
+        print(f"⚠️  Skipped question #{qnum}: {reason}  ->  {where}")
+
+    if not questions:
+        print("ERROR: no valid questions parsed — nothing written.")
+        sys.exit(1)
+
+    write_db(questions, out_path)
+
+    summary = f"✅ Wrote {len(questions)} questions to {out_path}"
+    if errors:
+        summary += f"  ({len(errors)} skipped — see warnings above)"
+    print(summary)
+
+
+if __name__ == "__main__":
+    main()

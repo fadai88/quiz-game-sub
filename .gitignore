@@ -23,6 +23,10 @@ test-ledger
 *.db
 *.db-journal
 
+# Question data — private; questions must never be committed
+# (*.db above already covers data/*.db; this covers the generated JSON banks)
+data/*.json
+
 # Dependencies
 /node_modules
 /.pnp

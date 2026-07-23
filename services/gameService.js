@@ -42,6 +42,24 @@ const {
 
 // Quiz model is expected to be in models/Quiz — adjust path if different
 const Quiz = require("../models/Quiz");
+const PracticeQuiz = require("../models/PracticeQuiz");
+
+// Pick the question bank for a room. Free practice games draw from the separate
+// PracticeQuiz collection; every real game — staked, ranked, or tournament —
+// uses the main Quiz bank, so the paid pool is never served in free play.
+// Ordering matters: a staked room is real even though createGameRoom defaults an
+// option-less room's gameMode to "practice" (e.g. the legacy joinGame path).
+function questionBankForRoom(room) {
+  const staked = Number(room?.betAmount) > 0;
+  const mode = room?.gameMode;
+  if (staked || mode === GAME_MODES.RANKED || mode === GAME_MODES.TOURNAMENT) {
+    return Quiz;
+  }
+  if (mode === GAME_MODES.PRACTICE || room?.isPractice === true) {
+    return PracticeQuiz;
+  }
+  return Quiz; // safe default: never serve the practice bank to an unclassified game
+}
 
 // ─── Abort with refund ────────────────────────────────────────────────────────
 
@@ -328,7 +346,7 @@ async function startGame(roomId) {
       }
     }
 
-    const rawQuestions = await Quiz.aggregate([
+    const rawQuestions = await questionBankForRoom(room).aggregate([
       ...matchStage,
       { $sample: { size: 7 } },
     ]);
@@ -404,7 +422,7 @@ async function startSinglePlayerGame(roomId) {
       }
     }
 
-    const rawQuestions = await Quiz.aggregate([
+    const rawQuestions = await questionBankForRoom(room).aggregate([
       ...matchStage,
       { $sample: { size: 7 } },
     ]);
