@@ -62,11 +62,46 @@ const addMetadata = winston.format((info) => {
     return info;
 });
 
+// Convert an Error into a plain, serializable object. message/stack are
+// non-enumerable on Error, so JSON.stringify(err) yields "{}" — this exposes them.
+const errToObj = (e) => {
+    const o = { message: e.message, stack: e.stack };
+    if (e.code !== undefined) o.code = e.code;
+    for (const k of Object.keys(e)) o[k] = e[k]; // any custom enumerable props
+    return o;
+};
+
+// Replace Error objects nested in log metadata (e.g. the ubiquitous
+// logger.error("msg", { error: err })) with plain objects so the message and
+// stack are logged. Winston's built-in format.errors() only unwraps an Error
+// passed as the top-level log argument, not one buried in metadata — which is
+// why those previously showed up as {"error":{}}.
+const serializeErrors = winston.format((info) => {
+    for (const k of Object.keys(info)) {
+        const v = info[k];
+        if (v instanceof Error) {
+            info[k] = errToObj(v);
+        } else if (v && typeof v === 'object' && !Array.isArray(v)) {
+            // One level deep, without mutating the caller's object.
+            let copy = null;
+            for (const k2 of Object.keys(v)) {
+                if (v[k2] instanceof Error) {
+                    copy = copy || { ...v };
+                    copy[k2] = errToObj(v[k2]);
+                }
+            }
+            if (copy) info[k] = copy;
+        }
+    }
+    return info;
+});
+
 // JSON format for production (structured, parseable)
 const jsonFormat = winston.format.combine(
     winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
     addMetadata(),
     winston.format.errors({ stack: true }),
+    serializeErrors(),
     winston.format.json()
 );
 
@@ -75,6 +110,7 @@ const consoleFormat = winston.format.combine(
     winston.format.colorize(),
     winston.format.timestamp({ format: 'HH:mm:ss.SSS' }),
     winston.format.errors({ stack: true }),
+    serializeErrors(),
     winston.format.printf(({ timestamp, level, message, category, event, correlationId, walletAddress, ...meta }) => {
         let msg = `${timestamp} [${level}]`;
         

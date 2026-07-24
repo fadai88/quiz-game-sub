@@ -6,3 +6,8 @@ dist
 build
 test-ledger
 public/vendor/
+
+# Repo-root legacy files use a different (4-space) style and are intentionally
+# not covered by CI lint (which only checks */*.js). Keep the hook from
+# reformatting them.
+/*.js
