@@ -31,10 +31,8 @@ const {
   chooseBotName,
   determineBotDifficulty,
 } = require("./botService");
-const {
-  updatePlayerStats,
-  refundToVirtualBalance,
-} = require("./playerService");
+const { updatePlayerStats } = require("./playerService");
+const { queueOnChainRefund } = require("./refunds");
 const {
   acquireIdempotencyLock,
   releaseIdempotencyLock,
@@ -69,7 +67,12 @@ async function abortGameWithRefund(roomId, reason) {
     if (!room) return;
 
     for (const player of room.players.filter((p) => !p.isBot)) {
-      await refundToVirtualBalance(player.username, room.betAmount, reason);
+      await queueOnChainRefund(
+        player.username,
+        room.betAmount,
+        `refund:${roomId}:${player.username}`,
+        reason
+      );
     }
 
     await GameSession.findOneAndUpdate(

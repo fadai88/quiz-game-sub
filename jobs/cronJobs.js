@@ -12,7 +12,7 @@ const context = require("../context");
 const GameSession = require("../models/GameSession");
 const PrizeCycle = require("../models/PrizeCycle");
 const PaymentQueue = require("../models/PaymentQueue");
-const { refundToVirtualBalance } = require("../services/playerService");
+const { queueOnChainRefund } = require("../services/refunds");
 const {
   trackFailedPayout,
   trackStuckPayment,
@@ -49,14 +49,17 @@ async function registerCronJobs(botDetector = null) {
         logger.info(`🔄 Auto-refunding stuck session: ${game.roomId}`);
         for (const player of game.players) {
           if (!player.walletAddress) continue;
-          const success = await refundToVirtualBalance(
+          // On-chain refund, same idempotency key the restart-recovery/abort
+          // paths use, so a game can't be double-refunded across them.
+          const success = await queueOnChainRefund(
             player.walletAddress,
             game.betAmount,
-            `System Crash Recovery (Room ${game.roomId})`
+            `refund:${game.roomId}:${player.walletAddress}`,
+            `Safety-net crash recovery (room ${game.roomId})`
           );
           if (success)
             logger.info(
-              `✅ Refunded ${player.walletAddress} for crashed game ${game.roomId}`
+              `✅ Refund queued for ${player.walletAddress} — crashed game ${game.roomId}`
             );
         }
         game.status = "refunded";

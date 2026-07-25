@@ -21,6 +21,10 @@ const { GAME_MODES, isPotMode } = require("../config/constants");
 
 // ─── Virtual balance refund ───────────────────────────────────────────────────
 
+// DEPRECATED — do not use for pot-mode stakes. virtualBalance can't be spent or
+// withdrawn, so this never actually returns funds. All stake refunds now go
+// on-chain via services/refunds.js `queueOnChainRefund`. Kept only so nothing
+// that still references it breaks; no live caller remains.
 async function refundToVirtualBalance(walletAddress, amount, reason) {
   try {
     const refundAmount = fromAtomicUnits(amount);

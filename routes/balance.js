@@ -25,7 +25,7 @@ const PrizeCycle = require("../models/PrizeCycle");
 const CycleStat = require("../models/CycleStat");
 const WithheldPayout = require("../models/WithheldPayout");
 const GameSession = require("../models/GameSession");
-const { refundToVirtualBalance } = require("../services/playerService");
+const { queueOnChainRefund } = require("../services/refunds");
 const { setDraining, isDraining } = require("../utils/maintenance");
 const {
   walletParamSchema,
@@ -408,9 +408,10 @@ router.post(
       }
 
       if (action === "refund") {
-        const ok = await refundToVirtualBalance(
+        const ok = await queueOnChainRefund(
           record.walletAddress,
           record.stakeAmount,
+          `refund:withheld:${record._id}`,
           `Withheld pot resolved (refund) — room ${record.roomId}`
         );
         if (!ok) {

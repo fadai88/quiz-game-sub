@@ -33,39 +33,12 @@ const {
   removeFromMatchmakingPool,
 } = require("./roomManager");
 const { isPotMode } = require("../config/constants");
-const { formatUSDC, VALID_BET_AMOUNTS_ATOMIC } = require("../utils/usdcUtils");
+const { VALID_BET_AMOUNTS_ATOMIC } = require("../utils/usdcUtils");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Queue one on-chain refund. Idempotent via the deterministic gameId.
-async function queueRefund(wallet, amountAtomic, gameId, reason) {
-  if (!wallet || !amountAtomic || amountAtomic <= 0) return false;
-  try {
-    await PaymentQueue.queuePayment(
-      wallet,
-      Number(amountAtomic),
-      gameId,
-      Number(amountAtomic),
-      { type: "restart_refund", reason }
-    );
-    logger.info(
-      `[RESTART-REFUND] queued ${formatUSDC(
-        amountAtomic
-      )} → ${wallet} (${gameId})`
-    );
-    return true;
-  } catch (err) {
-    // Duplicate gameId (already refunded) → idempotent success.
-    if (err.code === 11000 || /already/i.test(err.message || "")) {
-      logger.info(`[RESTART-REFUND] ${gameId} already refunded — skipping`);
-      return true;
-    }
-    logger.error(`[RESTART-REFUND] failed for ${gameId}`, {
-      error: err.message,
-    });
-    return false;
-  }
-}
+// Shared on-chain refund helper (idempotent via gameId). Aliased for readability.
+const { queueOnChainRefund: queueRefund } = require("./refunds");
 
 // True if this game already paid a winner (settlePotGame queues with gameId=roomId).
 async function alreadySettled(roomId) {

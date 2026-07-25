@@ -75,8 +75,8 @@ const {
   updatePlayerStats,
   findPlayerActiveRoom,
   handlePlayerLeftWin,
-  refundToVirtualBalance,
 } = require("../services/playerService");
+const { queueOnChainRefund } = require("../services/refunds");
 const {
   verifyAndValidateTransaction,
 } = require("../services/transactionVerifier");
@@ -110,28 +110,29 @@ async function refundStakeAfterFailure(
   socket,
   walletAddress,
   betAmount,
+  nonce,
   reason
 ) {
   logger.error(
-    `⚠️ Matchmaking failed AFTER payment for ${walletAddress}. Refunding to virtual balance.`,
+    `⚠️ Matchmaking failed AFTER payment for ${walletAddress}. Refunding stake on-chain.`,
     { reason }
   );
 
-  const refunded = await refundToVirtualBalance(
+  const refunded = await queueOnChainRefund(
     walletAddress,
     betAmount,
+    `refund:stake:${nonce}`,
     reason
   );
 
   if (refunded) {
     socket.emit("matchmakingError", {
       error:
-        "Matchmaking error, but your funds were saved to your Virtual Balance. Please refresh and check balance.",
-      code: "REFUNDED_TO_BALANCE",
+        "Matchmaking error — your stake is being refunded to your wallet. Please try again shortly.",
+      code: "REFUNDED_TO_WALLET",
       refundReason: reason,
     });
   } else {
-    // refundToVirtualBalance already raised a critical REFUND_FAILED alert.
     socket.emit("matchmakingError", {
       error:
         "Matchmaking failed. Our team has been notified and will process your refund manually within 24 hours.",
@@ -665,9 +666,12 @@ function registerConnectionHandler(io) {
             // Pot mode collects the stake up front, so a player who leaves the
             // queue before being matched must get it back — no game was played.
             if (isPotMode() && stakedAmount > 0) {
-              await refundToVirtualBalance(
+              // On-chain refund; same key the restart-recovery pool scan uses,
+              // so a leaver can't be refunded twice across the two paths.
+              await queueOnChainRefund(
                 removed.walletAddress,
                 stakedAmount,
+                `refund:pool:${removed.walletAddress}:${removed.joinTime}`,
                 "Left matchmaking queue before match"
               );
             }
@@ -1004,8 +1008,7 @@ async function handleGameEvent(socket, event, args) {
           context.config.TREASURY_WALLET.toBase58(),
           data.nonce
         );
-        const { _internal } = require("../services/restartRecovery");
-        await _internal.queueRefund(
+        await queueOnChainRefund(
           socket.user.walletAddress,
           data.betAmount,
           `refund:drain:${data.nonce}`,
@@ -1772,6 +1775,7 @@ async function handleGameEvent(socket, event, args) {
           socket,
           walletAddress,
           betAmount,
+          nonce,
           "Backend reCAPTCHA validation failed"
         );
         trackRecaptchaFailure(walletAddress, {
@@ -1796,6 +1800,7 @@ async function handleGameEvent(socket, event, args) {
               socket,
               walletAddress,
               betAmount,
+              nonce,
               "Already in queue"
             );
           } else {
@@ -1969,6 +1974,7 @@ async function handleGameEvent(socket, event, args) {
           socket,
           walletAddress,
           betAmount,
+          nonce,
           "Matchmaking error after payment"
         );
       } else {
