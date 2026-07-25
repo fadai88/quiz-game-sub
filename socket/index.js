@@ -47,6 +47,7 @@ const {
   joinTournamentGameSchema,
 } = require("../config/schemas");
 const { isPotMode, isSubscriptionMode } = require("../config/constants");
+const { isDraining } = require("../utils/maintenance");
 
 const {
   createGameRoom,
@@ -975,6 +976,53 @@ async function handleGameEvent(socket, event, args) {
   const io = context.io;
   const redisClient = context.redisClient;
   const data = args[0];
+
+  // ── Maintenance / drain mode ──────────────────────────────────────────────
+  // During a planned restart the server stops creating NEW games. In-flight
+  // games are untouched (they finish, or are refunded on restart). The client
+  // checks /api/maintenance before staking, so a well-behaved client never
+  // reaches here with a stake — but if one raced in, verify and refund it
+  // on-chain so nothing is stranded.
+  const GAME_CREATING_EVENTS = [
+    "joinPracticeGame",
+    "joinGame",
+    "joinHumanMatchmaking",
+    "joinTournamentGame",
+  ];
+  if (GAME_CREATING_EVENTS.includes(event) && (await isDraining())) {
+    if (
+      event === "joinHumanMatchmaking" &&
+      isPotMode() &&
+      data?.transactionSignature &&
+      data?.nonce
+    ) {
+      try {
+        await verifyAndValidateTransaction(
+          data.transactionSignature,
+          data.betAmount,
+          socket.user.walletAddress,
+          context.config.TREASURY_WALLET.toBase58(),
+          data.nonce
+        );
+        const { _internal } = require("../services/restartRecovery");
+        await _internal.queueRefund(
+          socket.user.walletAddress,
+          data.betAmount,
+          `refund:drain:${data.nonce}`,
+          "maintenance — staked during drain"
+        );
+      } catch (_) {
+        // No valid stake landed → nothing to refund.
+      }
+    }
+    const failEvent =
+      event === "joinHumanMatchmaking" ? "matchmakingError" : "joinGameFailure";
+    socket.emit(
+      failEvent,
+      "Server is undergoing brief maintenance. Please try again in a moment."
+    );
+    return;
+  }
 
   // ── joinPracticeGame ───────────────────────────────────────────────────────
   if (event === "joinPracticeGame") {

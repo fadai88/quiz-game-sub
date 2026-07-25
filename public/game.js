@@ -2203,6 +2203,20 @@ async function stakeAndJoinMatchmaking() {
     throw new Error("Please choose a valid stake amount");
   }
 
+  // Never send funds while the server is draining for a planned restart. Checked
+  // fresh here (not the cached config) since drain state changes at runtime. If
+  // the check itself errors, proceed — the server still gates and refunds.
+  try {
+    const m = await fetch("/api/maintenance").then((r) => r.json());
+    if (m && m.draining) {
+      throw new Error(
+        "Server is undergoing brief maintenance. Please try again in a moment."
+      );
+    }
+  } catch (e) {
+    if (e && e.message && e.message.includes("maintenance")) throw e;
+  }
+
   let recaptchaToken = null;
   if (window.recaptchaEnabled) {
     waitingMessage.textContent = "Verifying security...";

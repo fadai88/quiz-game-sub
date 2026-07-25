@@ -24,7 +24,9 @@ const PaymentQueue = require("../models/PaymentQueue");
 const PrizeCycle = require("../models/PrizeCycle");
 const CycleStat = require("../models/CycleStat");
 const WithheldPayout = require("../models/WithheldPayout");
+const GameSession = require("../models/GameSession");
 const { refundToVirtualBalance } = require("../services/playerService");
+const { setDraining, isDraining } = require("../utils/maintenance");
 const {
   walletParamSchema,
   paymentIdParamSchema,
@@ -490,6 +492,60 @@ async function finalizeResolution(record, status, adminUser, note, payoutId) {
     `[WITHHELD] Record ${record._id} (room ${record.roomId}) resolved as ${status} by ${adminUser.walletAddress}`
   );
 }
+
+// ─── Maintenance / drain mode ─────────────────────────────────────────────────
+// Before a planned restart, an operator enables drain mode so the server stops
+// accepting NEW games (in-flight games are unaffected; they get refunded on
+// restart). Cleared automatically on the next startup.
+
+// GET /api/maintenance — public; the client checks this before letting a user stake.
+router.get("/maintenance", async (req, res) => {
+  res.json({ draining: await isDraining() });
+});
+
+// GET /api/admin/maintenance — admin; drain state + how many games are still active.
+router.get(
+  "/admin/maintenance",
+  authenticate,
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const [draining, activeGames] = await Promise.all([
+        isDraining(),
+        GameSession.countDocuments({ status: "active" }),
+      ]);
+      res.json({ draining, activeGames });
+    } catch (error) {
+      logger.error("[MAINTENANCE] status error:", { error: error.message });
+      res.status(500).json({ error: "Failed to read maintenance status" });
+    }
+  }
+);
+
+// POST /api/admin/maintenance { enabled: bool } — admin; turn drain on/off.
+router.post(
+  "/admin/maintenance",
+  authenticate,
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const enabled = req.body?.enabled === true;
+      await setDraining(enabled);
+      logger.warn(
+        `[MAINTENANCE] drain ${enabled ? "ENABLED" : "disabled"} by ${
+          req.user.walletAddress
+        }`
+      );
+      const activeGames = await GameSession.countDocuments({
+        status: "active",
+      });
+      res.json({ success: true, draining: enabled, activeGames });
+    } catch (error) {
+      logger.error("[MAINTENANCE] toggle error:", { error: error.message });
+      res.status(500).json({ error: "Failed to set maintenance mode" });
+    }
+  }
+);
 
 // ─── GET /api/tokens.json (honeypot — unchanged) ─────────────────────────────
 

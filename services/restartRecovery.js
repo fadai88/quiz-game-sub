@@ -234,6 +234,16 @@ async function recoverInFlightOnStartup() {
     return;
   }
 
+  // A fresh instance is, by definition, no longer draining — clear any
+  // maintenance flag left set by the operator before the restart.
+  try {
+    await require("../utils/maintenance").setDraining(false);
+  } catch (e) {
+    logger.warn("[RESTART-RECOVERY] could not clear drain flag", {
+      error: e.message,
+    });
+  }
+
   try {
     logger.info("[RESTART-RECOVERY] scanning for in-flight games/stakes…");
     const g = await recoverGames();
