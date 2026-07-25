@@ -242,6 +242,14 @@ mongoose.connection.once('open', async () => {
         context.set('paymentProcessor', paymentProcessor);
         console.log('✅ PaymentProcessor initialized');
 
+        // Refund any stakes the previous instance left in-flight (graceful
+        // restart OR crash). Runs in the background — it only queues on-chain
+        // refunds; the PaymentProcessor above sends them. Idempotent, so a
+        // reboot mid-recovery can't double-refund.
+        require('./services/restartRecovery')
+            .recoverInFlightOnStartup()
+            .catch(err => logger.error('[RESTART-RECOVERY] startup call failed:', { error: err.message }));
+
         // gameService consults this at payout time; share it via context rather
         // than importing socket/index.js, which already requires gameService.
         context.set('botDetector', botDetector);

@@ -10,7 +10,8 @@ const GameSessionSchema = new mongoose.Schema({
   betAmount: { type: Number, required: true },
   gameMode: {
     type: String,
-    enum: ["practice", "tournament"],
+    // "ranked" = pot-mode staked matchmaking; "human" = legacy bet-based joinGame.
+    enum: ["practice", "tournament", "ranked", "human"],
     default: "practice",
   },
   players: [

@@ -619,8 +619,11 @@ const gracefulShutdown = async (signal) => {
     process.exit(0);
 };
 
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+// NOTE: no SIGTERM/SIGINT handlers here on purpose. server.js is the single
+// shutdown orchestrator — it does its work (refunds, closing sockets/DB) and
+// then calls this module's gracefulShutdown() at the very end. A competing
+// handler here used to call process.exit(0) ~100ms after the signal, racing
+// with and cutting off server.js's shutdown work.
 
 // ============================================================================
 // EXPORT

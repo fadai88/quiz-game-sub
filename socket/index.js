@@ -1866,6 +1866,23 @@ async function handleGameEvent(socket, event, args) {
         );
         await updateGameRoom(roomId, room);
 
+        // Durable record so restart recovery can refund both stakes if the
+        // server goes down mid-game (Redis rooms expire after 1h; this doesn't).
+        await GameSession.create({
+          roomId,
+          betAmount,
+          gameMode: "ranked",
+          players: [
+            { walletAddress: p1.walletAddress, socketId: p1.socketId },
+            { walletAddress: p2.walletAddress, socketId: p2.socketId },
+          ],
+          status: "active",
+        }).catch((e) =>
+          logger.error("[MATCHMAKING] GameSession.create failed:", {
+            error: e.message,
+          })
+        );
+
         p1Socket.join(roomId);
         p1Socket.roomId = roomId;
         p1Socket.matchmakingPool = null;
