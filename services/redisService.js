@@ -74,6 +74,35 @@ async function initializeRateLimiter(redisClient) {
 
 // ─── Redis init ───────────────────────────────────────────────────────────────
 
+// Build TLS options for Redis, verifying certificates by DEFAULT. Redis is part
+// of the security boundary here (sessions, login challenges, nonce/replay state,
+// blocklists, rate limits), so an unverified TLS connection is a MITM hole.
+//   - Private-CA / self-signed server → set REDIS_CA_CERT (PEM) rather than
+//     disabling verification.
+//   - REDIS_TLS_REJECT_UNAUTHORIZED=false is allowed only OUTSIDE production; in
+//     production it is a deploy-blocking misconfiguration.
+function buildRedisTlsOptions() {
+  const isProd = (process.env.NODE_ENV || "development") === "production";
+  const reject = process.env.REDIS_TLS_REJECT_UNAUTHORIZED !== "false";
+
+  if (!reject && isProd) {
+    console.error(
+      "❌ FATAL: REDIS_TLS_REJECT_UNAUTHORIZED=false is not allowed in production — " +
+        "it disables Redis TLS certificate verification (MITM risk for sessions, " +
+        "nonces, blocklists and rate limits). For a private-CA or self-signed " +
+        "Redis, set REDIS_CA_CERT to the CA certificate instead."
+    );
+    process.exit(1);
+  }
+
+  // Platforms often store the PEM with escaped newlines — normalize them.
+  const ca = process.env.REDIS_CA_CERT
+    ? process.env.REDIS_CA_CERT.replace(/\\n/g, "\n")
+    : undefined;
+
+  return { rejectUnauthorized: reject, ...(ca && { ca }) };
+}
+
 async function initializeRedis() {
   let redisClient;
 
@@ -92,21 +121,12 @@ async function initializeRedis() {
         commandTimeout: 5000,
       };
       if (useTLS) {
-        // Verify the server certificate by DEFAULT — Redis holds sessions,
-        // nonces, blocklists, rate-limit and idempotency state, so an
-        // unverified TLS connection is MITM-able. Disable only via an explicit
-        // env gate for local dev / self-signed setups.
-        const reject = process.env.REDIS_TLS_REJECT_UNAUTHORIZED !== "false";
-        if (
-          !reject &&
-          (process.env.NODE_ENV || "development") === "production"
-        ) {
-          console.warn(
-            "⚠️  Redis TLS certificate verification is DISABLED in production (REDIS_TLS_REJECT_UNAUTHORIZED=false)"
-          );
-        }
-        console.log(`🔒 TLS enabled for Redis (verify cert: ${reject})`);
-        opts.tls = { rejectUnauthorized: reject };
+        opts.tls = buildRedisTlsOptions();
+        console.log(
+          `🔒 TLS enabled for Redis (verify cert: ${
+            opts.tls.rejectUnauthorized
+          }${opts.tls.ca ? ", custom CA" : ""})`
+        );
       } else {
         console.log("📡 Using non-TLS Redis (Railway internal)");
       }
@@ -118,12 +138,7 @@ async function initializeRedis() {
         port: process.env.REDIS_PORT || 6379,
         password: process.env.REDIS_PASSWORD,
         tls:
-          process.env.REDIS_TLS === "true"
-            ? {
-                rejectUnauthorized:
-                  process.env.REDIS_TLS_REJECT_UNAUTHORIZED !== "false",
-              }
-            : undefined,
+          process.env.REDIS_TLS === "true" ? buildRedisTlsOptions() : undefined,
         retryStrategy: (times) => Math.min(times * 50, 2000),
         maxRetriesPerRequest: 3,
         retryDelayOnFailover: 100,
@@ -210,6 +225,7 @@ async function criticalRedisOp(
 module.exports = {
   initializeRedis,
   initializeSocketAdapter,
+  buildRedisTlsOptions,
   safeRedisOp,
   criticalRedisOp,
   eventLimiters,
