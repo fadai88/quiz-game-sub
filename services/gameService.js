@@ -535,6 +535,26 @@ async function startSinglePlayerGame(roomId) {
 
 // ─── Question round ───────────────────────────────────────────────────────────
 
+// Charge every unanswered human the full time that elapsed on the question. Ties
+// break on the LOWER totalResponseTime, so if a timeout didn't add to the total,
+// not answering a hard question would beat answering it slowly. Bots are timed
+// separately. Mutates `room` in place; returns [{ username, responseTime }] for
+// the players that were timed out (for the playerAnswered emit).
+function markUnansweredPlayersTimedOut(room, now) {
+  const elapsed = now - room.questionStartTime;
+  const timedOut = [];
+  for (const player of room.players) {
+    if (player.isBot || player.answered) continue;
+    player.answered = true;
+    player.lastAnswer = -1;
+    player.lastResponseTime = elapsed;
+    player.totalResponseTime = (player.totalResponseTime || 0) + elapsed;
+    room.answersReceived++;
+    timedOut.push({ username: player.username, responseTime: elapsed });
+  }
+  return timedOut;
+}
+
 async function startNextQuestion(roomId) {
   const io = context.io;
   const redisClient = context.redisClient;
@@ -667,19 +687,10 @@ async function startNextQuestion(roomId) {
           latest._shouldStopGame = true;
           return latest;
         }
-        latest._timedOutPlayers = [];
-        latest.players.forEach((player) => {
-          if (!player.answered && !player.isBot) {
-            player.answered = true;
-            player.lastAnswer = -1;
-            player.lastResponseTime = Date.now() - latest.questionStartTime;
-            latest.answersReceived++;
-            latest._timedOutPlayers.push({
-              username: player.username,
-              responseTime: player.lastResponseTime,
-            });
-          }
-        });
+        latest._timedOutPlayers = markUnansweredPlayersTimedOut(
+          latest,
+          Date.now()
+        );
         return latest;
       });
 
@@ -855,19 +866,10 @@ async function restartCurrentQuestion(roomId) {
           latest._shouldStopGame = true;
           return latest;
         }
-        latest._timedOutPlayers = [];
-        latest.players.forEach((player) => {
-          if (!player.answered && !player.isBot) {
-            player.answered = true;
-            player.lastAnswer = -1;
-            player.lastResponseTime = Date.now() - latest.questionStartTime;
-            latest.answersReceived++;
-            latest._timedOutPlayers.push({
-              username: player.username,
-              responseTime: player.lastResponseTime,
-            });
-          }
-        });
+        latest._timedOutPlayers = markUnansweredPlayersTimedOut(
+          latest,
+          Date.now()
+        );
         return latest;
       });
 
@@ -1246,6 +1248,7 @@ module.exports = {
   startGame,
   startSinglePlayerGame,
   startNextQuestion,
+  markUnansweredPlayersTimedOut,
   completeQuestion,
   handleGameOver,
   abortGameWithRefund,
