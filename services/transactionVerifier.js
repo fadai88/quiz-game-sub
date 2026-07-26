@@ -9,6 +9,7 @@ const context = require("../context");
 const TransactionLog = require("../models/TransactionLog");
 const { safeRedisOp } = require("./redisService");
 const { formatUSDC } = require("../utils/usdcUtils");
+const { claimSignatureForVerification } = require("../utils/txReplayGuard");
 
 // ─── Blockchain status check ──────────────────────────────────────────────────
 
@@ -97,69 +98,24 @@ async function verifyAndValidateTransaction(
   // is rejected. Only once that row is older than STALE_PENDING_MS (i.e. the
   // owning attempt must have died) is a retry allowed. (Mirrors
   // SubscriptionService, with added protection against concurrent double-spend.)
-  const STALE_PENDING_MS = 120_000; // > any single verification attempt (~12-40s)
   try {
-    const existing = await TransactionLog.findOne({ signature });
-    if (existing !== null) {
-      if (existing.status === "verified") {
-        logger.error(
-          `❌ REPLAY ATTACK DETECTED: ${signature} already processed`
-        );
-        throw new Error(
-          "Transaction already processed - replay attack prevented"
-        );
-      }
-      if (existing.status === "pending") {
-        const ageMs = Date.now() - new Date(existing.verifiedAt).getTime();
-        if (ageMs < STALE_PENDING_MS) {
-          // Another verification for this signature is still in-flight.
-          logger.warn(
-            `⏳ CONCURRENT SUBMISSION: ${signature} already being processed (${Math.round(
-              ageMs / 1000
-            )}s ago)`
-          );
-          throw new Error("Transaction already being processed");
-        }
-        logger.warn(
-          `♻️  Reclaiming stale pending signature ${signature} (${Math.round(
-            ageMs / 1000
-          )}s old — prior attempt did not finish)`
-        );
-      } else {
-        // 'failed' — a prior attempt failed on-chain/verification; allow retry.
-        logger.info(
-          `ℹ️  Retrying previously ${existing.status} signature ${signature}`
-        );
-      }
-      // Re-arm the sentinel so this attempt owns the in-flight window.
-      await TransactionLog.updateOne(
-        { signature },
-        { $set: { status: "pending", verifiedAt: new Date() } }
-      );
-    } else {
-      // First sighting — insert a 'pending' sentinel. The unique index makes a
-      // concurrent duplicate submission fail with 11000 (handled below).
-      await TransactionLog.create({
-        signature,
-        walletAddress: senderAddress,
-        betAmount: expectedAmount,
-        verifiedAt: new Date(),
-        status: "pending",
-      });
-      logger.info("✅ MongoDB: New transaction recorded (pending)");
-    }
+    await claimSignatureForVerification(signature, {
+      walletAddress: senderAddress,
+      betAmount: expectedAmount,
+    });
+    logger.info("✅ MongoDB: signature claimed for verification (pending)");
   } catch (dbErr) {
-    if (dbErr.code === 11000) {
-      // Lost the insert race — another request created the sentinel first.
-      logger.error(`❌ RACE CONDITION: ${signature} duplicate key error`);
-      throw new Error("Transaction already being processed");
+    if (dbErr.replay) {
+      logger.error(`❌ REPLAY ATTACK DETECTED: ${signature} already processed`);
+      throw new Error(
+        "Transaction already processed - replay attack prevented"
+      );
     }
-    if (
-      dbErr.message.includes("replay") ||
-      dbErr.message.includes("already processed") ||
-      dbErr.message.includes("already being processed")
-    ) {
-      throw dbErr;
+    if (dbErr.concurrent) {
+      logger.warn(
+        `⏳ CONCURRENT SUBMISSION: ${signature} already being processed`
+      );
+      throw new Error("Transaction already being processed");
     }
     logger.error("❌ MongoDB audit failed:", { error: dbErr.message });
     throw new Error("Audit service unavailable");

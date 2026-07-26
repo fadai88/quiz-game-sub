@@ -30,6 +30,7 @@ const {
   trackFailedLogin,
   trackOrphanedPlayer,
   trackRecaptchaFailure,
+  trackFailedPayout,
 } = require("../config/alerts");
 
 const {
@@ -1940,22 +1941,40 @@ async function handleGameEvent(socket, event, args) {
             "[MATCHMAKING] GameSession.create failed — aborting and refunding both stakes:",
             { error: e.message }
           );
-          await queueOnChainRefund(
+          const r1 = await queueOnChainRefund(
             p1.walletAddress,
             betAmount,
             `refund:${roomId}:${p1.walletAddress}`,
             "Game setup failed"
           );
-          await queueOnChainRefund(
+          const r2 = await queueOnChainRefund(
             p2.walletAddress,
             betAmount,
             `refund:${roomId}:${p2.walletAddress}`,
             "Game setup failed"
           );
-          await deleteGameRoom(roomId).catch(() => {});
-          await redisClient.del(`room:${roomId}`).catch(() => {});
+          if (r1 && r2) {
+            // Refunds durably queued — safe to clear the room.
+            await deleteGameRoom(roomId).catch(() => {});
+            await redisClient.del(`room:${roomId}`).catch(() => {});
+          } else {
+            // Could not queue the refunds — almost certainly the SAME DB outage
+            // that failed GameSession.create (refund queue writes go to Mongo
+            // too). PRESERVE the Redis room: it's now the only recovery state,
+            // and restart recovery (Pass 1, Redis rooms) will refund from it.
+            // Deleting it here would strand both verified stakes.
+            logger.error(
+              "[MATCHMAKING] CRITICAL: could not queue refunds after GameSession failure — preserving room for restart recovery",
+              { roomId, r1, r2 }
+            );
+            await trackFailedPayout({
+              message: `Stranded-stake risk: refund queue failed during a DB outage (room ${roomId})`,
+              roomId,
+              betAmount,
+            });
+          }
           const msg =
-            "Could not start the game. Your stake is being refunded to your wallet.";
+            "Could not start the game. Your stake will be refunded to your wallet.";
           io.to(p1.socketId).emit("matchmakingError", msg);
           io.to(p2.socketId).emit("matchmakingError", msg);
           return;

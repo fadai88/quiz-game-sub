@@ -8,6 +8,7 @@ const context = require("../context");
 const logger = require("../logger");
 const { safeRedisOp } = require("./redisService");
 const { SecurityLogger, AuditLogger } = require("../utils/securityLogger");
+const { claimSignatureForVerification } = require("../utils/txReplayGuard");
 
 class SubscriptionService {
   constructor(config) {
@@ -57,80 +58,32 @@ class SubscriptionService {
     //   'verified' → reject                 (genuine replay attack)
     const redisKey = `tx:${transactionSignature}`;
     try {
-      const existing = await TransactionLog.findOne({
-        signature: transactionSignature,
+      // Atomic single-flight claim (shared with transactionVerifier). Rejects a
+      // genuine replay ('verified') and concurrent duplicates ('fresh pending'),
+      // while allowing a 'failed'/stale-'pending' retry.
+      await claimSignatureForVerification(transactionSignature, {
+        walletAddress,
+        betAmount: expectedAmount,
       });
-
-      const STALE_PENDING_MS = 120_000; // > any single verification attempt
-      if (existing !== null) {
-        if (existing.status === "verified") {
-          // This signature was already successfully processed.
-          logger.error(
-            `[SUB] ❌ REPLAY ATTACK: signature ${transactionSignature} already verified in TransactionLog`
-          );
-          SecurityLogger.log("subscription_replay_attack", {
-            transactionSignature,
-            walletAddress,
-            existingStatus: existing.status,
-          });
-          throw new Error(
-            "Transaction already processed — replay attack prevented"
-          );
-        }
-        if (existing.status === "pending") {
-          // A *fresh* pending row means another request for this signature is
-          // in-flight — reject the concurrent duplicate (single-flight). Only a
-          // stale one (owning attempt must have died) may be retried.
-          const ageMs = Date.now() - new Date(existing.verifiedAt).getTime();
-          if (ageMs < STALE_PENDING_MS) {
-            logger.warn(
-              `[SUB] ⏳ CONCURRENT: ${transactionSignature} already being processed`
-            );
-            throw new Error("Transaction already being processed");
-          }
-          logger.warn(
-            `[SUB] ♻️  Reclaiming stale pending signature ${transactionSignature}`
-          );
-        } else {
-          // 'failed' — a prior attempt failed; allow retry.
-          logger.info(
-            `[SUB] ℹ️  Retrying previously ${existing.status} signature ${transactionSignature}`
-          );
-        }
-        // Re-arm the sentinel so this attempt owns the in-flight window.
-        await TransactionLog.updateOne(
-          { signature: transactionSignature },
-          { $set: { status: "pending", verifiedAt: new Date() } }
-        );
-      } else {
-        // First time we've seen this signature — insert a 'pending' sentinel
-        // so concurrent requests are blocked by the unique index (code 11000).
-        await TransactionLog.create({
-          signature: transactionSignature,
-          walletAddress,
-          betAmount: expectedAmount,
-          verifiedAt: new Date(),
-          status: "pending",
-        });
-        logger.info(
-          `[SUB] ✅ Replay check passed — signature recorded as pending`
-        );
-      }
+      logger.info(`[SUB] ✅ Replay check passed — signature claimed (pending)`);
     } catch (dbErr) {
-      if (dbErr.code === 11000) {
-        // Race condition: concurrent request inserted the sentinel first.
-        // Treat like a verified replay to be safe.
+      if (dbErr.replay) {
         logger.error(
-          `[SUB] ❌ RACE / REPLAY: duplicate key for ${transactionSignature}`
+          `[SUB] ❌ REPLAY ATTACK: signature ${transactionSignature} already verified`
         );
-        throw new Error("Transaction already processed");
+        SecurityLogger.log("subscription_replay_attack", {
+          transactionSignature,
+          walletAddress,
+        });
+        throw new Error(
+          "Transaction already processed — replay attack prevented"
+        );
       }
-      if (
-        dbErr.message.includes("replay") ||
-        dbErr.message.includes("already processed") ||
-        dbErr.message.includes("being processed")
-      ) {
-        throw dbErr;
+      if (dbErr.concurrent) {
+        logger.warn(
+          `[SUB] ⏳ CONCURRENT: ${transactionSignature} already being processed`
+        );
+        throw new Error("Transaction already being processed");
       }
       logger.error("[SUB] ❌ MongoDB audit write failed:", {
         error: dbErr.message,
@@ -303,13 +256,12 @@ class SubscriptionService {
     // ── Step 7: Promote TransactionLog status to 'verified' ──────────
     // Only now — after all checks pass — do we mark the signature as fully
     // verified. Replay protection for future requests relies on this status.
+    // Strict (NOT best-effort): if this write fails the signature stays
+    // reusable, so we must fail the whole verification rather than grant premium
+    // access with no replay record. Mirrors transactionVerifier.js.
     await TransactionLog.findOneAndUpdate(
       { signature: transactionSignature },
       { status: "verified", verifiedAt: new Date() }
-    ).catch((err) =>
-      logger.error("[SUB] ❌ Failed to promote TransactionLog to verified:", {
-        error: err.message,
-      })
     );
 
     // ── Step 8: Cache in Redis (best-effort, 7 days) ──────────────────────
