@@ -92,8 +92,21 @@ async function initializeRedis() {
         commandTimeout: 5000,
       };
       if (useTLS) {
-        console.log("🔒 TLS enabled for Redis connection");
-        opts.tls = { rejectUnauthorized: false };
+        // Verify the server certificate by DEFAULT — Redis holds sessions,
+        // nonces, blocklists, rate-limit and idempotency state, so an
+        // unverified TLS connection is MITM-able. Disable only via an explicit
+        // env gate for local dev / self-signed setups.
+        const reject = process.env.REDIS_TLS_REJECT_UNAUTHORIZED !== "false";
+        if (
+          !reject &&
+          (process.env.NODE_ENV || "development") === "production"
+        ) {
+          console.warn(
+            "⚠️  Redis TLS certificate verification is DISABLED in production (REDIS_TLS_REJECT_UNAUTHORIZED=false)"
+          );
+        }
+        console.log(`🔒 TLS enabled for Redis (verify cert: ${reject})`);
+        opts.tls = { rejectUnauthorized: reject };
       } else {
         console.log("📡 Using non-TLS Redis (Railway internal)");
       }

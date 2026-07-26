@@ -274,13 +274,26 @@ class PaymentProcessor {
         );
       }
 
-      // Mark as processing (with try-catch for rollback)
+      // Atomically claim this payout so two workers (multi-instance or
+      // overlapping runs) can't both process it and double-send from the
+      // treasury. A null claim means another worker already owns it — skip.
+      let claimed;
       try {
-        await payment.markProcessing();
+        claimed = await payment.claimForProcessing();
       } catch (dbError) {
         dbUpdateError = dbError;
-        throw new Error(`Failed to update DB status: ${dbError.message}`);
+        throw new Error(`Failed to claim payment: ${dbError.message}`);
       }
+      if (!claimed) {
+        console.log({
+          level: "info",
+          event: "processPayment",
+          paymentId: payment._id,
+          message: "Already claimed by another worker — skipping",
+        });
+        return;
+      }
+      payment = claimed; // use the freshly-claimed doc (updated status/attempts)
 
       // Send the actual payment
       const signature = await this.sendPayment(payment);

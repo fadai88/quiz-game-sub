@@ -1921,20 +1921,45 @@ async function handleGameEvent(socket, event, args) {
 
         // Durable record so restart recovery can refund both stakes if the
         // server goes down mid-game (Redis rooms expire after 1h; this doesn't).
-        await GameSession.create({
-          roomId,
-          betAmount,
-          gameMode: "ranked",
-          players: [
-            { walletAddress: p1.walletAddress, socketId: p1.socketId },
-            { walletAddress: p2.walletAddress, socketId: p2.socketId },
-          ],
-          status: "active",
-        }).catch((e) =>
-          logger.error("[MATCHMAKING] GameSession.create failed:", {
-            error: e.message,
-          })
-        );
+        // MANDATORY: without it a crash could strand both stakes, so if it fails
+        // we refund the two verified stakes on-chain and abort rather than start
+        // an unrecoverable staked game.
+        try {
+          await GameSession.create({
+            roomId,
+            betAmount,
+            gameMode: "ranked",
+            players: [
+              { walletAddress: p1.walletAddress, socketId: p1.socketId },
+              { walletAddress: p2.walletAddress, socketId: p2.socketId },
+            ],
+            status: "active",
+          });
+        } catch (e) {
+          logger.error(
+            "[MATCHMAKING] GameSession.create failed — aborting and refunding both stakes:",
+            { error: e.message }
+          );
+          await queueOnChainRefund(
+            p1.walletAddress,
+            betAmount,
+            `refund:${roomId}:${p1.walletAddress}`,
+            "Game setup failed"
+          );
+          await queueOnChainRefund(
+            p2.walletAddress,
+            betAmount,
+            `refund:${roomId}:${p2.walletAddress}`,
+            "Game setup failed"
+          );
+          await deleteGameRoom(roomId).catch(() => {});
+          await redisClient.del(`room:${roomId}`).catch(() => {});
+          const msg =
+            "Could not start the game. Your stake is being refunded to your wallet.";
+          io.to(p1.socketId).emit("matchmakingError", msg);
+          io.to(p2.socketId).emit("matchmakingError", msg);
+          return;
+        }
 
         p1Socket.join(roomId);
         p1Socket.roomId = roomId;

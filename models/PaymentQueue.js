@@ -144,6 +144,31 @@ PaymentQueueSchema.statics.cleanupOldPendings = async function (hours = 24) {
   return result;
 };
 
+// Atomically claim this payment for processing. Prevents two workers (in a
+// multi-instance deploy, or overlapping runs) from both processing the same
+// payout and double-sending from the treasury. Returns the freshly-claimed
+// document, or null if another worker already owns it (skip in that case).
+PaymentQueueSchema.methods.claimForProcessing = async function () {
+  const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+  return this.constructor.findOneAndUpdate(
+    {
+      _id: this._id,
+      $or: [
+        { status: "pending" },
+        { status: "failed", attempts: { $lt: 5 } },
+        // Stuck 'processing' (crashed mid-flight) becomes reclaimable after 5m;
+        // sendPayment re-checks broadcastSignature before building a new tx.
+        { status: "processing", lastAttemptAt: { $lt: fiveMinutesAgo } },
+      ],
+    },
+    {
+      $set: { status: "processing", lastAttemptAt: new Date() },
+      $inc: { attempts: 1 },
+    },
+    { new: true }
+  );
+};
+
 // Mark a payment as processing
 PaymentQueueSchema.methods.markProcessing = async function () {
   try {

@@ -61,7 +61,7 @@ function makeConn(overrides = {}) {
 
 let seq = 0;
 function makePayment(overrides = {}) {
-  return {
+  const p = {
     _id: `pay-${++seq}`,
     recipientWallet: recipient.publicKey.toBase58(),
     amount: 1_000_000, // 1 USDC (6 decimals)
@@ -74,6 +74,11 @@ function makePayment(overrides = {}) {
     markFailed: sinon.stub().resolves(),
     ...overrides,
   };
+  // Atomic claim (multi-instance safety). Default: resolves to the payment
+  // itself, i.e. "claimed successfully". Override with resolves(null) to
+  // simulate another worker having already claimed it.
+  if (!p.claimForProcessing) p.claimForProcessing = sinon.stub().resolves(p);
+  return p;
 }
 
 function makeProcessor(conn) {
@@ -97,6 +102,23 @@ describe("PaymentProcessor — payout idempotency", () => {
   beforeEach(() => sinon.stub(PaymentQueue, "findByIdAndUpdate").resolves({}));
   // sinon.restore() also un-installs any fake timers created in a test.
   afterEach(() => sinon.restore());
+
+  // ── CRITICAL: atomic claim prevents double-send across workers ─────────────
+  // In a multi-instance deploy two workers can read the same pending row. The
+  // atomic claimForProcessing() lets only one win; the loser must skip without
+  // building/broadcasting a transaction (which would double-pay the treasury).
+  it("CRITICAL: skips a payout already claimed by another worker (no double-send)", async () => {
+    const conn = makeConn({});
+    const payment = makePayment({
+      claimForProcessing: sinon.stub().resolves(null), // another worker owns it
+    });
+
+    await makeProcessor(conn).processPayment(payment);
+
+    expect(payment.claimForProcessing.callCount).to.equal(1);
+    expect(payment.markCompleted.callCount).to.equal(0); // never sent
+    expect(payment.markFailed.callCount).to.equal(0); // not an error, just skipped
+  });
 
   // ── HIGH: confirmTransaction resolved error ────────────────────────────────
   //
@@ -259,7 +281,7 @@ describe("PaymentProcessor — payout idempotency", () => {
 
     await makeProcessor(conn).processPayment(payment);
 
-    expect(payment.markProcessing.callCount).to.equal(1);
+    expect(payment.claimForProcessing.callCount).to.equal(1);
     expect(payment.markCompleted.callCount).to.equal(1);
     expect(conn.sendRawTransaction.callCount).to.equal(0);
   });

@@ -61,6 +61,7 @@ class SubscriptionService {
         signature: transactionSignature,
       });
 
+      const STALE_PENDING_MS = 120_000; // > any single verification attempt
       if (existing !== null) {
         if (existing.status === "verified") {
           // This signature was already successfully processed.
@@ -76,10 +77,30 @@ class SubscriptionService {
             "Transaction already processed — replay attack prevented"
           );
         }
-        // 'pending' or 'failed' — a prior attempt did not complete successfully.
-        // Allow this request to proceed; it will overwrite status on success.
-        logger.info(
-          `[SUB] ℹ️  Retrying previously ${existing.status} signature ${transactionSignature}`
+        if (existing.status === "pending") {
+          // A *fresh* pending row means another request for this signature is
+          // in-flight — reject the concurrent duplicate (single-flight). Only a
+          // stale one (owning attempt must have died) may be retried.
+          const ageMs = Date.now() - new Date(existing.verifiedAt).getTime();
+          if (ageMs < STALE_PENDING_MS) {
+            logger.warn(
+              `[SUB] ⏳ CONCURRENT: ${transactionSignature} already being processed`
+            );
+            throw new Error("Transaction already being processed");
+          }
+          logger.warn(
+            `[SUB] ♻️  Reclaiming stale pending signature ${transactionSignature}`
+          );
+        } else {
+          // 'failed' — a prior attempt failed; allow retry.
+          logger.info(
+            `[SUB] ℹ️  Retrying previously ${existing.status} signature ${transactionSignature}`
+          );
+        }
+        // Re-arm the sentinel so this attempt owns the in-flight window.
+        await TransactionLog.updateOne(
+          { signature: transactionSignature },
+          { $set: { status: "pending", verifiedAt: new Date() } }
         );
       } else {
         // First time we've seen this signature — insert a 'pending' sentinel
@@ -106,7 +127,8 @@ class SubscriptionService {
       }
       if (
         dbErr.message.includes("replay") ||
-        dbErr.message.includes("already processed")
+        dbErr.message.includes("already processed") ||
+        dbErr.message.includes("being processed")
       ) {
         throw dbErr;
       }

@@ -548,12 +548,14 @@ router.post(
   }
 );
 
-// ─── GET /api/tokens.json (honeypot — unchanged) ─────────────────────────────
-
+// ─── GET /api/tokens.json (honeypot) ─────────────────────────────────────────
+// Log only — do NOT auto-block. This endpoint is an unauthenticated GET, so an
+// attacker can trigger it from a victim's browser (e.g. an <img> tag on another
+// site), and auto-blocking would blocklist that victim's IP (self-DoS, made
+// worse by shared/NAT IPs). Same reasoning as the /admin honeypot in server.js.
 router.get("/tokens.json", async (req, res) => {
   const clientIP = getClientIpFromRequest(req);
   logger.warn(`Potential bot detected accessing honeypot: ${clientIP}`);
-  await context.redisClient.set(`blocklist:${clientIP}`, 1, "EX", 86400);
   res.json({ status: "success", data: { tokens: [] } });
 });
 
