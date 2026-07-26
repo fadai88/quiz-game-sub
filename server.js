@@ -227,6 +227,20 @@ async function initializeConfig() {
         rpcEndpoints:     [process.env.SOLANA_RPC_URL],
         io,
     };
+
+    // Fail fast if the AWS-stored secret key does not correspond to
+    // TREASURY_WALLET_ADDRESS. Without this, a misconfigured secret would make
+    // the server silently sign every payout and refund from the wrong wallet
+    // (or one with no funds) — a mistake you'd only discover after money moved.
+    const derivedTreasury = cfg.TREASURY_KEYPAIR.publicKey;
+    if (!derivedTreasury.equals(cfg.TREASURY_WALLET)) {
+        throw new Error(
+            `Treasury key mismatch: AWS secret key is for ${derivedTreasury.toBase58()} ` +
+            `but TREASURY_WALLET_ADDRESS is ${cfg.TREASURY_WALLET.toBase58()}`
+        );
+    }
+    console.log(`🔑 Treasury key verified for ${derivedTreasury.toBase58()}`);
+
     context.set('config', cfg);
     console.log('✅ Config initialized successfully');
     return cfg;

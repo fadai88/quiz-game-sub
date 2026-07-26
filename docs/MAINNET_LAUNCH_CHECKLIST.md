@@ -1,95 +1,164 @@
 # Devnet → Mainnet Launch Checklist
 
-Real money moves on mainnet. Work top to bottom; do not skip Section F (pre-flight)
-before taking traffic. Line references are to the state of the repo when this was
-written — re-grep if code has moved.
+Real money moves on mainnet. Nothing below is optional theatre — each item has
+burned a real project somewhere. Line references drift as code moves; re-grep.
 
-Current deployment is **pot mode** (`MONETIZATION=pot`), **devnet**, `NODE_ENV=development`.
+**Current state:** pot mode (`MONETIZATION=pot`), **devnet**, `NODE_ENV=development`.
+
+**Honest readiness note (2026-07):** the code's security/correctness is in good
+shape (verified payments, idempotent payouts, restart refund recovery, on-chain
+refunds, drain mode). It is **not** the same as "ready to take uncapped real
+money": it has never run on mainnet, has thin automated coverage (4 test files),
+and has had no load/soak testing. Prefer a **phased launch** (Section I).
 
 ---
 
-## A. Environment variables (`.env`)
+## 0. Legal & compliance — DO THIS FIRST (non-code, can be a showstopper)
+
+A "stake USDC, winner takes the pot" game is very likely **gambling** or
+regulated **skill-gaming** in many jurisdictions. Code cannot fix this.
+
+- [ ] Get a **lawyer's written read** for every market you'll accept players from.
+- [ ] Determine if you need a **license** (can take months) or must restrict to
+      skill-gaming-permitted regions.
+- [ ] **Geo-block** prohibited jurisdictions (IP + wallet-level if required).
+- [ ] **Terms of Service**, privacy policy, responsible-gaming disclosures.
+- [ ] **Age verification** if required.
+- [ ] **KYC/AML** if stakes/volumes cross reporting thresholds.
+- [ ] Tax/withholding obligations on winnings.
+
+> Do not process a single real-money game until this section has legal sign-off.
+
+---
+
+## A. Environment variables (`.env` / Railway variables)
 
 | Variable | Current (devnet) | Mainnet action |
 |---|---|---|
-| `NODE_ENV` | `development` | **`production`** — flips on cookie `secure`, HSTS, MongoDB TLS, and the FATAL startup gates below. |
-| `USDC_MINT_ADDRESS` | `Gh9Zw…KGtKJr` (devnet USDC) | **`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`** (mainnet USDC). |
-| `TREASURY_WALLET_ADDRESS` | `NoyR3n…DTp4` | Your **mainnet** treasury pubkey. Address is network-agnostic, so you *can* keep the same keypair — but decide whether you want a fresh treasury separate from devnet testing. Must match the AWS-stored key (see Section C). |
-| `SOLANA_RPC_URL` | devnet Helius | Your **mainnet server** endpoint (line 4 in `.env` already has one, commented). Privileged — stays server-side. |
-| `CLIENT_RPC_URL` | devnet Helius (same key as server) | A **separate, client-scoped** mainnet endpoint. **Never reuse the `SOLANA_RPC_URL` key here** — this value is served to browsers via `/api/config`. |
-| `ALLOWED_ORIGINS` | **missing** | **Required** — `https://your-prod-domain`. `server.js:86` FATAL-exits in production if unset (no localhost CORS fallback). |
-| `RECAPTCHA_SITE_KEY` / `RECAPTCHA_SECRET_KEY` | `6LeDS1IqA…` | Confirm these are registered for the **production domain** (reCAPTCHA keys are domain-scoped) and rotate the secret (Section E). |
-| `MONGODB_URI` | — | Production Atlas cluster; rotate its password (Section E). Production forces TLS (`server.js:195`). |
-| `REDIS_URL` **or** `REDIS_PASSWORD` | — | Required in production (`config/constants.js:74`). Use an authenticated instance. |
-| `SESSION_SECRET` | set | Required in production (`server.js:75`). Rotate if it ever left your control (Section E). |
-| `ENABLE_RECAPTCHA` | `true` | Must stay `true` — production FATAL-exits otherwise (`config/constants.js:66`). |
+| `NODE_ENV` | `development` | **`production`** — flips on secure cookies, HSTS, Mongo TLS, and FATAL startup gates (Section D). |
+| `USDC_MINT_ADDRESS` | `Gh9Zw…KGtKJr` (devnet) | **`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`** (mainnet USDC). |
+| `TREASURY_WALLET_ADDRESS` | `NoyR3n…DTp4` | Your **mainnet** treasury pubkey. **Must match the AWS-stored key** — the server now asserts this at boot and exits if it doesn't (Section C). |
+| `SOLANA_RPC_URL` | devnet Helius | **Mainnet server** endpoint. Privileged — never sent to browsers. |
+| `CLIENT_RPC_URL` | devnet Helius | A **separate, client-scoped** mainnet endpoint (served to browsers via `/api/config`). Never reuse the server key. |
+| `ALLOWED_ORIGINS` | **missing** | **Required** — `https://your-domain`. Production FATAL-exits if unset. |
+| `RECAPTCHA_SITE_KEY` / `RECAPTCHA_SECRET_KEY` | `6LeDS1IqA…` | Keys registered for the **production domain**; rotate the secret (Section E). |
+| `MONGODB_URI` | — | Production Atlas cluster; **rotate its password** (Section E). Prod forces TLS. |
+| `REDIS_URL` **or** `REDIS_PASSWORD` | — | Required in production. Use an authenticated instance. |
+| `REDIS_TLS_REJECT_UNAUTHORIZED` | (unset → verify) | Leave unset/`true`. **Setting it `false` now FATAL-exits in production.** For a private-CA Redis, use `REDIS_CA_CERT` instead. |
+| `REDIS_CA_CERT` | — | Optional PEM (CA cert) for a private-CA/self-signed Redis; escaped `\n` is normalized. |
+| `SESSION_SECRET` | set | Required in production; rotate if it ever left your control (Section E). |
+| `ENABLE_RECAPTCHA` | `true` | Must stay `true` — production FATAL-exits otherwise. |
 | `ENABLE_USDC_PAYMENTS` | `true` | Keep `true`. |
-| `MONETIZATION` | `pot` | Confirm intended (`pot` vs `subscription`). |
-| `PROGRAM_ID` | `DpEXv5…` | **Not read by any runtime code** — the payment flow is plain SPL USDC transfers + memo, not the Anchor program. Safe to ignore for launch unless you wire the on-chain program in later. |
+| `MONETIZATION` | `pot` | Confirm intended. |
+| `TRUSTED_PROXY_IPS` | — | Set to your reverse-proxy/LB IPs (Section D) so IP rate-limits + `X-Forwarded-*` are trustworthy. |
+| `SLACK_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL` | — | Set at least one so alerts actually reach you (Section F). |
+| `MIN_TREASURY_SOL` / `MIN_TREASURY_USDC` | defaults | Tune the low-balance alert thresholds (Section F). |
+| `PROGRAM_ID` | `DpEXv5…` | Not read by runtime code (flow is plain SPL transfers + memo). Ignore unless you wire the Anchor program in. |
 
 ---
 
-## B. Hardcoded client values (change these in source)
+## B. Hardcoded client values (change in source, not just env)
 
-These are baked into shipped JS as fallbacks/defaults and won't be fixed by env vars alone.
-
-- [ ] **`public/game-init.js:39-40`** — `TREASURY_WALLET` hardcoded to `NoyR3n…`. This is the pre-`/api/config` fallback; set it to your **mainnet treasury**. (Its `USDC_MINT` at line 37 is already the mainnet mint `EPjF…`.) In pot mode `/api/config` overrides these once loaded, but this is the value used during the load gap and if config fetch fails.
-- [ ] **`public/game.js:607`** — RPC fallback default is `https://api.devnet.solana.com`. Change to `https://api.mainnet-beta.solana.com` so a config-load failure doesn't drop the client onto the wrong network.
-- [ ] **`public/subscription.js:28`** — same devnet RPC fallback → mainnet. **Only if you run subscription mode**; this file also hardcodes the **devnet** USDC mint at line 17 (`Gh9Zw…`) and treasury at line 20–22, none of which are fed by `/api/config`. For a pot-mode launch, `subscription.js` is not served, so this is a no-op.
-- [ ] **`middleware/securityHeaders.js:41`** — CSP `connect-src` already whitelists mainnet Helius + `api.mainnet-beta.solana.com`. If your mainnet RPC uses a **different provider/hostname**, add it here or the browser will block the connection.
-
----
-
-## C. Treasury & on-chain prerequisites
-
-- [ ] The **AWS Secrets Manager** treasury key (`wallet_secret_key`) must correspond to `TREASURY_WALLET_ADDRESS`. Add the L3 init assertion (`assert keypair.publicKey.equals(TREASURY_WALLET)` in `server.js` `initializeConfig`) so a mismatch fails fast instead of silently signing from the wrong wallet.
-- [ ] Treasury needs a **mainnet USDC associated token account (ATA)** holding enough USDC to cover payouts (winner gets 1.8× their stake; treasury keeps the 0.2× rake, so it must be able to front the winnings until stakes settle).
-- [ ] Fund the treasury with **SOL** for fees + ATA creation. `PaymentProcessor.queuePayment` refuses to run below **~0.005 SOL** (`services/PaymentProcessor.js:110`). Keep a buffer.
-- [ ] Confirm **`VALID_BET_AMOUNTS_USDC`** = `[3, 10, 15, 20, 30]` (`utils/usdcUtils.js:16`) is the intended real-money stake ladder. These become actual dollars.
-- [ ] Lock down IAM on the treasury secret (least privilege) and enable **CloudTrail** on secret reads. Prefer an IAM role over static AWS keys; if static `AWS_ACCESS_KEY_ID`/`SECRET` ever existed in `.env`, rotate them.
+- [ ] **`public/game-init.js`** — `TREASURY_WALLET` hardcoded fallback (`NoyR3n…`) → mainnet treasury. (`USDC_MINT` there is already mainnet.) Used during the pre-`/api/config` load gap and if config fetch fails.
+- [ ] **`public/game.js`** — RPC fallback default `https://api.devnet.solana.com` → `https://api.mainnet-beta.solana.com`.
+- [ ] **`public/subscription.js`** — devnet RPC + hardcoded devnet mint/treasury. **No-op for pot mode** (not served); fix only if you run subscription mode.
+- [ ] **`middleware/securityHeaders.js`** — CSP `connect-src` already whitelists mainnet Helius + `api.mainnet-beta.solana.com`. Add your mainnet RPC host if it differs, or the browser blocks it.
+- [ ] Re-grep for stragglers (command at the bottom).
 
 ---
 
-## D. What `NODE_ENV=production` turns on (verify each works)
+## C. Treasury: keys, funding, and solvency
 
-- [ ] **Cookies** get `secure: true` (`config/constants.js:103`) — the app must be served over **HTTPS end-to-end**, or sessions silently break.
-- [ ] **HSTS** header is sent only when the request is HTTPS via a **trusted proxy** — set `TRUSTED_PROXY_IPS` to your reverse-proxy/load-balancer IPs (`middleware/trustedProxy.js`), or IP rate-limits and `X-Forwarded-*` handling misbehave.
-- [ ] **MongoDB TLS** is enforced (`server.js:195`) — Atlas is fine; a non-TLS Mongo will fail to connect.
-- [ ] Startup **FATAL gates** all satisfied: `ENABLE_RECAPTCHA=true`, `RECAPTCHA_SECRET_KEY`, Redis auth, `SESSION_SECRET`, `ALLOWED_ORIGINS`.
+- [ ] **Key ↔ address match** — now enforced at boot (`server.js` `initializeConfig` asserts `TREASURY_KEYPAIR.publicKey == TREASURY_WALLET`). A mismatch fails startup; make sure the AWS secret is the mainnet treasury's key.
+- [ ] **Mainnet USDC ATA** for the treasury, funded enough to **front winnings** (winner gets 1.8× their stake; the pot is 2× so the house nets a 0.2× rake, but the treasury pays the winner before/independently of settling).
+- [ ] **SOL for fees** — every payout **and every refund** is now an on-chain tx (refund recovery, drain-refunds, matchmaking-failure refunds all queue on-chain). `PaymentProcessor` refuses below **~0.005 SOL**. Keep a healthy buffer and auto-alert (Section F).
+- [ ] **Solvency plan** — model a bad run (many consecutive wins) and ensure the treasury can't go insolvent mid-payout. Decide a **max concurrent exposure** and cap stakes/users accordingly at launch.
+- [ ] **`VALID_BET_AMOUNTS_USDC`** = `[3, 10, 15, 20, 30]` (`utils/usdcUtils.js`) — confirm this is the intended real-money ladder. Consider starting **lower** (e.g. `[1]`) for the beta.
+- [ ] **IAM least-privilege** on the AWS secret; enable **CloudTrail** on secret reads; prefer an IAM role over static keys.
+
+---
+
+## D. What `NODE_ENV=production` turns on (verify each)
+
+- [ ] **Secure cookies** — the app must be **HTTPS end-to-end** or sessions silently break.
+- [ ] **HSTS** only over HTTPS via a trusted proxy — set `TRUSTED_PROXY_IPS`.
+- [ ] **MongoDB TLS** enforced — Atlas is fine.
+- [ ] **Startup FATAL gates** satisfied: `ENABLE_RECAPTCHA=true`, `RECAPTCHA_SECRET_KEY`, Redis auth, `SESSION_SECRET`, `ALLOWED_ORIGINS`, treasury-key match, and **`REDIS_TLS_REJECT_UNAUTHORIZED` not `false`**.
 
 ---
 
 ## E. Secrets to rotate before launch
 
-- [ ] **reCAPTCHA secret** — it was written to a log file (finding M2); treat as compromised. Rotate in the Google reCAPTCHA console and delete the offending `logs/audit-*.log`.
-- [ ] **Devnet Helius RPC key** (`961d5e62…`) — was public in client source; rotate it (low impact, devnet).
-- [ ] **If `.env` ever left your sole control** (shared/pasted/backed up): rotate `SESSION_SECRET` (forces re-login), the prod **MongoDB** password, `REDIS_PASSWORD`, and `EMAIL_PASS`.
-- [ ] **Treasury key** — do **not** rotate absent evidence of compromise (rotating means migrating all treasury funds). Harden access instead (Section C).
+- [ ] **reCAPTCHA secret** — was written to a log file; treat as compromised. Rotate + delete the offending `logs/audit-*.log`.
+- [ ] **Devnet Helius RPC key** (`961d5e62…`) — was public in client source; rotate (low impact).
+- [ ] **If `.env` ever left your control:** rotate `SESSION_SECRET` (forces re-login), prod **MongoDB** password, `REDIS_PASSWORD`, `EMAIL_PASS`.
+- [ ] **Treasury key** — do **not** rotate absent evidence of compromise (rotating means migrating all funds); harden access instead.
 
 ---
 
-## F. Pre-flight verification (run before taking traffic)
+## F. Operational readiness (monitoring, alerts, runbooks)
 
-- [ ] `npm test` (or `npx mocha tests/*.js --exit`) green — note `tests/gameService.timeout.js` has a **pre-existing** failure (`markUnansweredPlayersTimedOut` missing) unrelated to launch.
-- [ ] Boot the server with the production `.env` and confirm **no FATAL exits** and `✅ Config initialized successfully`.
-- [ ] Hit **`GET /api/config`** and verify `rpcUrl`, `usdcMint` (mainnet `EPjF…`), `treasuryWallet` are all the mainnet values — this is what the browser trusts.
-- [ ] Do **one real end-to-end stake** for the smallest amount on mainnet: stake → match (or forfeit) → confirm the **payout lands on-chain** and `PaymentQueue` shows `completed`.
-- [ ] Verify a **withheld** path writes a `WithheldPayout` row and the admin endpoints (`GET/POST /api/admin/withheld-payouts`) work with an `ADMIN_WALLETS` account.
-- [ ] Confirm `ADMIN_WALLETS` contains your **mainnet** admin wallet(s).
+- [ ] **Wire alerts** — set `SLACK_WEBHOOK_URL` or `DISCORD_WEBHOOK_URL`; without one, alerts only hit the console. Confirm they fire to a channel you watch.
+- [ ] Watch especially: `FAILED_PAYOUTS`, `REFUND_FAILED`, `PAYOUT_BLOCKED`, low-treasury (SOL/USDC), stuck payments, Mongo/Redis reconnects.
+- [ ] **Treasury balance dashboard/alert** (SOL + USDC), tuned via `MIN_TREASURY_SOL` / `MIN_TREASURY_USDC`.
+- [ ] **Runbooks** (write these before launch):
+  - Stuck/failed payouts (inspect `PaymentQueue`, retry, manual send).
+  - Treasury refill (SOL and USDC) procedure.
+  - **Withheld payouts** — resolve via `GET/POST /api/admin/withheld-payouts` (refund / release / deny).
+  - **Planned restart** — enable drain, wait, redeploy (Section H).
+  - Key/secret compromise response.
+- [ ] **Know the recovery behaviors:**
+  - **Crash/restart** → the server auto-refunds every in-flight stake on next boot (`restartRecovery`) — **requires treasury SOL**.
+  - **Planned restart** → drain first (below) so few/no games are interrupted.
+- [ ] Confirm **`ADMIN_WALLETS`** contains your **mainnet** admin wallet(s).
+- [ ] Decide **single vs multi-instance**. Payment claims are now atomic (safe for multi-instance), but multi-instance is **untested** — if single-instance, it's a SPOF; plan restarts/failover.
 
 ---
 
-## G. Post-launch smoke test
+## G. Load & soak testing (currently NONE — do before real traffic)
 
-- [ ] Treasury SOL + USDC balances draining/refilling as expected; set a **low-balance alert**.
-- [ ] Alerts firing to a channel you watch (`config/alerts.js`) — especially `FAILED_PAYOUTS`, `REFUND_FAILED`, `PAYOUT_BLOCKED`.
-- [ ] Spot-check logs contain **no secrets** and reasonable PII hygiene (`logs/` is now untracked).
-- [ ] Watch the first N games for stuck rooms / orphaned players / refund correctness.
+- [ ] **Concurrency test** matchmaking + full game loop under N simultaneous games (races, Redis contention, socket churn).
+- [ ] **Payment throughput** — queue many payouts/refunds; confirm no double-send, no stuck queue, treasury fee burn is sustainable.
+- [ ] **Soak test** — run for hours; watch for memory leaks, orphaned rooms, timer drift, reconnect storms.
+- [ ] **Kill-test recovery** — hard-kill the server mid-game repeatedly; confirm every stake is refunded on reboot and nothing double-pays.
+- [ ] Expand **automated tests** beyond the current 4 files (socket auth, matchmaking, tx verification, restart recovery are uncovered).
 
 ---
 
-### Quick grep to re-find hardcoded network values
+## H. Pre-flight verification (immediately before taking traffic)
+
+- [ ] `npx mocha tests/*.js --exit` → **35/35 green** (the old `timeout.js` failure is fixed).
+- [ ] Boot with the production `.env`; confirm **no FATAL exits**, `🔑 Treasury key verified`, and `✅ Config initialized successfully`.
+- [ ] `GET /api/config` returns mainnet `rpcUrl`, `usdcMint` (`EPjF…`), `treasuryWallet`.
+- [ ] **One real end-to-end mainnet stake** at the smallest amount: stake → match/forfeit → **payout lands on-chain**, `PaymentQueue` shows `completed`.
+- [ ] **Refund path**: force a matchmaking failure (or a restart mid-queue) and confirm the stake comes **back on-chain**.
+- [ ] **Drain mode**: `POST /api/admin/maintenance {enabled:true}` → new games rejected + client blocks staking; `GET /api/admin/maintenance` shows `activeGames`; a redeploy clears it.
+- [ ] **Withheld flow**: verify a `WithheldPayout` row is created and the admin resolve endpoints work.
+
+---
+
+## I. Phased launch plan (recommended over a single cutover)
+
+1. **Closed beta** — mainnet, **tiny stakes** (e.g. `$1`), a small **invited** group, heavy monitoring, for 1–2 weeks. Watch treasury flows, refund correctness, stuck rooms, payout success.
+2. **Widen** — raise stakes/users gradually only after the beta behaves cleanly.
+3. **Open** — remove the invite gate once you've seen real-money stability and legal is fully cleared.
+
+Keep a **max concurrent exposure cap** through phase 1–2 so a bug or a bad run can't exceed a loss you can absorb.
+
+---
+
+## J. Post-launch monitoring (first days)
+
+- [ ] Treasury SOL + USDC trending as expected; low-balance alerts arriving.
+- [ ] Payout success rate ~100%; investigate any `failed`/stuck `PaymentQueue` rows.
+- [ ] No stranded stakes (spot-check that every abandoned/failed game got refunded).
+- [ ] Logs contain **no secrets** and reasonable PII hygiene.
+- [ ] Watch for stuck rooms / orphaned players / reconnect issues in the first N games.
+
+---
+
+### Re-find hardcoded network values
 ```bash
-grep -rniE "devnet|Gh9ZwEmdLJ8|NoyR3nErDpw4|api\.devnet\.solana" \
+grep -rniE "devnet|Gh9ZwEmdLJ8|NoyR3nErDpw4|api\.devnet\.solana|961d5e62" \
   public/ routes/ services/ middleware/ config/ server.js --include=*.js | grep -v vendor/
 ```
