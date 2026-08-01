@@ -687,8 +687,9 @@ function registerConnectionHandler(io) {
         }
       }
 
-      // 2. Handle active game room — defer forfeit by DISCONNECT_GRACE_MS so brief
-      //    network blips don't immediately penalise the player.
+      // 2. Handle active game room. Mid-game: the match continues and the
+      //    player can rejoin the live question (no forfeit). Pre-game: defer
+      //    removal by DISCONNECT_GRACE_MS so a brief blip doesn't drop them.
       try {
         let roomId = socket.roomId;
 
@@ -747,30 +748,44 @@ function registerConnectionHandler(io) {
 
         const walletAddress = disconnectedPlayer.username;
 
-        // Notify opponent and start grace timer — do NOT remove the player yet.
+        // ── Mid-game: keep the match running for the opponent ────────────────
+        // The disconnected player is NOT removed, paused, or forfeited. The game
+        // loop is server-driven (startNextQuestion → completeQuestion → …) and
+        // keeps advancing on its own; the absent player's unanswered questions
+        // simply time out. They can rejoin the live question any time before the
+        // game ends via `requestGameRestore`. This is deliberately fair to the
+        // player who stayed: they never wait, pause, or lose an answer because
+        // their rival dropped.
         if (initialRoom.gameStarted) {
-          // Pause the active question so Player B doesn't see the correct
-          // answer or advance while waiting for the grace period to resolve.
           try {
             await atomicRoomUpdate(roomId, async (r) => {
-              if (r.questionTimeout) {
-                clearTimeout(r.questionTimeout);
-                r.questionTimeout = null;
-              }
-              r.disconnectGracePeriod = true;
+              const idx = r.players.findIndex(
+                (p) => p.username === walletAddress
+              );
+              if (idx !== -1) r.players[idx].socketId = null;
+              // Never leave a legacy pause flag set — it would stall the loop.
+              r.disconnectGracePeriod = false;
               return r;
             });
           } catch (e) {
             logger.warn(
-              "[DISCONNECT] Could not pause question timer:",
+              "[DISCONNECT] Could not update room on mid-game disconnect:",
               e.message
             );
           }
-          io.to(roomId).emit("playerDisconnected", {
-            walletAddress,
-            gracePeriodMs: DISCONNECT_GRACE_MS,
-          });
+          // Informational only — the client must NOT disrupt the live question.
+          io.to(roomId).emit("playerDisconnected", { walletAddress });
+          logger.info(
+            `[DISCONNECT] ${walletAddress} dropped mid-game in ${roomId}; game continues`
+          );
+          socket.roomId = null;
+          return;
         }
+
+        // ── Pre-game: brief grace, then remove/refund/notify ─────────────────
+        // A player who drops before the game starts is handled by the timer
+        // below (unchanged): after the grace window they are removed and, in pot
+        // mode, refunded via the forfeit paths.
 
         // Cancel any existing timer (e.g. repeated disconnect events)
         if (disconnectTimers.has(walletAddress)) {
@@ -921,6 +936,16 @@ function registerConnectionHandler(io) {
           return;
         }
 
+        // The player is back. Cancel any pending PRE-GAME removal timer (a
+        // mid-game disconnect sets no timer — the game just kept running).
+        if (disconnectTimers.has(walletAddress)) {
+          clearTimeout(disconnectTimers.get(walletAddress));
+          disconnectTimers.delete(walletAddress);
+          logger.info(
+            `[DISCONNECT] Pending removal timer cancelled for ${walletAddress} (rejoined)`
+          );
+        }
+
         const { roomId, room } = activeGame;
         socket.roomId = roomId;
         await socket.join(roomId);
@@ -928,35 +953,58 @@ function registerConnectionHandler(io) {
         const playerIndex = room.players.findIndex(
           (p) => p.username === walletAddress
         );
-        if (playerIndex !== -1) {
-          room.players[playerIndex].socketId = socket.id;
+        const me = playerIndex !== -1 ? room.players[playerIndex] : null;
+        if (me) {
+          me.socketId = socket.id;
           await updateGameRoom(roomId, room);
         }
 
-        // Restart the paused question if the player is reconnecting mid grace period.
-        if (room.disconnectGracePeriod) {
-          await restartCurrentQuestion(roomId);
-        }
-
-        const currentQ =
+        // Drop the player onto whatever question is live *right now*, with the
+        // real time remaining — the game did not pause while they were away. If
+        // the current question is still running and they haven't answered it,
+        // send an answerable `activeQuestion`; otherwise send a lightweight
+        // `currentQuestion` so the client shows a "waiting for next" state.
+        const QUESTION_DURATION = 10000;
+        const currentQuestion =
           room.gameStarted && room.questions.length > 0
             ? room.questions[Math.max(0, room.currentQuestionIndex)]
             : null;
+        const questionEndsAt = room.questionStartTime
+          ? room.questionStartTime + QUESTION_DURATION
+          : 0;
+        const questionIsLive =
+          !!currentQuestion &&
+          !!room.questionStartTime &&
+          Date.now() < questionEndsAt &&
+          !(me && me.answered);
 
         socket.emit("gameStateRestore", {
           roomId,
+          betAmount: room.betAmount,
           players: room.players,
           currentQuestionIndex: room.currentQuestionIndex,
           gameStarted: room.gameStarted,
-          currentQuestion: currentQ
-            ? {
-                questionId: currentQ.tempId,
-                question: currentQ.question,
-                options: currentQ.shuffledOptions,
-                questionNumber: room.currentQuestionIndex + 1,
-                totalQuestions: room.questions.length,
-              }
-            : null,
+          activeQuestion:
+            questionIsLive && currentQuestion
+              ? {
+                  questionId: currentQuestion.tempId,
+                  question: currentQuestion.question,
+                  options: currentQuestion.shuffledOptions,
+                  questionNumber: room.currentQuestionIndex + 1,
+                  totalQuestions: room.questions.length,
+                  questionEndsAt,
+                }
+              : null,
+          currentQuestion:
+            !questionIsLive && currentQuestion
+              ? {
+                  questionId: currentQuestion.tempId,
+                  question: currentQuestion.question,
+                  options: currentQuestion.shuffledOptions,
+                  questionNumber: room.currentQuestionIndex + 1,
+                  totalQuestions: room.questions.length,
+                }
+              : null,
         });
 
         logger.info(
