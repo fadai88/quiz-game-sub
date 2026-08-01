@@ -318,8 +318,46 @@ startServer();
 const { abortGameWithRefund } = require('./services/gameService');
 const { getCleanActiveRooms } = require('./services/roomManager');
 
+let shuttingDown = false;
 async function gracefulShutdown(signal) {
+    // A second Ctrl+C (or signal) while we're already shutting down means the
+    // graceful path is stuck — bail out immediately rather than hang forever.
+    if (shuttingDown) {
+        console.log(`\n📡 Received ${signal} again — forcing immediate exit.`);
+        process.exit(1);
+    }
+    shuttingDown = true;
     console.log(`\n📡 Received ${signal}, shutting down gracefully...`);
+
+    // Hard deadline: if any cleanup step stalls (unreachable Mongo/Redis/RPC, a
+    // socket that won't close), exit anyway so the terminal is never stuck.
+    // .unref() so this watchdog itself never keeps the event loop alive.
+    const forceExit = setTimeout(() => {
+        console.error('⏱️  Graceful shutdown timed out after 10s — forcing exit.');
+        process.exit(1);
+    }, 10000);
+    forceExit.unref();
+
+    // Stop background timers FIRST. These setInterval/cron handles keep the
+    // event loop alive (so the process never exits) and keep firing against a
+    // closing DB — that's the source of the ECONNREFUSED spam during shutdown.
+    try {
+        const paymentProcessor = context.get('paymentProcessor');
+        if (paymentProcessor && paymentProcessor.stopProcessing) {
+            paymentProcessor.stopProcessing();
+        }
+    } catch (err) {
+        console.error('⚠️ Error stopping payment processor:', err.message);
+    }
+    try {
+        const cron = require('node-cron');
+        if (cron.getTasks) {
+            for (const task of cron.getTasks().values()) {
+                try { (task.destroy || task.stop).call(task); } catch (_) {}
+            }
+        }
+    } catch (_) { /* node-cron not present or already torn down */ }
+
     try {
         const activeRoomIds = await getCleanActiveRooms();
         for (const roomId of activeRoomIds) {
@@ -331,11 +369,18 @@ async function gracefulShutdown(signal) {
         console.error('⚠️ Error during shutdown refunds:', err);
     }
 
-    if (server) await new Promise(r => server.close(r));
-    if (io)     await new Promise(r => io.close(r));
-    if (mongoose.connection) await mongoose.connection.close();
-    if (context.redisClient) await context.redisClient.quit();
-    await require('./logger').gracefulShutdown(signal);
+    try {
+        if (server) await new Promise(r => server.close(r));
+        if (io)     await new Promise(r => io.close(r));
+        if (mongoose.connection) await mongoose.connection.close();
+        if (context.redisClient) await context.redisClient.quit();
+        await require('./logger').gracefulShutdown(signal);
+    } catch (err) {
+        console.error('⚠️ Error closing resources:', err.message);
+    }
+
+    clearTimeout(forceExit);
+    process.exit(0);
 }
 
 process.on('SIGTERM',              () => gracefulShutdown('SIGTERM'));
