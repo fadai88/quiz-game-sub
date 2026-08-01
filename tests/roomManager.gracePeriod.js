@@ -3,13 +3,14 @@
 /**
  * Redis round-trip regression test for `disconnectGracePeriod`.
  *
- * Bug: when a player disconnects, the disconnect handler sets
- * `room.disconnectGracePeriod = true` (so completeQuestion knows the game is
- * paused and must NOT score the still-connected leader as winner). But
- * `_serializeRoom` / `getGameRoom` never persisted or hydrated that field, so
- * the flag vanished on the very next Redis read. The completion path on the
- * last question then ran normally and declared the disconnected player —
- * who was ahead — the winner.
+ * NOTE (continue-model change): mid-game disconnects no longer pause the game,
+ * so the production disconnect handler no longer sets this flag to `true` — the
+ * match just keeps running and the leaver rejoins the live question. The flag
+ * is now legacy/defensive: `completeQuestion` / `restartCurrentQuestion` still
+ * read it, so it must continue to survive serialization intact. Historically it
+ * was NOT persisted by `_serializeRoom` / hydrated by `getGameRoom`, so the flag
+ * vanished on the next Redis read; these tests guard that round-trip so the
+ * defensive reads can never silently see `undefined`.
  *
  * These tests drive the real roomManager against an in-memory fake Redis
  * client, asserting the flag survives a write → read round-trip.
@@ -101,8 +102,8 @@ describe("roomManager — disconnectGracePeriod Redis round-trip", () => {
 
     const loaded = await roomManager.getGameRoom("room-1");
 
-    // Before the fix this came back undefined → completeQuestion ran the
-    // normal scoring path and crowned the disconnected leader.
+    // Guards the round-trip so the defensive readers (completeQuestion /
+    // restartCurrentQuestion) never see `undefined` instead of a boolean.
     expect(loaded.disconnectGracePeriod).to.equal(true);
   });
 
