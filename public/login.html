@@ -98,15 +98,20 @@
             </div>
             
             <button id="connectWalletBtn" class="wallet-button">
-                <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128' fill='%23AB9FF2'%3E%3Cpath d='M96 24c17.7 0 32 14.3 32 32v48c0 17.7-14.3 32-32 32H32C14.3 136 0 121.7 0 104V56c0-17.7 14.3-32 32-32h64zm-32 40c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16zm32 0c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16z'/%3E%3C/svg%3E" alt="Phantom" class="wallet-icon">
-                Connect Phantom Wallet
+                <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 12V7H5a2 2 0 0 1 0-4h14v4'/%3E%3Cpath d='M3 5v14a2 2 0 0 0 2 2h16v-5'/%3E%3Cpath d='M18 12a2 2 0 0 0 0 4h4v-4Z'/%3E%3C/svg%3E" alt="" class="wallet-icon">
+                Connect Wallet
             </button>
-            
+
+            <button id="switchWalletBtn" type="button"
+                style="display:none; background:none; border:none; color:#8b7ff0; cursor:pointer; font-size:13px; text-decoration:underline; padding:6px; margin-top:2px;">
+                Use a different wallet
+            </button>
+
             <div class="login-steps">
                 <h3>How it works:</h3>
                 <ol>
                     <li>Click the "Connect Wallet" button above</li>
-                    <li>Approve the connection in your Phantom wallet</li>
+                    <li>Approve the connection in your wallet</li>
                     <li>Sign the message to verify your wallet ownership</li>
                     <li>You'll be automatically redirected to the game!</li>
                 </ol>
@@ -131,6 +136,7 @@
     </div>
 
     <script src="/socket.io/socket.io.js"></script>
+    <script src="/wallet.js"></script>
     <script src="login.js"></script>
 </body>
 </html>

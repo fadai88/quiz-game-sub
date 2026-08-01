@@ -162,9 +162,8 @@ async function connectWallet() {
     }
 
     console.log("Connecting wallet...");
-    if (!window.solana || !window.solana.isPhantom) {
-      alert("Please install Phantom wallet!");
-      window.open("https://phantom.app/", "_blank");
+    if (WalletManager.detect().length === 0) {
+      WalletManager.showNoWalletHelp();
       return;
     }
 
@@ -191,10 +190,16 @@ async function connectWallet() {
       '<img src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 128 128%27 fill=%27%23AB9FF2%27%3E%3Cpath d=%27M96 24c17.7 0 32 14.3 32 32v48c0 17.7-14.3 32-32 32H32C14.3 136 0 121.7 0 104V56c0-17.7 14.3-32 32-32h64zm-32 40c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16zm32 0c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16z%27/%3E%3C/svg%3E" alt="Phantom" class="wallet-icon">Connecting...';
 
     try {
-      // ── Step 1: Connect wallet ────────────────────────────────
-      const resp = await window.solana.connect();
-      const publicKey = resp.publicKey.toString();
-      console.log("Connected to wallet:", publicKey);
+      // ── Step 1: Connect wallet (multi-wallet picker) ──────────
+      const { provider, publicKey: pubKey } = await WalletManager.connect();
+      const publicKey = pubKey.toString();
+      console.log(
+        "Connected to wallet:",
+        publicKey,
+        "via",
+        WalletManager.getSelected() && WalletManager.getSelected().name
+      );
+      refreshWalletChooser();
 
       // ── Step 2: Request a server-issued challenge ─────────────
       console.log("Requesting login challenge from server…");
@@ -222,11 +227,11 @@ async function connectWallet() {
       const message = `Sign in to Proof of Smart\nNonce: ${nonce}\nIssued: ${issuedAt}`;
       const encodedMessage = new TextEncoder().encode(message);
       console.log("Requesting wallet signature for server challenge…");
-      const signedData = await window.solana.signMessage(
-        encodedMessage,
-        "utf8"
+      const sigBytes = await WalletManager.signMessage(
+        provider,
+        encodedMessage
       );
-      const signature = btoa(String.fromCharCode(...signedData.signature));
+      const signature = btoa(String.fromCharCode(...sigBytes));
 
       // Store for follow-up HTTP /api/auth/login call
       lastSignature = signature;
@@ -252,7 +257,7 @@ async function connectWallet() {
       logError("wallet-connection", error); // ✅ Safe logging
       connectButton.disabled = false;
       connectButton.innerHTML =
-        '<img src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 128 128%27 fill=%27%23AB9FF2%27%3E%3Cpath d=%27M96 24c17.7 0 32 14.3 32 32v48c0 17.7-14.3 32-32 32H32C14.3 136 0 121.7 0 104V56c0-17.7 14.3-32 32-32h64zm-32 40c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16zm32 0c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16z%27/%3E%3C/svg%3E" alt="Phantom" class="wallet-icon">Connect Phantom Wallet';
+        '<img src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 128 128%27 fill=%27%23AB9FF2%27%3E%3Cpath d=%27M96 24c17.7 0 32 14.3 32 32v48c0 17.7-14.3 32-32 32H32C14.3 136 0 121.7 0 104V56c0-17.7 14.3-32 32-32h64zm-32 40c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16zm32 0c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16z%27/%3E%3C/svg%3E" alt="Phantom" class="wallet-icon">Connect Wallet';
       showError(
         getErrorMessage(error) || "Failed to connect wallet. Please try again."
       ); // ✅ Safe message
@@ -262,7 +267,7 @@ async function connectWallet() {
     const connectButton = document.getElementById("connectWalletBtn");
     connectButton.disabled = false;
     connectButton.innerHTML =
-      '<img src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 128 128%27 fill=%27%23AB9FF2%27%3E%3Cpath d=%27M96 24c17.7 0 32 14.3 32 32v48c0 17.7-14.3 32-32 32H32C14.3 136 0 121.7 0 104V56c0-17.7 14.3-32 32-32h64zm-32 40c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16zm32 0c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16z%27/%3E%3C/svg%3E" alt="Phantom" class="wallet-icon">Connect Phantom Wallet';
+      '<img src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 128 128%27 fill=%27%23AB9FF2%27%3E%3Cpath d=%27M96 24c17.7 0 32 14.3 32 32v48c0 17.7-14.3 32-32 32H32C14.3 136 0 121.7 0 104V56c0-17.7 14.3-32 32-32h64zm-32 40c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16zm32 0c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16z%27/%3E%3C/svg%3E" alt="Phantom" class="wallet-icon">Connect Wallet';
 
     const errorMsg = getErrorMessage(err);
     if (errorMsg.toLowerCase().includes("recaptcha")) {
@@ -344,14 +349,14 @@ socket.on("loginSuccess", async (data) => {
       );
       document.getElementById("connectWalletBtn").disabled = false;
       document.getElementById("connectWalletBtn").innerHTML =
-        '<img src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 128 128%27 fill=%27%23AB9FF2%27%3E%3Cpath d=%27M96 24c17.7 0 32 14.3 32 32v48c0 17.7-14.3 32-32 32H32C14.3 136 0 121.7 0 104V56c0-17.7 14.3-32 32-32h64zm-32 40c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16zm32 0c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16z%27/%3E%3C/svg%3E" alt="Phantom" class="wallet-icon">Connect Phantom Wallet';
+        '<img src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 128 128%27 fill=%27%23AB9FF2%27%3E%3Cpath d=%27M96 24c17.7 0 32 14.3 32 32v48c0 17.7-14.3 32-32 32H32C14.3 136 0 121.7 0 104V56c0-17.7 14.3-32 32-32h64zm-32 40c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16zm32 0c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16z%27/%3E%3C/svg%3E" alt="Phantom" class="wallet-icon">Connect Wallet';
     }
   } catch (error) {
     logError("http-auth-error", error); // ✅ Safe logging
     showError("Authentication failed. Please try again.");
     document.getElementById("connectWalletBtn").disabled = false;
     document.getElementById("connectWalletBtn").innerHTML =
-      '<img src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 128 128%27 fill=%27%23AB9FF2%27%3E%3Cpath d=%27M96 24c17.7 0 32 14.3 32 32v48c0 17.7-14.3 32-32 32H32C14.3 136 0 121.7 0 104V56c0-17.7 14.3-32 32-32h64zm-32 40c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16zm32 0c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16z%27/%3E%3C/svg%3E" alt="Phantom" class="wallet-icon">Connect Phantom Wallet';
+      '<img src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 128 128%27 fill=%27%23AB9FF2%27%3E%3Cpath d=%27M96 24c17.7 0 32 14.3 32 32v48c0 17.7-14.3 32-32 32H32C14.3 136 0 121.7 0 104V56c0-17.7 14.3-32 32-32h64zm-32 40c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16zm32 0c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16z%27/%3E%3C/svg%3E" alt="Phantom" class="wallet-icon">Connect Wallet';
   }
 });
 
@@ -359,13 +364,44 @@ socket.on("loginFailure", (error) => {
   logError("login-failure", error); // ✅ Safe logging
   document.getElementById("connectWalletBtn").disabled = false;
   document.getElementById("connectWalletBtn").innerHTML =
-    '<img src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 128 128%27 fill=%27%23AB9FF2%27%3E%3Cpath d=%27M96 24c17.7 0 32 14.3 32 32v48c0 17.7-14.3 32-32 32H32C14.3 136 0 121.7 0 104V56c0-17.7 14.3-32 32-32h64zm-32 40c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16zm32 0c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16z%27/%3E%3C/svg%3E" alt="Phantom" class="wallet-icon">Connect Phantom Wallet';
+    '<img src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 128 128%27 fill=%27%23AB9FF2%27%3E%3Cpath d=%27M96 24c17.7 0 32 14.3 32 32v48c0 17.7-14.3 32-32 32H32C14.3 136 0 121.7 0 104V56c0-17.7 14.3-32 32-32h64zm-32 40c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16zm32 0c0 8.8-7.2 16-16 16s-16-7.2-16-16 7.2-16 16-16 16 7.2 16 16z%27/%3E%3C/svg%3E" alt="Phantom" class="wallet-icon">Connect Wallet';
   showError(getErrorMessage(error)); // ✅ User-friendly message
 });
 
 document
   .getElementById("connectWalletBtn")
   .addEventListener("click", connectWallet);
+
+// ── "Use a different wallet" ────────────────────────────────────────────────
+// WalletManager remembers the last wallet and reuses it silently. This link
+// lets the user forget that choice and re-open the picker — only useful when
+// they have more than one wallet installed and one is already remembered.
+function refreshWalletChooser() {
+  const link = document.getElementById("switchWalletBtn");
+  if (!link || !window.WalletManager) return;
+  const selected = WalletManager.getSelected();
+  const installedCount = WalletManager.detect().length;
+  if (selected && installedCount > 1) {
+    link.textContent = `Using ${selected.name} — use a different wallet`;
+    link.style.display = "block";
+  } else {
+    link.style.display = "none";
+  }
+}
+
+const switchWalletBtn = document.getElementById("switchWalletBtn");
+if (switchWalletBtn) {
+  switchWalletBtn.addEventListener("click", async () => {
+    WalletManager.clearSelection();
+    refreshWalletChooser();
+    // Re-run the normal connect flow; with no remembered wallet the picker opens.
+    await connectWallet();
+  });
+}
+
+// Wallets may inject slightly after page load; refresh once now and shortly after.
+refreshWalletChooser();
+setTimeout(refreshWalletChooser, 800);
 
 document.getElementById("playGameBtn").addEventListener("click", () => {
   window.location.href = `game.html`;
@@ -382,8 +418,13 @@ document.getElementById("disconnectBtn").addEventListener("click", async () => {
     logError("logout", error);
   }
 
-  if (window.solana && window.solana.isConnected) {
-    window.solana.disconnect();
+  const activeProvider = WalletManager.getProvider();
+  if (
+    activeProvider &&
+    activeProvider.isConnected &&
+    activeProvider.disconnect
+  ) {
+    activeProvider.disconnect();
   }
 
   // NO localStorage to clear - session was in httpOnly cookie

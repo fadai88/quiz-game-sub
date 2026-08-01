@@ -18,13 +18,13 @@ window.addEventListener("load", () => {
 
 async function connectWallet() {
   try {
-    if (!window.solana || !window.solana.isPhantom) {
-      alert("Please install Phantom wallet!");
+    if (WalletManager.detect().length === 0) {
+      WalletManager.showNoWalletHelp();
       return;
     }
 
-    const resp = await window.solana.connect();
-    wallet = resp.publicKey.toString();
+    const { publicKey } = await WalletManager.connect();
+    wallet = publicKey.toString();
     // Save wallet address to localStorage
     localStorage.setItem("walletAddress", wallet);
     const connectBtn = document.getElementById("connectWalletBtn");

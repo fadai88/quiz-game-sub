@@ -440,6 +440,10 @@
             <div id="question" class="non-copyable"></div>
             <div id="options"></div>
             <button id="submitAnswer" style="display:none;">Submit Answer</button>
+            <button id="quitGameBtn" type="button"
+                style="display:none; margin-top:14px; background:#b91c1c; color:#fff; border:none; padding:8px 18px; border-radius:8px; cursor:pointer; font-size:14px;">
+                Quit Game
+            </button>
         </div>
     
         <div id="gameChoiceModal" class="modal">
@@ -468,6 +472,7 @@
     <audio id="joinSound" src="assets/button-7.mp3" preload="auto"></audio>
 
     <script src="/socket.io/socket.io.js"></script>
+    <script src="/wallet.js"></script>
     <script src="game.js"></script>
 
     <!-- Animated Knowledge Background -->

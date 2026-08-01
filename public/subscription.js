@@ -107,14 +107,16 @@ async function createSubscriptionTransaction(fromWallet, amountUSDC) {
 
 async function connectWallet() {
   try {
-    const { solana } = window;
-    if (!solana?.isPhantom) {
-      showMessage("Please install Phantom wallet", "error");
+    if (WalletManager.detect().length === 0) {
+      showMessage(
+        "No supported Solana wallet found (Phantom, Solflare, Backpack, Coinbase, Glow).",
+        "error"
+      );
       return null;
     }
 
-    const resp = await solana.connect();
-    walletAddress = resp.publicKey.toString();
+    const { publicKey } = await WalletManager.connect();
+    walletAddress = publicKey.toString();
     return walletAddress;
   } catch (error) {
     console.error("Wallet connection error:", error);
@@ -237,7 +239,7 @@ async function subscribe(plan) {
     }
 
     showMessage(
-      "Processing subscription... Please approve the transaction in Phantom",
+      "Processing subscription... Please approve the transaction in your wallet",
       "info"
     );
 
@@ -255,12 +257,12 @@ async function subscribe(plan) {
     );
 
     // Sign transaction with Phantom
-    showMessage(
-      "Please approve the transaction in your Phantom wallet...",
-      "info"
-    );
-    const { solana } = window;
-    const signedTransaction = await solana.signTransaction(transaction);
+    showMessage("Please approve the transaction in your wallet...", "info");
+    const provider = WalletManager.getProvider();
+    if (!provider) {
+      throw new Error("No wallet connected. Please connect a wallet first.");
+    }
+    const signedTransaction = await provider.signTransaction(transaction);
 
     // FIX #1: Send with skipPreflight: true to avoid
     // "already processed" simulation false-positive on retries.

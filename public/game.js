@@ -352,6 +352,7 @@ const playersDiv = document.getElementById("players");
 const questionDiv = document.getElementById("question");
 const optionsDiv = document.getElementById("options");
 const submitAnswerBtn = document.getElementById("submitAnswer");
+const quitGameBtn = document.getElementById("quitGameBtn");
 const countdownTimer = document.getElementById("countdownTimer");
 
 let countdownInterval;
@@ -673,7 +674,13 @@ async function initializeFromSession() {
     "walletStatus"
   ).textContent = `Connected: ${displayWallet(connectedWallet)}`;
 
-  // NO walletReconnect needed - cookie authenticates Socket.IO automatically
+  // A full page reload re-runs this file from scratch, so `isReconnecting` is
+  // false and the connect-handler's restore branch never fires. Ask the server
+  // whether this wallet has an active game and, if so, drop back into it. The
+  // server derives the wallet from the session cookie, so nothing needs to be
+  // persisted client-side. If there's no active game the server replies with
+  // `gameRestoreFailed`, which is silent for this probe (see its handler).
+  socket.emit("requestGameRestore", {});
 
   // Proceed with balance/UI init
   try {
@@ -688,27 +695,33 @@ async function initializeFromSession() {
 
 async function initializeWallet() {
   try {
-    if (!window.solana || !window.solana.isPhantom) {
-      throw new Error("Phantom wallet not installed");
+    // The session is already authenticated via the secure cookie; a wallet is
+    // only needed to sign stake transactions. Try to silently re-attach the
+    // wallet the user logged in with (WalletManager persists the choice). If no
+    // supported wallet is available we don't block — the user can still play
+    // practice/bot games, and staking prompts for a wallet on demand.
+    if (WalletManager.detect().length === 0) {
+      console.log("No supported wallet detected; will prompt when needed.");
+      return;
     }
 
-    // Session already validated by checkSession() - connectedWallet is set
-    // Optional: Auto-connect to Phantom if not already connected
-    if (!window.solana.isConnected) {
+    let provider = WalletManager.getProvider();
+    if (provider && !provider.isConnected) {
       try {
-        await window.solana.connect({ onlyIfTrusted: true });
-        console.log("Auto-connected to Phantom wallet");
+        await WalletManager.connect({ onlyIfTrusted: true });
+        provider = WalletManager.getProvider();
+        console.log("Auto-reconnected wallet");
       } catch (err) {
-        console.log("Phantom not auto-connected:", err.message);
+        console.log("Wallet not auto-connected:", err.message);
       }
     }
 
-    // Verify Phantom wallet matches session wallet (if connected)
-    if (window.solana.isConnected) {
-      const phantomPublicKey = window.solana.publicKey.toString();
-      if (phantomPublicKey !== connectedWallet) {
+    // Verify the connected wallet matches the session wallet.
+    if (provider && provider.isConnected && provider.publicKey) {
+      const walletPublicKey = provider.publicKey.toString();
+      if (walletPublicKey !== connectedWallet) {
         console.warn(
-          `Wallet mismatch: Phantom=${phantomPublicKey}, Session=${connectedWallet}`
+          `Wallet mismatch: wallet=${walletPublicKey}, session=${connectedWallet}`
         );
         alert(
           "Wallet mismatch detected. Please log in with the correct wallet."
@@ -716,7 +729,7 @@ async function initializeWallet() {
         await logout();
         return;
       }
-      console.log("✅ Phantom wallet verified:", phantomPublicKey);
+      console.log("✅ Wallet verified:", walletPublicKey);
     }
   } catch (error) {
     logError("wallet-init", error);
@@ -840,13 +853,8 @@ async function updateBalance() {
 
 async function connectWallet() {
   try {
-    if (window.solana && window.solana.isPhantom) {
-      phantomProvider = window.solana;
-    } else {
-      alert(
-        "Phantom wallet is not installed. Please install it from https://phantom.app/"
-      );
-      window.open("https://phantom.app/", "_blank");
+    if (WalletManager.detect().length === 0) {
+      WalletManager.showNoWalletHelp();
       return;
     }
 
@@ -864,18 +872,19 @@ async function connectWallet() {
       }
     }
 
-    const response = await phantomProvider.connect();
-    connectedWallet = response.publicKey.toString();
+    const { provider, publicKey } = await WalletManager.connect();
+    phantomProvider = provider;
+    connectedWallet = publicKey.toString();
     console.log("Connected to wallet:", connectedWallet);
 
     // Generate message for signing
     const message = `Login to Game - ${Date.now()}`;
     const encodedMessage = new TextEncoder().encode(message);
 
-    // Request signature from wallet
-    const signatureBytes = await phantomProvider.signMessage(
-      encodedMessage,
-      "utf8"
+    // Request signature from wallet (normalized to signature bytes)
+    const signatureBytes = await WalletManager.signMessage(
+      provider,
+      encodedMessage
     );
     const signature = btoa(String.fromCharCode.apply(null, signatureBytes));
 
@@ -916,7 +925,7 @@ function updateWalletStatus() {
   }
 }
 
-window.solana?.on("disconnect", async () => {
+WalletManager.onDisconnect(async () => {
   console.log("Wallet disconnected");
   if (balanceUpdateInterval) {
     clearInterval(balanceUpdateInterval);
@@ -1028,6 +1037,38 @@ joinGameBtn.addEventListener("click", async () => {
     alert("Failed to join game: " + error.message);
     joinGameBtn.disabled = false;
   }
+});
+
+// ── Quit the current game (intentional leave) ───────────────────────────────
+// Lets a player abandon an in-progress game — e.g. a bot practice game — and
+// return to the menu to start a new one, instead of being pulled back into the
+// ongoing room on every "Play". Staked games forfeit, so warn first.
+quitGameBtn.addEventListener("click", () => {
+  if (!currentRoomId) {
+    resetGame();
+    return;
+  }
+  const staked = potMode && currentBetAmount > 0;
+  const confirmMsg = staked
+    ? "Leaving now FORFEITS your staked USDC and counts as a loss. Quit anyway?"
+    : "Quit the current game and return to the menu?";
+  if (!confirm(confirmMsg)) return;
+
+  // The server removes us from the room and (for bot games) deletes it, but it
+  // emits the result to the room only AFTER we've left it — so we won't get an
+  // echo. Reset locally instead of waiting for one.
+  socket.emit("leaveRoom", { roomId: currentRoomId });
+  resetGame();
+  showNotification("You left the game.", "info");
+});
+
+socket.on("leaveRoomError", (msg) => {
+  logError("leave-room", { message: msg });
+  // We've already reset locally; nothing to roll back. Surface it quietly.
+  showNotification(
+    typeof msg === "string" ? msg : "Could not leave the game.",
+    "error"
+  );
 });
 
 socket.on("balanceUpdate", (newBalance) => {
@@ -1406,6 +1447,7 @@ socket.on("gameOver", (data) => {
   currentRoomId = null;
   inMatchmakingQueue = false;
   waitingRoomId = null;
+  quitGameBtn.style.display = "none";
 
   // Clear timers
   if (questionTimer) clearTimeout(questionTimer);
@@ -1576,22 +1618,15 @@ socket.on("playerLeft", (username) => {
 });
 
 socket.on("playerDisconnected", ({ walletAddress }) => {
-  console.log(`Player ${walletAddress} disconnected`);
-  questionDiv.textContent = "";
-  const disconnectMsg = document.createElement("p");
-  disconnectMsg.style.textAlign = "center";
-  disconnectMsg.style.color = "#f59e0b";
-  disconnectMsg.textContent = `⚠️ ${displayWallet(
-    walletAddress
-  )} disconnected. Waiting for reconnection or forfeit...`;
-  questionDiv.appendChild(disconnectMsg);
-  optionsDiv.innerHTML = "";
-  submitAnswerBtn.style.display = "none";
-  if (countdownInterval) {
-    clearInterval(countdownInterval);
-    countdownInterval = null;
-  }
-  countdownTimer.style.display = "none";
+  // The opponent dropped, but the game keeps going. Do NOT touch the current
+  // question, options, submit button, or countdown — the player who stayed must
+  // not be interrupted. Just show a quiet, auto-hiding heads-up. If the rival
+  // rejoins they'll land on the live question; otherwise their answers time out.
+  console.log(`Player ${walletAddress} disconnected; game continues`);
+  showNotification(
+    `${displayWallet(walletAddress)} disconnected — the game continues.`,
+    "info"
+  );
 });
 
 socket.on("gameOverForfeit", (data) => {
@@ -1833,6 +1868,15 @@ socket.on("gameStateRestore", (data) => {
 });
 
 socket.on("gameRestoreFailed", () => {
+  // On a fresh page load we probe for an active game unconditionally. When
+  // there isn't one (the common case), stay quietly on the lobby — this is not
+  // a failure worth surfacing. Only treat it as an error when we were actively
+  // trying to recover a game we know we were in.
+  if (!isReconnecting && !hasGameToRestore) {
+    hideReconnectingOverlay();
+    return;
+  }
+
   hideReconnectingOverlay();
   isReconnecting = false;
   hasGameToRestore = false;
@@ -1938,6 +1982,8 @@ socket.on("updateScores", (players) => {
 });
 
 function displayQuestion(question, options, questionNumber, totalQuestions) {
+  // A game is in progress — offer an intentional exit.
+  quitGameBtn.style.display = "inline-block";
   questionDiv.textContent = "";
   const heading = document.createElement("h2");
   heading.textContent = `Question ${questionNumber} of ${totalQuestions}`;
@@ -2065,6 +2111,7 @@ function resetGame() {
   questionDiv.innerHTML = "";
   optionsDiv.innerHTML = "";
   submitAnswerBtn.style.display = "none";
+  quitGameBtn.style.display = "none";
   waitingMessage.textContent = "";
   joinGameBtn.style.display = "block";
   joinGameBtn.disabled = false;
@@ -2225,13 +2272,32 @@ async function stakeAndJoinMatchmaking() {
 
   waitingMessage.textContent =
     "Please confirm the transaction in your wallet...";
+
+  // Ensure a wallet is connected to sign the stake (it may not be auto-trusted
+  // after a fresh page load). Connecting here shows the picker if the user has
+  // more than one wallet installed.
+  let stakeProvider = WalletManager.getProvider();
+  if (!stakeProvider || !stakeProvider.isConnected) {
+    const res = await WalletManager.connect();
+    stakeProvider = res.provider;
+  }
+  // Guard: never sign a stake with a wallet other than the logged-in one.
+  if (
+    !stakeProvider.publicKey ||
+    stakeProvider.publicKey.toString() !== connectedWallet
+  ) {
+    throw new Error(
+      "Connected wallet does not match your logged-in wallet. Please reconnect the correct wallet."
+    );
+  }
+
   const nonce = generateUUID();
   const transaction = await usdcManager.createTransferTransaction(
     connectedWallet,
     betAmount,
     nonce
   );
-  const signedTransaction = await window.solana.signTransaction(transaction);
+  const signedTransaction = await stakeProvider.signTransaction(transaction);
 
   waitingMessage.textContent = "Sending transaction...";
   const txSignature = await connection.sendRawTransaction(
