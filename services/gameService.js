@@ -15,6 +15,10 @@ const {
   GAME_MODES,
   POT_MULTIPLIERS,
   FRAUD_SUSPICION_THRESHOLD,
+  QUESTIONS_PER_MATCH,
+  TIEBREAK_MODE,
+  TIEBREAK_MODES,
+  SUDDEN_DEATH_MAX_ROUNDS,
   isPotMode,
 } = require("../config/constants");
 const { calculateWinnings, formatUSDC } = require("../utils/usdcUtils");
@@ -41,6 +45,7 @@ const {
 // Quiz model is expected to be in models/Quiz — adjust path if different
 const Quiz = require("../models/Quiz");
 const PracticeQuiz = require("../models/PracticeQuiz");
+const telemetry = require("./telemetry");
 
 // Pick the question bank for a room. Free practice games draw from the separate
 // PracticeQuiz collection; every real game — staked, ranked, or tournament —
@@ -351,7 +356,7 @@ async function startGame(roomId) {
 
     const rawQuestions = await questionBankForRoom(room).aggregate([
       ...matchStage,
-      { $sample: { size: 7 } },
+      { $sample: { size: QUESTIONS_PER_MATCH } },
     ]);
     logger.info(`Fetched ${rawQuestions.length} questions for room ${roomId}`);
 
@@ -427,7 +432,7 @@ async function startSinglePlayerGame(roomId) {
 
     const rawQuestions = await questionBankForRoom(room).aggregate([
       ...matchStage,
-      { $sample: { size: 7 } },
+      { $sample: { size: QUESTIONS_PER_MATCH } },
     ]);
     room.questions = rawQuestions.map((question) => {
       const tempId = `${roomId}-${uuidv4()}`;
@@ -709,12 +714,26 @@ async function startNextQuestion(roomId) {
         `[QTIMING] room=${roomId} q=${timeoutForIndex} TIMEOUT fired: ` +
           `elapsedMs=${elapsedMs} (expected ~10000)`
       );
+      const timedOutQuestion = updatedRoom.questions?.[timeoutForIndex];
       updatedRoom._timedOutPlayers?.forEach((p) => {
         io.to(roomId).emit("playerAnswered", {
           username: p.username,
           isBot: false,
           timedOut: true,
           responseTime: p.responseTime,
+        });
+        // Log the timeout as telemetry — "which questions people fail to answer
+        // in time" is a difficulty signal, and cheaters rarely time out.
+        telemetry.logAnswer({
+          wallet: p.username,
+          roomId,
+          questionId: timedOutQuestion?._id,
+          questionIndex: timeoutForIndex,
+          gameMode: updatedRoom.roomMode,
+          betAmount: updatedRoom.betAmount,
+          responseTimeMs: p.responseTime,
+          isCorrect: false,
+          timedOut: true,
         });
       });
       await completeQuestion(roomId);
@@ -879,12 +898,26 @@ async function restartCurrentQuestion(roomId) {
         await logGameRoomsState();
         return;
       }
+      const timedOutQuestion = updatedRoom.questions?.[timeoutForIndex];
       updatedRoom._timedOutPlayers?.forEach((p) => {
         io.to(roomId).emit("playerAnswered", {
           username: p.username,
           isBot: false,
           timedOut: true,
           responseTime: p.responseTime,
+        });
+        // Log the timeout as telemetry — "which questions people fail to answer
+        // in time" is a difficulty signal, and cheaters rarely time out.
+        telemetry.logAnswer({
+          wallet: p.username,
+          roomId,
+          questionId: timedOutQuestion?._id,
+          questionIndex: timeoutForIndex,
+          gameMode: updatedRoom.roomMode,
+          betAmount: updatedRoom.betAmount,
+          responseTimeMs: p.responseTime,
+          isCorrect: false,
+          timedOut: true,
         });
       });
       await completeQuestion(roomId);
@@ -1009,6 +1042,128 @@ async function completeQuestion(roomId) {
   }
 }
 
+// ─── Sudden-death tie-break ───────────────────────────────────────────────────
+
+// Build one extra question for a sudden-death round (same shape as startGame),
+// excluding every question already used in this match and, best-effort, the
+// player's recent history. Returns null if none can be sampled.
+async function buildSuddenDeathQuestion(room, roomId) {
+  const usedIds = room.questions
+    .map((q) => q._id)
+    .filter(Boolean)
+    .map((id) => new mongoose.Types.ObjectId(id));
+
+  let recentIds = [];
+  const humanPlayer = room.players.find((p) => !p.isBot);
+  if (humanPlayer) {
+    const user = await User.findOne({ walletAddress: humanPlayer.username });
+    if (user?.recentQuestions?.length > 0) {
+      recentIds = user.recentQuestions.map(
+        (id) => new mongoose.Types.ObjectId(id)
+      );
+    }
+  }
+
+  let sampled = await questionBankForRoom(room).aggregate([
+    { $match: { _id: { $nin: [...usedIds, ...recentIds] } } },
+    { $sample: { size: 1 } },
+  ]);
+  // If recent-history exclusion emptied the pool, retry excluding only the
+  // questions already used in THIS match — never repeat a question in one game.
+  if (!sampled[0]) {
+    sampled = await questionBankForRoom(room).aggregate([
+      { $match: { _id: { $nin: usedIds } } },
+      { $sample: { size: 1 } },
+    ]);
+  }
+  const question = sampled[0];
+  if (!question) return null;
+
+  const shuffledOptions = shuffleArray([...question.options]);
+  const shuffledCorrectAnswer = shuffledOptions.indexOf(
+    question.options[question.correctAnswer]
+  );
+  if (shuffledCorrectAnswer === -1) return null;
+
+  return {
+    tempId: `${roomId}-${uuidv4()}`,
+    _id: question._id,
+    question: question.question,
+    options: question.options,
+    correctAnswer: question.correctAnswer,
+    shuffledOptions,
+    shuffledCorrectAnswer,
+  };
+}
+
+// If TIEBREAK_MODE is "sudden_death" and the match is a genuine tie, append a
+// tie-break question and resume the normal round loop instead of settling now.
+// Returns true when it did so (caller must return without settling). Falls back
+// (returns false → normal response-time tie-break) for bot games, non-ties,
+// abandoned games, when the round cap is hit, or if no question can be sampled —
+// guaranteeing the match always terminates.
+async function maybeEnterSuddenDeath(room, roomId, gameOverLock) {
+  if (TIEBREAK_MODE !== TIEBREAK_MODES.SUDDEN_DEATH) return false;
+  if (room.playerLeft) return false; // someone walked — leaver forfeits, settle
+  if (room.players.some((p) => p.isBot)) return false; // bot games unchanged
+  if (room.players.filter((p) => !p.isBot).length < 2) return false;
+
+  const maxScore = Math.max(...room.players.map((p) => p.score || 0));
+  const leaders = room.players.filter((p) => (p.score || 0) === maxScore);
+  if (leaders.length < 2) return false; // clear winner, no tie
+
+  if ((room.suddenDeathRounds || 0) >= SUDDEN_DEATH_MAX_ROUNDS) {
+    logger.info(
+      `[SUDDEN-DEATH] room ${roomId} still tied after ${
+        room.suddenDeathRounds || 0
+      } round(s) — falling back to response-time tie-break`
+    );
+    return false;
+  }
+
+  const newQuestion = await buildSuddenDeathQuestion(room, roomId);
+  if (!newQuestion) {
+    logger.warn(
+      `[SUDDEN-DEATH] room ${roomId}: no tie-break question available — falling back to response-time tie-break`
+    );
+    return false;
+  }
+
+  const updated = await atomicRoomUpdate(roomId, async (latest) => {
+    if (!latest || latest.isDeleted || latest.playerLeft) {
+      latest._suddenDeathAborted = true;
+      return latest;
+    }
+    latest.questions.push(newQuestion);
+    latest.questionIdMap.set(newQuestion.tempId, newQuestion);
+    latest.suddenDeathRounds = (latest.suddenDeathRounds || 0) + 1;
+    return latest;
+  }).catch((err) => {
+    logger.error(
+      `[SUDDEN-DEATH] failed to append tie-break question for room ${roomId}:`,
+      err
+    );
+    return null;
+  });
+
+  if (!updated || updated._suddenDeathAborted) return false;
+
+  // Release the game-over lock so the NEXT handleGameOver (after this tie-break
+  // question resolves) can acquire it and settle.
+  await releaseIdempotencyLock(gameOverLock);
+
+  context.io.to(roomId).emit("suddenDeath", {
+    round: updated.suddenDeathRounds,
+    message: "Tie! Sudden-death question — pull ahead to win.",
+  });
+  logger.info(
+    `[SUDDEN-DEATH] room ${roomId}: entering round ${updated.suddenDeathRounds} (tie at score ${maxScore})`
+  );
+
+  await startNextQuestion(roomId);
+  return true;
+}
+
 // ─── Game over ────────────────────────────────────────────────────────────────
 
 async function handleGameOver(room, roomId) {
@@ -1020,6 +1175,10 @@ async function handleGameOver(room, roomId) {
     logger.info(`handleGameOver: duplicate call blocked for room ${roomId}`);
     return;
   }
+
+  // Opt-in sudden-death tie-break. If entered, we've appended a question and
+  // resumed the round loop — do not settle now.
+  if (await maybeEnterSuddenDeath(room, roomId, gameOverLock)) return;
 
   const sortedPlayers = [...room.players].sort((a, b) =>
     b.score !== a.score

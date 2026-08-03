@@ -78,6 +78,7 @@ const {
   handlePlayerLeftWin,
 } = require("../services/playerService");
 const { queueOnChainRefund } = require("../services/refunds");
+const telemetry = require("../services/telemetry");
 const {
   verifyAndValidateTransaction,
 } = require("../services/transactionVerifier");
@@ -1458,7 +1459,9 @@ async function handleGameEvent(socket, event, args) {
   if (event === "submitAnswer") {
     const arrivalTime = Date.now();
 
-    const { error } = submitAnswerSchema.validate(data);
+    const { error, value } = submitAnswerSchema.validate(data, {
+      stripUnknown: true,
+    });
     if (error) {
       trackValidationFailure(
         socket.user?.walletAddress,
@@ -1468,7 +1471,7 @@ async function handleGameEvent(socket, event, args) {
       socket.emit("answerError", "Invalid input format");
       return;
     }
-    const { roomId, questionId, answer } = data;
+    const { roomId, questionId, answer, clientSignals } = value;
     const walletAddress = socket.user.walletAddress;
     const clientIP = getClientIpFromSocket(socket);
     await rateLimitEvent(walletAddress, "submitAnswer", clientIP, socket);
@@ -1503,6 +1506,7 @@ async function handleGameEvent(socket, event, args) {
     const LATE_GRACE_MS = 200; // absorbs normal network jitter
 
     let finalResponseTime = 0;
+    let answerWasCorrect = false;
     const atomicResult = await atomicRoomUpdate(roomId, async (r) => {
       // questionStartTime is nulled by completeQuestion when a round ends.
       // If it's already null, this round is over — silently discard.
@@ -1532,6 +1536,7 @@ async function handleGameEvent(socket, event, args) {
         }
         finalResponseTime = serverResponseTime;
         const isCorrect = answer === currentQuestion.shuffledCorrectAnswer;
+        answerWasCorrect = isCorrect;
         p.answered = true;
         p.lastAnswer = answer;
         p.lastResponseTime = serverResponseTime;
@@ -1574,6 +1579,21 @@ async function handleGameEvent(socket, event, args) {
       isBot: false,
       timedOut: false,
       responseTime: finalResponseTime,
+    });
+
+    // Anti-cheat / skill-evidence / difficulty telemetry. Fire-and-forget —
+    // never awaited, never throws into the game path.
+    telemetry.logAnswer({
+      wallet: walletAddress,
+      roomId,
+      questionId: questionData._id,
+      questionIndex: atomicResult.currentQuestionIndex,
+      gameMode: atomicResult.roomMode,
+      betAmount: atomicResult.betAmount,
+      responseTimeMs: finalResponseTime,
+      isCorrect: answerWasCorrect,
+      timedOut: false,
+      clientSignals,
     });
 
     const updatedRoom = await getGameRoom(roomId);

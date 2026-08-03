@@ -225,6 +225,7 @@ async function getGameRoom(roomId) {
           ? parseInt(roomData.currentQuestionIndex)
           : -1,
       answersReceived: parseInt(roomData.answersReceived) || 0,
+      suddenDeathRounds: parseInt(roomData.suddenDeathRounds) || 0,
       gameStarted: roomData.gameStarted === "true",
       roomMode: roomData.roomMode || null,
       hasBot: roomData.hasBot === "true",
@@ -280,6 +281,7 @@ function _serializeRoom(room) {
     betAmount: room.betAmount.toString(),
     currentQuestionIndex: room.currentQuestionIndex.toString(),
     answersReceived: room.answersReceived.toString(),
+    suddenDeathRounds: (room.suddenDeathRounds || 0).toString(),
     gameStarted: room.gameStarted.toString(),
     roomMode: room.roomMode || "",
     hasBot: room.hasBot.toString(),

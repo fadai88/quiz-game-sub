@@ -75,6 +75,16 @@ const submitAnswerSchema = Joi.object({
     "number.max": "Answer index cannot exceed 3",
   }),
   recaptchaToken: Joi.string().optional().allow(null, ""),
+  // Optional, untrusted anti-cheat telemetry self-reported by the client
+  // (tab-visibility / focus signals). Bounded so a malicious client can't stuff
+  // arbitrary payloads; unknown keys are stripped. Never treated as truth.
+  clientSignals: Joi.object({
+    visibilityChanges: Joi.number().integer().min(0).max(10000).optional(),
+    blurEvents: Joi.number().integer().min(0).max(10000).optional(),
+    focusEvents: Joi.number().integer().min(0).max(10000).optional(),
+    copyEvents: Joi.number().integer().min(0).max(10000).optional(),
+    hidden: Joi.boolean().optional(),
+  }).optional(),
 });
 
 const playerReadySchema = Joi.object({
