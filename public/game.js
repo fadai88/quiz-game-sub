@@ -1252,6 +1252,46 @@ socket.on("matchmakingError", async (error) => {
   }
 });
 
+// ─── Anti-cheat context signals ──────────────────────────────────────────────
+// Per-question, self-reported signals (tab switching / focus loss / copy) that
+// hint at a same-device assistant being consulted mid-question. They are weak on
+// their own and trivially spoofable, so the server stores them only as untrusted
+// aggregate evidence, never as proof. A second-device (phone camera) cheat
+// produces none of these by design — this raises the cost of the lazy,
+// same-device class only (e.g. an LLM in another tab, copy-paste).
+let questionSignals = null;
+let signalsActive = false;
+
+function resetQuestionSignals() {
+  questionSignals = {
+    visibilityChanges: 0,
+    blurEvents: 0,
+    focusEvents: 0,
+    copyEvents: 0,
+    hidden: false,
+  };
+  signalsActive = true;
+}
+
+function stopQuestionSignals() {
+  signalsActive = false;
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!signalsActive || !questionSignals) return;
+  questionSignals.visibilityChanges++;
+  if (document.hidden) questionSignals.hidden = true;
+});
+window.addEventListener("blur", () => {
+  if (signalsActive && questionSignals) questionSignals.blurEvents++;
+});
+window.addEventListener("focus", () => {
+  if (signalsActive && questionSignals) questionSignals.focusEvents++;
+});
+document.addEventListener("copy", () => {
+  if (signalsActive && questionSignals) questionSignals.copyEvents++;
+});
+
 submitAnswerBtn.addEventListener("click", async () => {
   const selectedOption = document.querySelector('input[name="answer"]:checked');
   if (!selectedOption) {
@@ -1271,7 +1311,9 @@ submitAnswerBtn.addEventListener("click", async () => {
     roomId: currentRoomId,
     questionId: currentQuestionId,
     answer: selectedAnswer,
+    ...(questionSignals ? { clientSignals: questionSignals } : {}),
   });
+  stopQuestionSignals();
 
   submitAnswerBtn.disabled = true;
   waitingMessage.textContent = "Waiting for other player to answer...";
@@ -1333,6 +1375,7 @@ socket.on(
   }) => {
     currentQuestionId = questionId;
     waitingMessage.innerHTML = "";
+    resetQuestionSignals();
 
     displayQuestion(question, options, questionNumber, totalQuestions);
     submitAnswerBtn.disabled = false;
@@ -1794,6 +1837,7 @@ socket.on("gameStateRestore", (data) => {
         data.activeQuestion.totalQuestions
       );
       currentQuestionId = data.activeQuestion.questionId;
+      resetQuestionSignals();
       submitAnswerBtn.style.display = "block";
       submitAnswerBtn.disabled = false;
       waitingMessage.innerHTML = ""; // Clear "Round Results" or "Joined" messages
