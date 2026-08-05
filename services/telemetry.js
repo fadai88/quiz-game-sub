@@ -41,6 +41,10 @@ function toObjectId(id) {
  * @param {number} [r.responseTimeMs] server-measured response time
  * @param {boolean} [r.isCorrect]
  * @param {boolean} [r.timedOut]
+ * @param {number} [r.selectedOption] chosen option index (-1 for timeout)
+ * @param {string} [r.ip]             server-observed client IP
+ * @param {string} [r.socketId]       per-connection session id
+ * @param {string} [r.userAgent]      client user-agent (weak device fingerprint)
  * @param {object} [r.clientSignals]  untrusted, self-reported client signals
  */
 function logAnswer(r) {
@@ -65,6 +69,12 @@ function logAnswer(r) {
         responseTimeMs: Number(r.responseTimeMs) || 0,
         isCorrect: !!r.isCorrect,
         timedOut: !!r.timedOut,
+        selectedOption: Number.isFinite(r.selectedOption)
+          ? r.selectedOption
+          : -1,
+        ip: r.ip || undefined,
+        socketId: r.socketId || undefined,
+        userAgent: r.userAgent || undefined,
         clientSignals: r.clientSignals || undefined,
       });
     })

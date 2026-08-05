@@ -1593,6 +1593,10 @@ async function handleGameEvent(socket, event, args) {
       responseTimeMs: finalResponseTime,
       isCorrect: answerWasCorrect,
       timedOut: false,
+      selectedOption: answer,
+      ip: clientIP,
+      socketId: socket.id,
+      userAgent: socket.handshake?.headers?.["user-agent"],
       clientSignals,
     });
 

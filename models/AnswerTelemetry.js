@@ -40,6 +40,17 @@ const AnswerTelemetrySchema = new mongoose.Schema(
     responseTimeMs: { type: Number, default: 0 },
     isCorrect: { type: Boolean, default: false },
     timedOut: { type: Boolean, default: false },
+    // The (shuffled) option index the player chose; -1 for a timeout. Options are
+    // shuffled once per question (same order for both opponents), so identical
+    // selectedOption patterns across a match are a collusion signal.
+    selectedOption: { type: Number, default: -1 },
+
+    // Device / network identity — for multi-account and collusion clustering
+    // (same IP/UA behind two "opponents", or one person farming many accounts).
+    // Server-observed; only populated for real answers, not server-side timeouts.
+    ip: { type: String },
+    socketId: { type: String },
+    userAgent: { type: String },
 
     // Optional, untrusted, self-reported by the client. Bounded upstream.
     clientSignals: { type: mongoose.Schema.Types.Mixed, default: undefined },
@@ -53,5 +64,7 @@ AnswerTelemetrySchema.index({ wallet: 1, createdAt: -1 });
 AnswerTelemetrySchema.index({ questionId: 1 });
 // Per-match reconstruction.
 AnswerTelemetrySchema.index({ roomId: 1 });
+// Device/network clustering (multi-account, collusion).
+AnswerTelemetrySchema.index({ ip: 1, createdAt: -1 });
 
 module.exports = mongoose.model("AnswerTelemetry", AnswerTelemetrySchema);
