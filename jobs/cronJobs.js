@@ -13,6 +13,7 @@ const GameSession = require("../models/GameSession");
 const PrizeCycle = require("../models/PrizeCycle");
 const PaymentQueue = require("../models/PaymentQueue");
 const { queueOnChainRefund } = require("../services/refunds");
+const { recomputeQuestionStats } = require("../services/questionStats");
 const {
   trackFailedPayout,
   trackStuckPayment,
@@ -73,6 +74,24 @@ async function registerCronJobs(botDetector = null) {
     }
   });
   logger.info("🛡️ Safety Net cron job initialized (runs every 5 minutes)");
+
+  // ── Question difficulty: recompute from telemetry every 6 hours ───────────
+  // Read-only over AnswerTelemetry, writes only QuestionStats — never touches
+  // gameplay or payments. Feeds anti-cheat scoring, adaptive timers, and
+  // balanced-difficulty sampling. Runs quietly until real play accumulates.
+  cron.schedule("30 */6 * * *", async () => {
+    try {
+      const { questions, totalAnswers } = await recomputeQuestionStats();
+      if (questions > 0) {
+        logger.info(
+          `📊 QuestionStats refreshed: ${questions} question(s) from ${totalAnswers} answer(s)`
+        );
+      }
+    } catch (error) {
+      logger.error("❌ QuestionStats cron error:", { error: error.message });
+    }
+  });
+  logger.info("📊 QuestionStats cron initialized (runs every 6 hours)");
 
   // ── Subscription expiry: every hour ───────────────────────────────────────
   // Subscription mode only — pot mode sells no subscriptions to expire.
