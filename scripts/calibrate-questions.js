@@ -11,15 +11,20 @@
  * skipped (unless --force). Never logs the API key.
  *
  * Usage (run from project root, where .env lives):
- *   node scripts/calibrate-questions.js --dry-run --limit 20
- *   node scripts/calibrate-questions.js --limit 50            # small real run
- *   node scripts/calibrate-questions.js                       # full bank
+ *   node scripts/calibrate-questions.js --dry-run --batch 20
+ *   node scripts/calibrate-questions.js --limit 50                 # small real run
+ *   node scripts/calibrate-questions.js                            # full, one-per-call
+ *   node scripts/calibrate-questions.js --batch 20 --concurrency 10  # fast pass
  *
  * Flags:
  *   --model <id>        LLM to test (default claude-haiku-4-5-20251001 — cheap)
  *   --collection <name> Quiz (default) | PracticeQuiz
  *   --limit <n>         cap the number of questions this run (0 = all)
- *   --concurrency <n>   parallel requests (default 5)
+ *   --batch <n>         questions per API call (default 1). >1 packs many
+ *                       questions into one request — far fewer round-trips, so
+ *                       much faster. Try 20.
+ *   --concurrency <n>   parallel requests/batches (default 5). Questions in
+ *                       flight ≈ batch × concurrency; if you see 429s, lower these.
  *   --force             recalibrate questions already done for this model
  *   --dry-run           no API calls, no writes — just show what would happen
  */
@@ -47,6 +52,7 @@ function arg(name, def) {
 const MODEL = arg("model", "claude-haiku-4-5-20251001");
 const COLLECTION = arg("collection", "Quiz");
 const LIMIT = parseInt(arg("limit", "0"), 10) || 0;
+const BATCH = Math.max(1, parseInt(arg("batch", "1"), 10) || 1);
 const CONCURRENCY = Math.max(1, parseInt(arg("concurrency", "5"), 10) || 5);
 const FORCE = process.argv.includes("--force");
 const DRY_RUN = process.argv.includes("--dry-run");
@@ -62,12 +68,12 @@ const stats = {
   outTok: 0,
 };
 let fatalAuth = null;
+let lastBucket = 0;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ─── LLM call ───────────────────────────────────────────────────────────────
-async function askModel(question, options) {
-  const optionsText = options.map((o, i) => `${i}) ${o}`).join("\n");
+// ─── LLM calls ────────────────────────────────────────────────────────────────
+async function callAnthropic(body) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -75,24 +81,8 @@ async function askModel(question, options) {
       "x-api-key": API_KEY,
       "anthropic-version": "2023-06-01",
     },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 10,
-      temperature: 0,
-      system:
-        "You are answering a multiple-choice trivia question. Reply with ONLY " +
-        "the number of the correct option — no words, no punctuation.",
-      messages: [
-        {
-          role: "user",
-          content:
-            `Question: ${question}\nOptions:\n${optionsText}\n\n` +
-            `Reply with only the option number (0-${options.length - 1}).`,
-        },
-      ],
-    }),
+    body: JSON.stringify(body),
   });
-
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     const err = new Error(`API ${res.status}: ${text.slice(0, 200)}`);
@@ -107,18 +97,67 @@ async function askModel(question, options) {
   };
 }
 
-async function askWithRetry(q, tries = 5) {
+async function askModel(question, options) {
+  const optionsText = options.map((o, i) => `${i}) ${o}`).join("\n");
+  return callAnthropic({
+    model: MODEL,
+    max_tokens: 10,
+    temperature: 0,
+    system:
+      "You are answering a multiple-choice trivia question. Reply with ONLY " +
+      "the number of the correct option — no words, no punctuation.",
+    messages: [
+      {
+        role: "user",
+        content:
+          `Question: ${question}\nOptions:\n${optionsText}\n\n` +
+          `Reply with only the option number (0-${options.length - 1}).`,
+      },
+    ],
+  });
+}
+
+function buildBatchContent(questions) {
+  const blocks = questions
+    .map((q, i) => {
+      const opts = q.options.map((o, j) => `${j}) ${o}`).join("\n");
+      return `${i + 1}. ${q.question}\n${opts}`;
+    })
+    .join("\n\n");
+  return (
+    `Answer each numbered multiple-choice question below.\n\n${blocks}\n\n` +
+    "Respond with one line per question in the exact format `N=I`, where N is " +
+    "the question number and I is the 0-based index of the correct option " +
+    "(e.g. `1=2`). Output only these lines, one per question."
+  );
+}
+
+async function askModelBatch(questions) {
+  const { text, usage } = await callAnthropic({
+    model: MODEL,
+    max_tokens: questions.length * 8 + 20,
+    temperature: 0,
+    system:
+      "You are answering multiple-choice trivia questions. For each numbered " +
+      "question output exactly one line `N=I` (question number = 0-based correct " +
+      "option index). No other text.",
+    messages: [{ role: "user", content: buildBatchContent(questions) }],
+  });
+  return { answers: parseBatch(text, questions), usage };
+}
+
+async function withRetry(fn, tries = 5) {
   let delay = 1000;
   for (let t = 1; t <= tries; t++) {
     try {
-      return await askModel(q.question, q.options);
+      return await fn();
     } catch (e) {
       if (e.status === 401 || e.status === 403) {
         fatalAuth = e.message;
         throw e;
       }
-      // No credits / billing not set up — every request will fail the same way,
-      // so stop the whole run immediately instead of hammering the bank.
+      // No credits / billing not set up — every request fails identically, so
+      // stop the whole run immediately instead of hammering the bank.
       if (
         e.status === 400 &&
         /credit balance|Plans & Billing/i.test(e.message)
@@ -134,11 +173,30 @@ async function askWithRetry(q, tries = 5) {
   }
 }
 
+// ─── Parsing ──────────────────────────────────────────────────────────────────
 function parseIndex(text, n) {
   const m = String(text).match(/\d+/);
   if (!m) return -1;
   const v = parseInt(m[0], 10);
   return v >= 0 && v < n ? v : -1;
+}
+
+// Parse `N=I` lines into an answers array aligned to `questions`. Any question
+// the model didn't answer stays `undefined` (left pending for a future run,
+// rather than being recorded as a wrong -1).
+function parseBatch(text, questions) {
+  const answers = new Array(questions.length).fill(undefined);
+  const re = /(\d+)\s*=\s*(\d+)/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const qi = parseInt(m[1], 10) - 1;
+    const opt = parseInt(m[2], 10);
+    if (qi >= 0 && qi < questions.length) {
+      const nOpts = questions[qi].options.length;
+      answers[qi] = opt >= 0 && opt < nOpts ? opt : -1;
+    }
+  }
+  return answers;
 }
 
 function isValidQuestion(q) {
@@ -150,6 +208,26 @@ function isValidQuestion(q) {
     q.correctAnswer < q.options.length &&
     typeof q.question === "string" &&
     q.question.length > 0
+  );
+}
+
+async function recordResult(q, llmAnswer, raw) {
+  const idx = Number.isInteger(llmAnswer) ? llmAnswer : -1;
+  const llmCorrect = idx === q.correctAnswer;
+  stats.processed++;
+  if (llmCorrect) stats.correct++;
+  await QuestionCalibration.updateOne(
+    { questionId: q._id, model: MODEL },
+    {
+      $set: {
+        collectionName: COLLECTION,
+        correctAnswer: q.correctAnswer,
+        llmAnswer: idx,
+        llmCorrect,
+        raw: raw ? String(raw).slice(0, 20) : "",
+      },
+    },
+    { upsert: true }
   );
 }
 
@@ -176,41 +254,46 @@ async function runPool(items, worker) {
   );
 }
 
-async function worker(q) {
+async function processChunk(chunk) {
   if (fatalAuth) return;
-  if (!isValidQuestion(q)) {
-    stats.skipped++;
-    return;
-  }
-  try {
-    const { text, usage } = await askWithRetry(q);
-    const llmAnswer = parseIndex(text, q.options.length);
-    const llmCorrect = llmAnswer === q.correctAnswer;
-    stats.processed++;
-    if (llmCorrect) stats.correct++;
-    stats.inTok += usage.input_tokens || 0;
-    stats.outTok += usage.output_tokens || 0;
+  const valid = chunk.filter(isValidQuestion);
+  stats.skipped += chunk.length - valid.length;
+  if (valid.length === 0) return;
 
-    await QuestionCalibration.updateOne(
-      { questionId: q._id, model: MODEL },
-      {
-        $set: {
-          collectionName: COLLECTION,
-          correctAnswer: q.correctAnswer,
-          llmAnswer,
-          llmCorrect,
-          raw: String(text).slice(0, 20),
-        },
-      },
-      { upsert: true }
-    );
+  try {
+    if (valid.length === 1) {
+      const q = valid[0];
+      const { text, usage } = await withRetry(() =>
+        askModel(q.question, q.options)
+      );
+      stats.inTok += usage.input_tokens || 0;
+      stats.outTok += usage.output_tokens || 0;
+      await recordResult(q, parseIndex(text, q.options.length), text);
+    } else {
+      const { answers, usage } = await withRetry(() => askModelBatch(valid));
+      stats.inTok += usage.input_tokens || 0;
+      stats.outTok += usage.output_tokens || 0;
+      for (let i = 0; i < valid.length; i++) {
+        if (answers[i] === undefined) continue; // unanswered → retry next run
+        await recordResult(valid[i], answers[i]);
+      }
+    }
   } catch (e) {
-    stats.errors++;
-    if (!fatalAuth) console.error(`  ✗ ${q._id}: ${e.message}`);
+    stats.errors += valid.length;
+    if (!fatalAuth) console.error(`  ✗ chunk(${valid.length}): ${e.message}`);
   }
-  if ((stats.processed + stats.errors + stats.skipped) % 50 === 0) {
+
+  const bucket = Math.floor(stats.processed / 100);
+  if (bucket > lastBucket) {
+    lastBucket = bucket;
     logProgress();
   }
+}
+
+function chunkArray(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -236,8 +319,10 @@ async function main() {
 
   await mongoose.connect(process.env.MONGODB_URI);
   console.log(
-    `🔌 Connected. Calibrating "${COLLECTION}" against model "${MODEL}"` +
-      `${DRY_RUN ? " (DRY RUN)" : ""}`
+    `🔌 Connected. Calibrating "${COLLECTION}" against model "${MODEL}" ` +
+      `(batch ${BATCH}, concurrency ${CONCURRENCY})${
+        DRY_RUN ? " (DRY RUN)" : ""
+      }`
   );
 
   const all = await Bank.find({}, "question options correctAnswer").lean();
@@ -267,26 +352,40 @@ async function main() {
     return;
   }
 
+  const chunks = chunkArray(pending, BATCH);
+
   if (DRY_RUN) {
-    const sample = pending.find(isValidQuestion) || pending[0];
-    console.log(
-      `\n(DRY RUN) Would send ${pending.length} questions. Sample prompt:\n` +
-        `---\nQuestion: ${sample.question}\nOptions:\n` +
-        (sample.options || []).map((o, i) => `${i}) ${o}`).join("\n") +
-        `\n---\nNo API calls made, nothing written.`
-    );
+    const validPending = pending.filter(isValidQuestion);
+    if (BATCH > 1) {
+      const sample = validPending.slice(0, Math.min(BATCH, 3));
+      console.log(
+        `\n(DRY RUN) Would send ${pending.length} questions in ${chunks.length} ` +
+          `batch(es) of up to ${BATCH}, ${CONCURRENCY} in parallel.\n` +
+          `Sample batch prompt (first ${sample.length} of a batch):\n---\n` +
+          buildBatchContent(sample) +
+          `\n---\nNo API calls made, nothing written.`
+      );
+    } else {
+      const sample = validPending[0] || pending[0];
+      console.log(
+        `\n(DRY RUN) Would send ${pending.length} questions one per call. ` +
+          `Sample prompt:\n---\nQuestion: ${sample.question}\nOptions:\n` +
+          (sample.options || []).map((o, i) => `${i}) ${o}`).join("\n") +
+          `\n---\nNo API calls made, nothing written.`
+      );
+    }
     await mongoose.connection.close();
     return;
   }
 
   const started = Date.now();
-  await runPool(pending, worker);
+  await runPool(chunks, processChunk);
 
   console.log("\n──────── done ────────");
   logProgress();
   if (fatalAuth) {
     console.error(
-      `\n❌ Stopped early — authentication failed (${fatalAuth}). ` +
+      `\n❌ Stopped early — ${fatalAuth}. ` +
         `Check ANTHROPIC_API_KEY in .env and that the account has API credits.`
     );
   }
@@ -304,7 +403,7 @@ async function main() {
   );
   console.log(
     "Re-run the same command to continue where you left off (already-done " +
-      "questions are skipped)."
+      "questions, and any a batch skipped, are picked up next time)."
   );
 
   await mongoose.connection.close();
