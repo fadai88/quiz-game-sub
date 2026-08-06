@@ -14,6 +14,7 @@ const PrizeCycle = require("../models/PrizeCycle");
 const PaymentQueue = require("../models/PaymentQueue");
 const { queueOnChainRefund } = require("../services/refunds");
 const { recomputeQuestionStats } = require("../services/questionStats");
+const { recomputeAllRisk } = require("../services/riskScore");
 const {
   trackFailedPayout,
   trackStuckPayment,
@@ -92,6 +93,23 @@ async function registerCronJobs(botDetector = null) {
     }
   });
   logger.info("📊 QuestionStats cron initialized (runs every 6 hours)");
+
+  // ── Player risk: recompute suspicion scores daily ─────────────────────────
+  // Read-only over telemetry/calibration, writes only PlayerRisk. REVIEW-ONLY —
+  // surfaces accounts for human review, never seizes funds. Runs at 03:15 UTC.
+  cron.schedule("15 3 * * *", async () => {
+    try {
+      const { scored, flagged } = await recomputeAllRisk();
+      if (flagged > 0) {
+        logger.warn(
+          `🚩 Player-risk refresh: ${flagged} account(s) flagged for review (of ${scored} scored)`
+        );
+      }
+    } catch (error) {
+      logger.error("❌ Player-risk cron error:", { error: error.message });
+    }
+  });
+  logger.info("🚩 Player-risk cron initialized (runs daily 03:15 UTC)");
 
   // ── Subscription expiry: every hour ───────────────────────────────────────
   // Subscription mode only — pot mode sells no subscriptions to expire.
