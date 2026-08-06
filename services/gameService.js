@@ -19,6 +19,7 @@ const {
   TIEBREAK_MODE,
   TIEBREAK_MODES,
   SUDDEN_DEATH_MAX_ROUNDS,
+  DISCRIMINATOR_SEED_COUNT,
   isPotMode,
 } = require("../config/constants");
 const { calculateWinnings, formatUSDC } = require("../utils/usdcUtils");
@@ -46,6 +47,7 @@ const {
 const Quiz = require("../models/Quiz");
 const PracticeQuiz = require("../models/PracticeQuiz");
 const telemetry = require("./telemetry");
+const { getDiscriminatorIds } = require("./discriminators");
 
 // Pick the question bank for a room. Free practice games draw from the separate
 // PracticeQuiz collection; every real game — staked, ranked, or tournament —
@@ -62,6 +64,42 @@ function questionBankForRoom(room) {
     return PracticeQuiz;
   }
   return Quiz; // safe default: never serve the practice bank to an unclassified game
+}
+
+// Sample the question set for a match. Normally a plain random $sample of
+// QUESTIONS_PER_MATCH. When DISCRIMINATOR_SEED_COUNT > 0, force that many
+// "AI-discriminator" questions (hard for LLMs) into a real-money match and fill
+// the rest from non-discriminator questions. `matchStage` carries the
+// recent-questions exclusion. Falls back to a plain sample for practice games,
+// when seeding is off, or when no discriminators are available — so the default
+// (seed count 0) behaves exactly like the previous plain $sample.
+async function sampleMatchQuestions(room, matchStage) {
+  const bank = questionBankForRoom(room);
+  const total = QUESTIONS_PER_MATCH;
+  const seed = DISCRIMINATOR_SEED_COUNT;
+
+  // Seeding only applies to the calibrated real-money bank (Quiz).
+  if (!(seed > 0 && seed < total && bank === Quiz)) {
+    return bank.aggregate([...matchStage, { $sample: { size: total } }]);
+  }
+
+  const discIds = await getDiscriminatorIds();
+  if (!discIds.length) {
+    return bank.aggregate([...matchStage, { $sample: { size: total } }]);
+  }
+
+  const seedQs = await bank.aggregate([
+    ...matchStage,
+    { $match: { _id: { $in: discIds } } },
+    { $sample: { size: seed } },
+  ]);
+  const usedIds = seedQs.map((q) => q._id);
+  const restQs = await bank.aggregate([
+    ...matchStage,
+    { $match: { _id: { $nin: [...discIds, ...usedIds] } } },
+    { $sample: { size: total - seedQs.length } },
+  ]);
+  return shuffleArray([...seedQs, ...restQs]);
 }
 
 // ─── Abort with refund ────────────────────────────────────────────────────────
@@ -354,10 +392,7 @@ async function startGame(roomId) {
       }
     }
 
-    const rawQuestions = await questionBankForRoom(room).aggregate([
-      ...matchStage,
-      { $sample: { size: QUESTIONS_PER_MATCH } },
-    ]);
+    const rawQuestions = await sampleMatchQuestions(room, matchStage);
     logger.info(`Fetched ${rawQuestions.length} questions for room ${roomId}`);
 
     room.questions = rawQuestions.map((question) => {
@@ -430,10 +465,7 @@ async function startSinglePlayerGame(roomId) {
       }
     }
 
-    const rawQuestions = await questionBankForRoom(room).aggregate([
-      ...matchStage,
-      { $sample: { size: QUESTIONS_PER_MATCH } },
-    ]);
+    const rawQuestions = await sampleMatchQuestions(room, matchStage);
     room.questions = rawQuestions.map((question) => {
       const tempId = `${roomId}-${uuidv4()}`;
       const shuffledOptions = shuffleArray([...question.options]);

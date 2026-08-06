@@ -103,6 +103,22 @@ const SUDDEN_DEATH_MAX_ROUNDS = parseIntEnv(
   20
 );
 
+// ─── Anti-cheat: AI-discriminator seeding ────────────────────────────────────
+// Number of "hard for LLMs" questions (from QuestionCalibration) to force into
+// each real-money match. A human who aces these looks nothing like an LLM
+// assistant, so they sharpen the accuracy-vs-difficulty risk signal. Default 0
+// (OFF) — turn on only after reviewing discriminator quality, since a question
+// an LLM got "wrong" is occasionally one whose stored answer is itself wrong.
+const DISCRIMINATOR_SEED_COUNT = parseIntEnv(
+  "DISCRIMINATOR_SEED_COUNT",
+  0,
+  0,
+  20
+);
+// Which calibrated model defines "hard for LLMs".
+const DISCRIMINATOR_MODEL =
+  process.env.DISCRIMINATOR_MODEL || "claude-haiku-4-5-20251001";
+
 // ─── Startup validation ──────────────────────────────────────────────────────
 
 console.log(
@@ -169,6 +185,8 @@ module.exports = {
   TIEBREAK_MODE,
   TIEBREAK_MODES,
   SUDDEN_DEATH_MAX_ROUNDS,
+  DISCRIMINATOR_SEED_COUNT,
+  DISCRIMINATOR_MODEL,
   isPotMode,
   isSubscriptionMode,
 };
