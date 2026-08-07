@@ -28,6 +28,7 @@ const context = require("../context");
 const User = require("../models/User");
 const WithheldPayout = require("../models/WithheldPayout");
 const { settlePotGame } = require("../services/gameService");
+const riskScore = require("../services/riskScore");
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -267,5 +268,77 @@ describe("gameService — pot settlement", () => {
 
     expect(queuePayment.calledOnce).to.equal(true);
     expect(WithheldPayout.findOneAndUpdate.called).to.equal(false);
+  });
+
+  // ── Risk-score auto-hold (opt-in, fails open) ──────────────────────────────
+  describe("risk-score auto-hold", () => {
+    let computeRisk;
+
+    beforeEach(() => {
+      computeRisk = sandbox.stub(riskScore, "computePlayerRisk");
+    });
+    afterEach(() => {
+      delete process.env.RISK_AUTOHOLD;
+    });
+
+    it("does not consult the risk score when RISK_AUTOHOLD is off (default)", async () => {
+      useContext();
+
+      const outcome = await settlePotGame(ROOM_ID, humanRoom(), WINNER, false);
+
+      expect(computeRisk.called).to.equal(false);
+      expect(queuePayment.calledOnce).to.equal(true);
+      expect(outcome.withheld).to.equal(false);
+    });
+
+    it("auto-holds a flagged winner for review when RISK_AUTOHOLD is on", async () => {
+      process.env.RISK_AUTOHOLD = "true";
+      computeRisk.resolves({
+        flagged: true,
+        score: 82,
+        signals: { uniformity: 0.9, aiAlignment: 0.8, speed: 0.3 },
+      });
+      useContext();
+
+      const outcome = await settlePotGame(ROOM_ID, humanRoom(), WINNER, false);
+
+      expect(queuePayment.called).to.equal(false);
+      expect(outcome).to.deep.include({
+        paymentId: null,
+        withheld: true,
+        withheldReason: "risk_score",
+      });
+      // account flagged, and the held pot recorded for operator review
+      expect(User.findOneAndUpdate.calledOnce).to.equal(true);
+      expect(WithheldPayout.findOneAndUpdate.calledOnce).to.equal(true);
+      const doc =
+        WithheldPayout.findOneAndUpdate.firstCall.args[1].$setOnInsert;
+      expect(doc.reason).to.equal("risk_score");
+      expect(doc.suspicionScore).to.equal(82);
+      expect(doc.intendedPayout).to.equal(18_000_000);
+    });
+
+    it("pays a non-flagged winner when RISK_AUTOHOLD is on", async () => {
+      process.env.RISK_AUTOHOLD = "true";
+      computeRisk.resolves({ flagged: false, score: 12, signals: {} });
+      useContext();
+
+      const outcome = await settlePotGame(ROOM_ID, humanRoom(), WINNER, false);
+
+      expect(computeRisk.calledOnce).to.equal(true);
+      expect(queuePayment.calledOnce).to.equal(true);
+      expect(outcome.withheld).to.equal(false);
+    });
+
+    it("fails OPEN — pays out when the risk check throws", async () => {
+      process.env.RISK_AUTOHOLD = "true";
+      computeRisk.rejects(new Error("db down"));
+      useContext();
+
+      const outcome = await settlePotGame(ROOM_ID, humanRoom(), WINNER, false);
+
+      expect(queuePayment.calledOnce).to.equal(true);
+      expect(outcome.withheld).to.equal(false);
+    });
   });
 });

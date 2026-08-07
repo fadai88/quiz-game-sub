@@ -119,6 +119,13 @@ const DISCRIMINATOR_SEED_COUNT = parseIntEnv(
 const DISCRIMINATOR_MODEL =
   process.env.DISCRIMINATOR_MODEL || "claude-haiku-4-5-20251001";
 
+// When true, a winning payout is auto-HELD (via the WithheldPayout review flow,
+// never seized) if the winner's distribution-based risk score is flagged. OFF by
+// default. Read dynamically (not a load-time const) so it can be toggled without
+// a restart and exercised in tests. The settlement path fails OPEN — any error
+// or thin data pays out normally, so this can never wrongly withhold on a bug.
+const isRiskAutoholdEnabled = () => process.env.RISK_AUTOHOLD === "true";
+
 // ─── Startup validation ──────────────────────────────────────────────────────
 
 console.log(
@@ -187,6 +194,7 @@ module.exports = {
   SUDDEN_DEATH_MAX_ROUNDS,
   DISCRIMINATOR_SEED_COUNT,
   DISCRIMINATOR_MODEL,
+  isRiskAutoholdEnabled,
   isPotMode,
   isSubscriptionMode,
 };

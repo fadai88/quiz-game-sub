@@ -20,6 +20,7 @@ const {
   TIEBREAK_MODES,
   SUDDEN_DEATH_MAX_ROUNDS,
   DISCRIMINATOR_SEED_COUNT,
+  isRiskAutoholdEnabled,
   isPotMode,
 } = require("../config/constants");
 const { calculateWinnings, formatUSDC } = require("../utils/usdcUtils");
@@ -48,6 +49,8 @@ const Quiz = require("../models/Quiz");
 const PracticeQuiz = require("../models/PracticeQuiz");
 const telemetry = require("./telemetry");
 const { getDiscriminatorIds } = require("./discriminators");
+// Imported as a namespace (not destructured) so tests can stub computePlayerRisk.
+const riskScore = require("./riskScore");
 
 // Pick the question bank for a room. Free practice games draw from the separate
 // PracticeQuiz collection; every real game — staked, ranked, or tournament —
@@ -308,6 +311,59 @@ async function settlePotGame(roomId, room, winner, botOpponent) {
     outcome.withheld = true;
     outcome.withheldReason = "fraud";
     return outcome;
+  }
+
+  // Risk-score auto-hold (opt-in via RISK_AUTOHOLD). A second, distribution-based
+  // gate: hold the payout for review when the winner's telemetry risk score is
+  // flagged. Fails OPEN — insufficient data (<MIN_ANSWERS) never flags, and any
+  // error pays out normally, so a scoring bug can never wrongly withhold funds.
+  if (isRiskAutoholdEnabled()) {
+    try {
+      const risk = await riskScore.computePlayerRisk(winner);
+      if (risk && risk.flagged) {
+        const flags = Object.keys(risk.signals || {}).filter(
+          (k) => risk.signals[k] >= 0.5
+        );
+        logger.warn(
+          `🚩 RISK AUTO-HOLD: withholding payout for ${winner} in room ${roomId}. ` +
+            `Score ${risk.score}. Signals ${JSON.stringify(risk.signals)}`
+        );
+        await User.findOneAndUpdate(
+          { walletAddress: winner },
+          {
+            $set: {
+              isFlagged: true,
+              flagReason: `Risk score ${risk.score}: ${flags.join(",")}`,
+            },
+          }
+        );
+        await trackPayoutBlocked(winner, {
+          message: `Payout auto-held for review: risk score ${risk.score}`,
+          walletAddress: winner,
+          roomId,
+          suspicionScore: risk.score,
+          flags,
+          betAmount: room.betAmount,
+        });
+        await recordWithheldPayout({
+          roomId,
+          walletAddress: winner,
+          stakeAmount: room.betAmount,
+          intendedPayout,
+          reason: "risk_score",
+          flags,
+          suspicionScore: risk.score,
+        });
+        outcome.withheld = true;
+        outcome.withheldReason = "risk_score";
+        return outcome;
+      }
+    } catch (err) {
+      logger.error(
+        `[PAYOUT] Risk auto-hold check failed for ${winner} in room ${roomId} — paying out (fail open):`,
+        { error: err.message }
+      );
+    }
   }
 
   const multiplier = botOpponent
