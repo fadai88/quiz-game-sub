@@ -26,6 +26,8 @@ test-ledger
 # Question data — private; questions must never be committed
 # (*.db above already covers data/*.db; this covers the generated JSON banks)
 data/*.json
+# Generated answer-quality review lists contain question text — keep private
+data/answer-review.*
 
 # Dependencies
 /node_modules
