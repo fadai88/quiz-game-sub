@@ -92,6 +92,27 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Every provider call takes { system, content, maxTokens } and returns
 // { text, usage:{ input_tokens, output_tokens } } so the rest of the script is
 // provider-neutral.
+// fetch with an abort timeout so a hung connection can't freeze a worker forever
+// (no timeout was why the OpenAI run stalled: stuck requests never resolved).
+// Timeouts and network errors are marked retryable so withRetry re-issues them.
+async function fetchWithTimeout(url, opts, ms = 30000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } catch (e) {
+    const err = new Error(
+      e.name === "AbortError"
+        ? `request timeout after ${ms}ms`
+        : `network error: ${e.message}`
+    );
+    err.retryable = true;
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function apiError(res) {
   const text = await res.text().catch(() => "");
   const err = new Error(`API ${res.status}: ${text.slice(0, 200)}`);
@@ -102,7 +123,7 @@ async function apiError(res) {
 }
 
 async function callAnthropic({ system, content, maxTokens }) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -128,23 +149,26 @@ async function callAnthropic({ system, content, maxTokens }) {
 }
 
 async function callOpenAI({ system, content, maxTokens }) {
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      // max_completion_tokens is the current param; older max_tokens is rejected
-      // by the o-series / gpt-5 models.
-      max_completion_tokens: maxTokens,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content },
-      ],
-    }),
-  });
+  const res = await fetchWithTimeout(
+    "https://api.openai.com/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        // max_completion_tokens is the current param; older max_tokens is rejected
+        // by the o-series / gpt-5 models.
+        max_completion_tokens: maxTokens,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content },
+        ],
+      }),
+    }
+  );
   if (!res.ok) throw await apiError(res);
   const data = await res.json();
   return {
