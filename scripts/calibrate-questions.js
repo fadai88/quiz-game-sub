@@ -102,7 +102,6 @@ async function askModel(question, options) {
   return callAnthropic({
     model: MODEL,
     max_tokens: 10,
-    temperature: 0,
     system:
       "You are answering a multiple-choice trivia question. Reply with ONLY " +
       "the number of the correct option — no words, no punctuation.",
@@ -135,8 +134,9 @@ function buildBatchContent(questions) {
 async function askModelBatch(questions) {
   const { text, usage } = await callAnthropic({
     model: MODEL,
-    max_tokens: questions.length * 8 + 20,
-    temperature: 0,
+    // Generous budget: enough for one `N=I` line per question plus slack, so a
+    // larger batch never truncates (which yields an unparseable reply).
+    max_tokens: questions.length * 20 + 50,
     system:
       "You are answering multiple-choice trivia questions. For each numbered " +
       "question output exactly one line `N=I` (question number = 0-based correct " +
