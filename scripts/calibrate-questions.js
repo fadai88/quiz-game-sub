@@ -10,14 +10,21 @@
  * Safe to stop and re-run: already-calibrated questions for the chosen model are
  * skipped (unless --force). Never logs the API key.
  *
+ * Supports both Anthropic (Claude) and OpenAI (GPT) models — the provider is
+ * inferred from the model name or forced with --provider. Uses ANTHROPIC_API_KEY
+ * or OPENAI_API_KEY from .env accordingly. Results are keyed by (questionId,
+ * model), so calibrating a new model adds a column without touching the others —
+ * calibrate several to find where they DISAGREE (the sharpest discriminators).
+ *
  * Usage (run from project root, where .env lives):
  *   node scripts/calibrate-questions.js --dry-run --batch 20
- *   node scripts/calibrate-questions.js --limit 50                 # small real run
- *   node scripts/calibrate-questions.js                            # full, one-per-call
- *   node scripts/calibrate-questions.js --batch 20 --concurrency 10  # fast pass
+ *   node scripts/calibrate-questions.js --batch 20 --concurrency 10        # Claude (default)
+ *   node scripts/calibrate-questions.js --model claude-sonnet-5 --batch 20
+ *   node scripts/calibrate-questions.js --model gpt-4o-mini --batch 20     # OpenAI (auto)
  *
  * Flags:
  *   --model <id>        LLM to test (default claude-haiku-4-5-20251001 — cheap)
+ *   --provider <name>   anthropic | openai (default: inferred from --model)
  *   --collection <name> Quiz (default) | PracticeQuiz
  *   --limit <n>         cap the number of questions this run (0 = all)
  *   --batch <n>         questions per API call (default 1). >1 packs many
@@ -50,6 +57,12 @@ function arg(name, def) {
   return def;
 }
 const MODEL = arg("model", "claude-haiku-4-5-20251001");
+// Provider is inferred from the model name (gpt-*/o-series/chatgpt → openai,
+// else anthropic) but can be forced with --provider.
+const PROVIDER = arg(
+  "provider",
+  /^(gpt|o\d|chatgpt)/i.test(MODEL) ? "openai" : "anthropic"
+);
 const COLLECTION = arg("collection", "Quiz");
 const LIMIT = parseInt(arg("limit", "0"), 10) || 0;
 const BATCH = Math.max(1, parseInt(arg("batch", "1"), 10) || 1);
@@ -57,7 +70,10 @@ const CONCURRENCY = Math.max(1, parseInt(arg("concurrency", "5"), 10) || 5);
 const FORCE = process.argv.includes("--force");
 const DRY_RUN = process.argv.includes("--dry-run");
 
-const API_KEY = process.env.ANTHROPIC_API_KEY;
+const API_KEY =
+  PROVIDER === "openai"
+    ? process.env.OPENAI_API_KEY
+    : process.env.ANTHROPIC_API_KEY;
 
 const stats = {
   processed: 0,
@@ -72,8 +88,20 @@ let lastBucket = 0;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ─── LLM calls ────────────────────────────────────────────────────────────────
-async function callAnthropic(body) {
+// ─── LLM calls (provider-agnostic) ─────────────────────────────────────────────
+// Every provider call takes { system, content, maxTokens } and returns
+// { text, usage:{ input_tokens, output_tokens } } so the rest of the script is
+// provider-neutral.
+async function apiError(res) {
+  const text = await res.text().catch(() => "");
+  const err = new Error(`API ${res.status}: ${text.slice(0, 200)}`);
+  err.status = res.status;
+  err.body = text;
+  err.retryable = res.status === 429 || res.status >= 500;
+  return err;
+}
+
+async function callAnthropic({ system, content, maxTokens }) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -81,38 +109,67 @@ async function callAnthropic(body) {
       "x-api-key": API_KEY,
       "anthropic-version": "2023-06-01",
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: maxTokens,
+      system,
+      messages: [{ role: "user", content }],
+    }),
   });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    const err = new Error(`API ${res.status}: ${text.slice(0, 200)}`);
-    err.status = res.status;
-    err.retryable = res.status === 429 || res.status >= 500;
-    throw err;
-  }
+  if (!res.ok) throw await apiError(res);
   const data = await res.json();
   return {
     text: (data.content?.[0]?.text || "").trim(),
-    usage: data.usage || {},
+    usage: {
+      input_tokens: data.usage?.input_tokens || 0,
+      output_tokens: data.usage?.output_tokens || 0,
+    },
   };
+}
+
+async function callOpenAI({ system, content, maxTokens }) {
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      // max_completion_tokens is the current param; older max_tokens is rejected
+      // by the o-series / gpt-5 models.
+      max_completion_tokens: maxTokens,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content },
+      ],
+    }),
+  });
+  if (!res.ok) throw await apiError(res);
+  const data = await res.json();
+  return {
+    text: (data.choices?.[0]?.message?.content || "").trim(),
+    usage: {
+      input_tokens: data.usage?.prompt_tokens || 0,
+      output_tokens: data.usage?.completion_tokens || 0,
+    },
+  };
+}
+
+function callProvider(args) {
+  return PROVIDER === "openai" ? callOpenAI(args) : callAnthropic(args);
 }
 
 async function askModel(question, options) {
   const optionsText = options.map((o, i) => `${i}) ${o}`).join("\n");
-  return callAnthropic({
-    model: MODEL,
-    max_tokens: 10,
+  return callProvider({
     system:
       "You are answering a multiple-choice trivia question. Reply with ONLY " +
       "the number of the correct option — no words, no punctuation.",
-    messages: [
-      {
-        role: "user",
-        content:
-          `Question: ${question}\nOptions:\n${optionsText}\n\n` +
-          `Reply with only the option number (0-${options.length - 1}).`,
-      },
-    ],
+    content:
+      `Question: ${question}\nOptions:\n${optionsText}\n\n` +
+      `Reply with only the option number (0-${options.length - 1}).`,
+    maxTokens: 16,
   });
 }
 
@@ -132,16 +189,15 @@ function buildBatchContent(questions) {
 }
 
 async function askModelBatch(questions) {
-  const { text, usage } = await callAnthropic({
-    model: MODEL,
-    // Generous budget: enough for one `N=I` line per question plus slack, so a
-    // larger batch never truncates (which yields an unparseable reply).
-    max_tokens: questions.length * 20 + 50,
+  const { text, usage } = await callProvider({
     system:
       "You are answering multiple-choice trivia questions. For each numbered " +
       "question output exactly one line `N=I` (question number = 0-based correct " +
       "option index). No other text.",
-    messages: [{ role: "user", content: buildBatchContent(questions) }],
+    content: buildBatchContent(questions),
+    // Generous budget: enough for one `N=I` line per question plus slack, so a
+    // larger batch never truncates (which yields an unparseable reply).
+    maxTokens: questions.length * 20 + 50,
   });
   return { answers: parseBatch(text, questions), usage };
 }
@@ -157,13 +213,14 @@ async function withRetry(fn, tries = 5) {
         throw e;
       }
       // No credits / billing not set up — every request fails identically, so
-      // stop the whole run immediately instead of hammering the bank.
+      // stop the whole run immediately instead of hammering the bank. Covers
+      // Anthropic (400 credit balance) and OpenAI (429 insufficient_quota).
       if (
-        e.status === 400 &&
-        /credit balance|Plans & Billing/i.test(e.message)
+        /credit balance|Plans & Billing|insufficient_quota|exceeded your current quota|billing/i.test(
+          e.message
+        )
       ) {
-        fatalAuth =
-          "credit balance too low — add credits in Console → Plans & Billing";
+        fatalAuth = "billing/quota problem — add credits for this provider";
         throw e;
       }
       if (!e.retryable || t === tries) throw e;
@@ -298,9 +355,17 @@ function chunkArray(arr, size) {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
-  if (!API_KEY) {
+  if (!["anthropic", "openai"].includes(PROVIDER)) {
     console.error(
-      "❌ ANTHROPIC_API_KEY is not set. Add it to .env (it is gitignored) and re-run."
+      `❌ --provider must be anthropic or openai (got ${PROVIDER})`
+    );
+    process.exit(1);
+  }
+  if (!API_KEY) {
+    const keyName =
+      PROVIDER === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY";
+    console.error(
+      `❌ ${keyName} is not set. Add it to .env (it is gitignored) and re-run.`
     );
     process.exit(1);
   }
@@ -319,8 +384,8 @@ async function main() {
 
   await mongoose.connect(process.env.MONGODB_URI);
   console.log(
-    `🔌 Connected. Calibrating "${COLLECTION}" against model "${MODEL}" ` +
-      `(batch ${BATCH}, concurrency ${CONCURRENCY})${
+    `🔌 Connected. Calibrating "${COLLECTION}" against ${PROVIDER} model ` +
+      `"${MODEL}" (batch ${BATCH}, concurrency ${CONCURRENCY})${
         DRY_RUN ? " (DRY RUN)" : ""
       }`
   );
@@ -384,9 +449,11 @@ async function main() {
   console.log("\n──────── done ────────");
   logProgress();
   if (fatalAuth) {
+    const keyName =
+      PROVIDER === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY";
     console.error(
       `\n❌ Stopped early — ${fatalAuth}. ` +
-        `Check ANTHROPIC_API_KEY in .env and that the account has API credits.`
+        `Check ${keyName} in .env and that the ${PROVIDER} account has API credits.`
     );
   }
   const secs = ((Date.now() - started) / 1000).toFixed(0);
