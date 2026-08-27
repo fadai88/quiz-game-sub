@@ -10,13 +10,35 @@
  *
  * Each run clears and repopulates ONLY its own collection.
  *
+ * ── STABLE IDS ───────────────────────────────────────────────────────────────
+ * Each question's `_id` is DERIVED FROM ITS CONTENT rather than generated fresh.
+ *
+ * This matters because other collections reference questions by id and outlive
+ * any single import:
+ *   - QuestionCalibration (expensive: an LLM API call per question per model)
+ *   - QuestionStats       (empirical difficulty, accumulated from real play)
+ *   - AnswerTelemetry     (the anti-cheat evidence trail)
+ *
+ * With random ids, a re-import silently orphaned all of them — the rows still
+ * existed, still looked healthy, and pointed at documents that no longer did.
+ * That is exactly what happened on 2026-08-25: 30,075 calibration rows were
+ * detached by an answer-key fix, and nothing reported an error because
+ * services/discriminators.js fails soft by design.
+ *
+ * The hash covers the question text and its options, but NOT `correctAnswer` —
+ * so fixing a wrong answer key preserves the question's identity and keeps its
+ * calibration. Editing the wording or the options mints a new id, which is
+ * correct: that is a different question and its old calibration is meaningless.
+ *
  * Usage:
  *   node scripts/import-questions.js data/practice.json practice
  *   node scripts/import-questions.js data/quiz.json     quiz
+ *   node scripts/import-questions.js data/quiz.json     quiz --dry-run
  */
 
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const mongoose = require("mongoose");
 require("dotenv").config();
 
@@ -52,6 +74,21 @@ function resolveConfig() {
   return { jsonPath, target };
 }
 
+/**
+ * A deterministic ObjectId for a question, from its text + options.
+ *
+ * An ObjectId is 12 bytes, so we take the leading 12 of a sha256. The hash input
+ * is JSON-encoded rather than concatenated so that option boundaries cannot be
+ * forged by a question whose text happens to end with an option's text.
+ *
+ * Deliberately excludes correctAnswer — see the STABLE IDS note at the top.
+ */
+function stableQuestionId(question) {
+  const canonical = JSON.stringify([question.question, question.options]);
+  const digest = crypto.createHash("sha256").update(canonical).digest("hex");
+  return new mongoose.Types.ObjectId(digest.slice(0, 24));
+}
+
 function loadQuestions(jsonPath) {
   if (!fs.existsSync(jsonPath)) {
     console.error(`❌ File not found: ${jsonPath}`);
@@ -83,6 +120,7 @@ function loadQuestions(jsonPath) {
       q.correctAnswer < q.options.length;
     if (ok) {
       valid.push({
+        _id: stableQuestionId(q),
         question: q.question,
         options: q.options,
         correctAnswer: q.correctAnswer,
@@ -97,7 +135,64 @@ function loadQuestions(jsonPath) {
       );
     }
   }
+  // Two questions with identical text AND identical options would hash to the
+  // same id, and insertMany would reject the second — losing a question. The
+  // bank has no such pairs today (many share text but differ in options, which
+  // the hash separates correctly), so treat it as a data error worth stopping
+  // for rather than silently importing 11,511 of 11,512.
+  const byId = new Map();
+  const collisions = [];
+  for (const q of valid) {
+    const key = String(q._id);
+    if (byId.has(key)) collisions.push([byId.get(key), q]);
+    else byId.set(key, q);
+  }
+  if (collisions.length) {
+    console.error(
+      `❌ ${collisions.length} question(s) are exact duplicates (same text AND options):`
+    );
+    for (const [a] of collisions.slice(0, 5)) {
+      console.error(`   "${a.question.slice(0, 70)}..."`);
+    }
+    console.error("   Remove the duplicates and re-export, then import again.");
+    process.exit(1);
+  }
+
   return { valid, skipped };
+}
+
+/**
+ * Report how this import changes question identity, before anything is written.
+ *
+ * The point is to make id churn impossible to miss: anything in `removed` takes
+ * its calibration, difficulty stats and telemetry references with it.
+ */
+async function reportIdChanges(Model, valid) {
+  const incoming = new Set(valid.map((q) => String(q._id)));
+  const existingDocs = await Model.find({}, "_id").lean();
+  const existing = new Set(existingDocs.map((d) => String(d._id)));
+
+  if (existing.size === 0) {
+    console.log(`🆕 Empty collection — importing ${valid.length} questions.`);
+    return { preserved: 0, added: valid.length, removed: 0 };
+  }
+
+  let preserved = 0;
+  for (const id of incoming) if (existing.has(id)) preserved++;
+  const added = incoming.size - preserved;
+  const removed = existing.size - preserved;
+
+  console.log(
+    `🔗 Identity: ${preserved} preserved, ${added} new, ${removed} no longer present.`
+  );
+  if (removed > 0) {
+    console.log(
+      `   ⚠️  ${removed} question(s) will lose their calibration, difficulty stats\n` +
+        "      and telemetry links. Expected if you edited wording or options;\n" +
+        "      NOT expected if you only corrected answer keys."
+    );
+  }
+  return { preserved, added, removed };
 }
 
 async function main() {
@@ -124,6 +219,13 @@ async function main() {
 
   const Model = target.model;
   try {
+    await reportIdChanges(Model, valid);
+
+    if (process.argv.includes("--dry-run")) {
+      console.log("\n🔎 Dry run — nothing written.");
+      return;
+    }
+
     const deleteResult = await Model.deleteMany({});
     console.log(
       `🗑️  Cleared ${deleteResult.deletedCount} existing questions from ${target.label}`
@@ -142,6 +244,10 @@ async function main() {
 
     const count = await Model.countDocuments();
     console.log(`🎉 Done. ${count} questions now in ${target.label}.`);
+    console.log(
+      "\nNext: `node scripts/check-calibration-integrity.js` to see what the\n" +
+        "import did to the calibration corpus (and repair answer-key drift for free)."
+    );
   } catch (err) {
     console.error("❌ Import failed:", err.message);
     process.exitCode = 1;
@@ -151,4 +257,8 @@ async function main() {
   }
 }
 
-main();
+// Only run when invoked directly. Requiring this file (the id helper is unit
+// tested) must never kick off an import against the live database.
+if (require.main === module) main();
+
+module.exports = { stableQuestionId };

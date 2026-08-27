@@ -11,6 +11,7 @@
  */
 
 const QuestionCalibration = require("../models/QuestionCalibration");
+const Quiz = require("../models/Quiz");
 const { DISCRIMINATOR_MODEL } = require("../config/constants");
 const logger = require("../logger");
 
@@ -27,9 +28,35 @@ async function getDiscriminatorIds(force = false) {
       "questionId"
     ).lean();
     cache = { ids: docs.map((d) => d.questionId), at: now };
-    logger.info(
-      `[discriminators] loaded ${cache.ids.length} AI-discriminator ids for ${DISCRIMINATOR_MODEL}`
-    );
+
+    // Calibration rows outlive the questions they describe. A question re-import
+    // that changes ids leaves these rows intact but pointing at documents that
+    // no longer exist — and because this module fails soft, seeding would then
+    // quietly do nothing while looking perfectly healthy. That happened on
+    // 2026-08-25 and went unnoticed, so check rather than assume.
+    if (cache.ids.length) {
+      const live = await Quiz.countDocuments({ _id: { $in: cache.ids } });
+      if (live === 0) {
+        logger.error(
+          `[discriminators] ${cache.ids.length} calibration ids for ${DISCRIMINATOR_MODEL} ` +
+            "match NO live questions — the calibration is orphaned (question ids changed). " +
+            "Discriminator seeding is doing nothing. Run scripts/check-calibration-integrity.js."
+        );
+      } else if (live < cache.ids.length / 2) {
+        logger.warn(
+          `[discriminators] only ${live}/${cache.ids.length} calibration ids still resolve ` +
+            "to live questions — the bank has drifted. Consider re-calibrating."
+        );
+      } else {
+        logger.info(
+          `[discriminators] loaded ${cache.ids.length} AI-discriminator ids for ${DISCRIMINATOR_MODEL} (${live} live)`
+        );
+      }
+    } else {
+      logger.info(
+        `[discriminators] no AI-discriminator ids for ${DISCRIMINATOR_MODEL}`
+      );
+    }
     return cache.ids;
   } catch (e) {
     logger.warn(

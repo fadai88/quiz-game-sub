@@ -8,8 +8,11 @@ burned a real project somewhere. Line references drift as code moves; re-grep.
 **Honest readiness note (2026-07):** the code's security/correctness is in good
 shape (verified payments, idempotent payouts, restart refund recovery, on-chain
 refunds, drain mode). It is **not** the same as "ready to take uncapped real
-money": it has never run on mainnet, has thin automated coverage (4 test files),
-and has had no load/soak testing. Prefer a **phased launch** (Section I).
+money": it has never run on mainnet, still has **no load/soak testing**, and the
+Android app (`docs/MOBILE_APP.md`) has never been compiled. Coverage has grown to
+10 test files / 120 assertions, but socket auth, matchmaking, transaction
+verification and restart recovery remain uncovered. Prefer a **phased launch**
+(Section I).
 
 ---
 
@@ -127,7 +130,10 @@ regulated **skill-gaming** in many jurisdictions. Code cannot fix this.
 
 ## H. Pre-flight verification (immediately before taking traffic)
 
-- [ ] `npx mocha tests/*.js --exit` → **35/35 green** (the old `timeout.js` failure is fixed).
+- [ ] `npm test` → **120/120 green** (10 test files).
+- [ ] `node scripts/check-calibration-integrity.js` → no orphaned rows. Orphans
+      mean discriminator seeding and the risk score's `aiAlignment` signal are
+      silently doing nothing (see `docs/ANTICHEAT_AND_CALIBRATION.md`).
 - [ ] Boot with the production `.env`; confirm **no FATAL exits**, `🔑 Treasury key verified`, and `✅ Config initialized successfully`.
 - [ ] `GET /api/config` returns mainnet `rpcUrl`, `usdcMint` (`EPjF…`), `treasuryWallet`.
 - [ ] **One real end-to-end mainnet stake** at the smallest amount: stake → match/forfeit → **payout lands on-chain**, `PaymentQueue` shows `completed`.
