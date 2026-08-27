@@ -25,7 +25,7 @@ function logError(context, error) {
   }
 }
 
-const socket = io({
+const socket = AppNet.connectSocket({
   auth: {
     event: "walletLogin",
   },
@@ -324,7 +324,16 @@ socket.on("loginSuccess", async (data) => {
       console.log("✅ HTTP authentication successful - secure cookie set");
       connectedWallet = data.walletAddress;
 
-      // NO localStorage - session is in httpOnly cookie!
+      // Web: NO localStorage — the session is in an httpOnly cookie.
+      // Native: there is no cookie jar, so the server returns the token in the
+      // body (only for X-Client-Type: native) and we hold it for the bearer
+      // header. No-op on the web, where result.sessionToken is never sent.
+      if (result.sessionToken) AppNet.setSessionToken(result.sessionToken);
+
+      // The socket authenticated before login, so it is still an anonymous
+      // connection. On native the token only enters the handshake at connect
+      // time, so it must reconnect to pick up the new session.
+      if (AppNet.isNative) socket.disconnect().connect();
 
       // Update UI
       document.getElementById("walletSection").style.display = "none";
@@ -427,7 +436,10 @@ document.getElementById("disconnectBtn").addEventListener("click", async () => {
     activeProvider.disconnect();
   }
 
-  // NO localStorage to clear - session was in httpOnly cookie
+  // Web: nothing to clear — the session was in an httpOnly cookie.
+  // Native: drop the bearer token too, or the next launch resumes the session
+  // the user just asked to end.
+  AppNet.setSessionToken(null);
   window.location.href = "login.html";
 });
 

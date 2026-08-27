@@ -13,8 +13,12 @@
  *   getProvider()                -> the active provider, or null
  *   getSelected()                -> { id, name, icon, provider } or null
  *   signMessage(provider, bytes) -> Uint8Array signature (normalized across wallets)
+ *   signAndSend(provider, tx, connection) -> on-chain transaction signature
  *   onDisconnect(cb)             -> register a disconnect/account-change callback
  *   showNoWalletHelp()           -> user-facing "install a wallet" prompt
+ *
+ * Inside the Capacitor app there are no injected providers; the same API is
+ * served by Mobile Wallet Adapter instead (see the MWA section below).
  */
 (function () {
   "use strict";
@@ -83,6 +87,122 @@
     },
   ];
 
+  // ── Mobile Wallet Adapter (native app only) ────────────────────────────────
+  // A WebView has no injected `window.solana`, so on Android the wallet lives in
+  // a separate app reached over MWA. This shim presents the MWA plugin as one
+  // more provider in the list above, with the same method names the game code
+  // already calls, so nothing downstream needs to know which world it is in.
+  //
+  // The one genuine difference is broadcasting: extensions sign locally and let
+  // the page send, MWA has the wallet sign AND send. `signAndSend` below hides
+  // that; there is no `signTransaction` here on purpose, so a caller that
+  // bypasses the helper fails loudly rather than silently doing nothing.
+  function mwaPlugin() {
+    return (
+      window.Capacitor &&
+      window.Capacitor.Plugins &&
+      window.Capacitor.Plugins.MobileWalletAdapter
+    );
+  }
+
+  function bytesToBase64(bytes) {
+    let binary = "";
+    const chunk = 0x8000; // chunked to avoid blowing the argument limit
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(
+        null,
+        bytes.subarray
+          ? bytes.subarray(i, i + chunk)
+          : bytes.slice(i, i + chunk)
+      );
+    }
+    return btoa(binary);
+  }
+
+  function base64ToBytes(b64) {
+    const binary = atob(b64);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+  }
+
+  const mwaProvider = {
+    isMobileWalletAdapter: true,
+    isConnected: false,
+    publicKey: null,
+
+    async connect(opts) {
+      const plugin = mwaPlugin();
+      if (!plugin) throw new Error("Mobile Wallet Adapter unavailable");
+
+      // A silent reconnect must not launch the wallet app. MWA has no
+      // "onlyIfTrusted" concept, so we only report an authorization we already
+      // hold and otherwise decline.
+      if (opts && opts.onlyIfTrusted) {
+        const existing = await plugin.getAuthorized();
+        if (!existing || !existing.publicKey) {
+          const err = new Error("No trusted wallet to reconnect");
+          err.code = "NO_TRUSTED";
+          throw err;
+        }
+        this.publicKey = toPublicKeyLike(existing.publicKey);
+        this.isConnected = true;
+        return { publicKey: this.publicKey };
+      }
+
+      const result = await plugin.authorize();
+      this.publicKey = toPublicKeyLike(result.publicKey);
+      this.isConnected = true;
+      return { publicKey: this.publicKey };
+    },
+
+    async disconnect() {
+      const plugin = mwaPlugin();
+      if (plugin) await plugin.deauthorize();
+      this.isConnected = false;
+      this.publicKey = null;
+    },
+
+    async signMessage(encodedMessage) {
+      const plugin = mwaPlugin();
+      if (!plugin) throw new Error("Mobile Wallet Adapter unavailable");
+      const result = await plugin.signMessage({
+        message: bytesToBase64(encodedMessage),
+      });
+      return { signature: base64ToBytes(result.signature) };
+    },
+
+    async signAndSendTransaction(transaction) {
+      const plugin = mwaPlugin();
+      if (!plugin) throw new Error("Mobile Wallet Adapter unavailable");
+      const serialized = transaction.serialize({
+        requireAllSignatures: false,
+        verifySignatures: false,
+      });
+      const result = await plugin.signAndSendTransaction({
+        transaction: bytesToBase64(new Uint8Array(serialized)),
+      });
+      return result.signature;
+    },
+  };
+
+  // The game compares `provider.publicKey.toString()` against the logged-in
+  // wallet, so the native side has to hand back something PublicKey-shaped.
+  function toPublicKeyLike(address) {
+    if (window.solanaWeb3 && window.solanaWeb3.PublicKey) {
+      return new window.solanaWeb3.PublicKey(address);
+    }
+    return { toString: () => address, toBase58: () => address };
+  }
+
+  function isNativeApp() {
+    return !!(
+      window.Capacitor &&
+      typeof window.Capacitor.isNativePlatform === "function" &&
+      window.Capacitor.isNativePlatform()
+    );
+  }
+
   const STORAGE_KEY = "selectedWalletId";
   let selectedId = null;
   try {
@@ -99,17 +219,34 @@
   const boundProviders = new WeakSet();
 
   function meta(id) {
-    return WALLETS.find((w) => w.id === id) || null;
+    return walletList().find((w) => w.id === id) || null;
+  }
+
+  // In the app there are no injected providers at all, only MWA — and MWA shows
+  // the user their own wallet picker, so we present it as a single entry rather
+  // than duplicating that choice in our modal.
+  const MWA_WALLET = {
+    id: "mwa",
+    name: "Mobile Wallet",
+    url: "https://solanamobile.com/wallets",
+    icon: tileIcon("#14F195", "M"),
+    get: () => (isNativeApp() && mwaPlugin() ? mwaProvider : null),
+  };
+
+  function walletList() {
+    return isNativeApp() ? [MWA_WALLET] : WALLETS;
   }
 
   function detect() {
-    return WALLETS.map((w) => ({
-      id: w.id,
-      name: w.name,
-      icon: w.icon,
-      url: w.url,
-      provider: w.get(),
-    })).filter((w) => w.provider);
+    return walletList()
+      .map((w) => ({
+        id: w.id,
+        name: w.name,
+        icon: w.icon,
+        url: w.url,
+        provider: w.get(),
+      }))
+      .filter((w) => w.provider);
   }
 
   function providerFor(id) {
@@ -204,6 +341,26 @@
     const out = await provider.signMessage(encodedMessage, "utf8");
     if (out && out.signature) return out.signature;
     return out;
+  }
+
+  /**
+   * Sign a transaction and get it on-chain, returning its signature.
+   *
+   * Browser extensions sign locally and leave broadcasting to the page; Mobile
+   * Wallet Adapter has the wallet do both, and its sign-only method is
+   * deprecated. Callers should not care — the server only ever receives a
+   * transaction signature to verify on-chain, so both paths are equivalent to it.
+   *
+   * @param provider     the active wallet provider
+   * @param transaction  an unsigned solanaWeb3.Transaction
+   * @param connection   RPC connection, used only on the extension path
+   */
+  async function signAndSend(provider, transaction, connection) {
+    if (typeof provider.signAndSendTransaction === "function") {
+      return provider.signAndSendTransaction(transaction);
+    }
+    const signed = await provider.signTransaction(transaction);
+    return connection.sendRawTransaction(signed.serialize());
   }
 
   /**
@@ -365,6 +522,7 @@
     select,
     clearSelection,
     signMessage,
+    signAndSend,
     onDisconnect,
     showPicker,
     showNoWalletHelp,

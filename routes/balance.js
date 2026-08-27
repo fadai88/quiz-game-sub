@@ -35,7 +35,12 @@ const { authenticate, requireAdmin } = require("../middleware/authenticate");
 const { getClientIpFromRequest } = require("../middleware/trustedProxy");
 const { SecurityLogger } = require("../utils/securityLogger");
 const { trackValidationFailure } = require("../config/alerts");
-const { MONETIZATION, isPotMode } = require("../config/constants");
+const {
+  MONETIZATION,
+  isPotMode,
+  isStakedAttestationRequired,
+  getStakedWebMaxBetUsdc,
+} = require("../config/constants");
 const { VALID_BET_AMOUNTS_ATOMIC } = require("../utils/usdcUtils");
 
 // ─── GET /api/balance/:walletAddress (authenticated) ─────────────────────────
@@ -583,6 +588,12 @@ router.get("/config", (req, res) => {
         ? process.env.USDC_MINT_ADDRESS ||
           "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
         : "",
+      // Anti-cheat: when staking requires an attested native client, the web UI
+      // should cap or hide its stake controls and point at the app rather than
+      // letting a player build a stake transaction the server will refuse.
+      stakedRequiresNative: isStakedAttestationRequired(),
+      stakedWebMaxBetUsdc: getStakedWebMaxBetUsdc(),
+      androidAppUrl: process.env.ANDROID_APP_URL || "",
     });
   } catch (error) {
     logger.error("[CONFIG] Error serving config:", { error });

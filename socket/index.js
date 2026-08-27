@@ -78,6 +78,10 @@ const {
   handlePlayerLeftWin,
 } = require("../services/playerService");
 const { queueOnChainRefund } = require("../services/refunds");
+const {
+  assertStakedClientAllowed,
+  isSessionAttested,
+} = require("../services/attestation");
 const telemetry = require("../services/telemetry");
 const {
   verifyAndValidateTransaction,
@@ -171,22 +175,29 @@ function registerSocketAuthMiddleware(io) {
         return next();
       }
 
-      const cookieHeader = socket.handshake.headers.cookie;
-      if (!cookieHeader) {
-        console.warn("[AUTH] No cookies in Socket.IO handshake");
-        return next(new Error("Authentication required"));
-      }
+      // Two transports, one session model: browsers send the signed HttpOnly
+      // cookie, the native app sends the raw token in handshake.auth (it has no
+      // cookie jar). Both resolve to the same `session:<token>` record.
+      let sessionToken = socket.handshake.auth?.token || null;
 
-      const cookies = cookie.parse(cookieHeader);
-      let sessionToken = cookies.sessionToken;
-      if (!sessionToken) return next(new Error("No session cookie"));
+      if (!sessionToken) {
+        const cookieHeader = socket.handshake.headers.cookie;
+        if (!cookieHeader) {
+          console.warn("[AUTH] No cookies in Socket.IO handshake");
+          return next(new Error("Authentication required"));
+        }
 
-      if (sessionToken.startsWith("s:")) {
-        sessionToken = cookieSignature.unsign(
-          sessionToken.slice(2),
-          SESSION_SECRET
-        );
-        if (sessionToken === false) return next(new Error("Invalid session"));
+        const cookies = cookie.parse(cookieHeader);
+        sessionToken = cookies.sessionToken;
+        if (!sessionToken) return next(new Error("No session cookie"));
+
+        if (sessionToken.startsWith("s:")) {
+          sessionToken = cookieSignature.unsign(
+            sessionToken.slice(2),
+            SESSION_SECRET
+          );
+          if (sessionToken === false) return next(new Error("Invalid session"));
+        }
       }
 
       const sessionDataStr = await context.redisClient.get(
@@ -250,6 +261,17 @@ async function validateSocketSession(socket, eventName) {
       });
       socket.disconnect(true);
       return false;
+    }
+
+    // Stash the freshly-read record for handlers that need session state rather
+    // than just identity — chiefly the staked-play attestation gate, which must
+    // see the CURRENT attestation (the app re-attests mid-session, and it goes
+    // stale within minutes), never a snapshot taken at handshake time. Free: the
+    // record was already fetched above, on every game event.
+    try {
+      socket.sessionData = JSON.parse(session);
+    } catch {
+      socket.sessionData = null;
     }
     return true;
   } catch (error) {
@@ -1291,6 +1313,20 @@ async function handleGameEvent(socket, event, args) {
       return;
     }
 
+    // Native-client gate — before the stake is verified, so a blocked client is
+    // turned away without having paid and there is nothing to refund.
+    const joinGameGate = assertStakedClientAllowed(
+      socket.sessionData,
+      betAmount
+    );
+    if (!joinGameGate.allowed) {
+      logger.info(
+        `[ATTEST] joinGame refused for ${walletAddress}: ${joinGameGate.code}`
+      );
+      socket.emit("joinGameFailure", joinGameGate.reason);
+      return;
+    }
+
     try {
       await verifyAndValidateTransaction(
         transactionSignature,
@@ -1811,6 +1847,30 @@ async function handleGameEvent(socket, event, args) {
       }
     }
 
+    // ── Native-client gate ───────────────────────────────────────────────────
+    // Deliberately ahead of stake verification: a client that may not stake must
+    // be turned away BEFORE it pays, so there is never a refund to unwind. Reads
+    // socket.sessionData, refreshed by validateSocketSession on this very event,
+    // so a stale attestation cannot slip through.
+    //
+    // Pot mode only: in subscription mode betAmount is just the queue bucket —
+    // no money moves per game — so gating on it would lock premium members out
+    // of ranked play for no integrity gain.
+    const stakeGate = assertStakedClientAllowed(
+      socket.sessionData,
+      isPotMode() ? betAmount : 0
+    );
+    if (!stakeGate.allowed) {
+      logger.info(
+        `[ATTEST] Staked join refused for ${walletAddress}: ${stakeGate.code}`
+      );
+      socket.emit("matchmakingError", {
+        error: stakeGate.reason,
+        code: stakeGate.code,
+      });
+      return;
+    }
+
     // ── Pot mode: verify the stake before queueing ───────────────────────────
     // Everything after a verified transfer is past the point of no return: the
     // player's USDC is in the treasury, so any later failure must refund rather
@@ -1839,8 +1899,16 @@ async function handleGameEvent(socket, event, args) {
         return;
       }
 
+      // reCAPTCHA cannot run inside the app's WebView: the page is served from
+      // the APK at https://localhost, which is not a registered reCAPTCHA
+      // domain. A server-verified attestation is accepted in its place — Play
+      // Integrity answers the same "real human on a real device" question with
+      // a hardware-backed signal, so this swaps a weak check for a stronger one
+      // rather than dropping a defence. Note this reads the SAME session state
+      // the stake gate above already validated for freshness.
+      const attestedClient = isSessionAttested(socket.sessionData);
       try {
-        await verifyRecaptcha(recaptchaToken);
+        if (!attestedClient) await verifyRecaptcha(recaptchaToken);
       } catch (recaptchaError) {
         // Refund first: the stake is already collected, so returning it must not
         // depend on the bookkeeping calls below succeeding.

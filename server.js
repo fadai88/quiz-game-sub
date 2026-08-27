@@ -44,7 +44,7 @@ const crypto       = require('crypto');
 require('dotenv').config();
 
 // ─── App config & shared state ────────────────────────────────────────────────
-const { ENVIRONMENT, MONETIZATION, isPotMode, isSubscriptionMode } = require('./config/constants');
+const { ENVIRONMENT, MONETIZATION, isPotMode, isSubscriptionMode, isStakedAttestationRequired } = require('./config/constants');
 const context               = require('./context');
 const logger                = require('./logger');
 const { authenticate, requireAdmin } = require('./middleware/authenticate');
@@ -63,6 +63,7 @@ const TournamentService   = require('./services/TournamentService');
 // ─── Socket & routes ──────────────────────────────────────────────────────────
 const { registerSocketHandlers, botDetector } = require('./socket/index');
 const authRoutes          = require('./routes/auth');
+const attestationRoutes   = require('./routes/attestation');
 const balanceRoutes       = require('./routes/balance');
 const subscriptionRoutes  = require('./routes/subscriptions');
 const { tournamentRouter, adminTournamentRouter } = require('./routes/tournaments');
@@ -86,6 +87,18 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
 if (!process.env.ALLOWED_ORIGINS && ENVIRONMENT === 'production') {
     console.error('❌ FATAL: ALLOWED_ORIGINS not set in production — refusing to start with localhost CORS fallback.');
     process.exit(1);
+}
+// The Capacitor app loads its pages from the APK, so every request it makes is
+// cross-origin from this server's point of view. Android reports the origin as
+// https://localhost (capacitor.config.json androidScheme). Without it in the
+// list the app fails every call with an opaque CORS error, which is a miserable
+// thing to debug on a phone — so say so at startup instead.
+const CAPACITOR_ANDROID_ORIGIN = 'https://localhost';
+if (isStakedAttestationRequired() && !allowedOrigins.includes(CAPACITOR_ANDROID_ORIGIN)) {
+    console.warn(
+        `⚠️  STAKED_REQUIRES_ATTESTATION is on but ALLOWED_ORIGINS does not include ${CAPACITOR_ANDROID_ORIGIN} — ` +
+        'the Android app will be blocked by CORS. See docs/MOBILE_APP.md.'
+    );
 }
 
 const io = socketIo(server, {
@@ -165,6 +178,7 @@ async function httpRateLimit(req, res, next) {
 
 // ─── API routes ───────────────────────────────────────────────────────────────
 app.use('/api/auth',         httpRateLimit, authRoutes);
+app.use('/api/attest',       httpRateLimit, attestationRoutes);
 app.use('/api',              httpRateLimit, balanceRoutes);
 
 // Subscriptions and tournaments are a subscription-mode product surface. In pot

@@ -126,6 +126,53 @@ const DISCRIMINATOR_MODEL =
 // or thin data pays out normally, so this can never wrongly withhold on a bug.
 const isRiskAutoholdEnabled = () => process.env.RISK_AUTOHOLD === "true";
 
+// ─── Anti-cheat: device attestation / native-only staking ────────────────────
+// The web client is fully adversary-controlled: a headless browser, a DOM
+// scraper or an LLM in a second tab all look like a normal player. A native app
+// that passes platform attestation (Play Integrity / App Attest) proves the real
+// binary is running on a genuine, unrooted device — which kills that cheap,
+// scalable attack class. It does NOT stop a second phone pointed at the screen.
+//
+// All read dynamically (not load-time consts) so they can be toggled without a
+// restart and exercised in tests.
+//
+// Unlike RISK_AUTOHOLD (which fails OPEN, because wrongly withholding money is
+// worse than missing a cheat), this gate fails CLOSED: a verification error
+// refuses entry. No one's funds are at risk there — only a match that didn't
+// start — but it does mean an attestation-provider outage stalls staked play, so
+// STAKED_REQUIRES_ATTESTATION=false is the documented one-line kill switch.
+const isStakedAttestationRequired = () =>
+  process.env.STAKED_REQUIRES_ATTESTATION === "true";
+
+// Soft rollout: unattested web clients may still stake up to this amount, so the
+// web audience isn't cut off the day the app lands. Expressed in USDC *display*
+// units (e.g. "3") because that is how an operator thinks about it; converted to
+// atomic units at the point of comparison. Unset ⇒ web may not stake at all once
+// the gate is on.
+const getStakedWebMaxBetUsdc = () => {
+  const raw = process.env.STAKED_WEB_MAX_BET_USDC;
+  if (raw === undefined || raw === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+};
+
+// "google" (Play Integrity) | "apple" (App Attest, phase 3) | "mock" (dev/tests).
+const getAttestationProvider = () => process.env.ATTESTATION_PROVIDER || "mock";
+
+// How fresh an attestation must be at the moment of a staked join. The app
+// re-attests immediately before staking, so this is deliberately short: a token
+// replayed later is worthless.
+const getAttestationMaxAgeMs = () => {
+  const n = parseInt(process.env.ATTESTATION_MAX_AGE_MS || "", 10);
+  return Number.isNaN(n) || n <= 0 ? 5 * 60 * 1000 : n;
+};
+
+// Play Integrity returns PLAY_RECOGNIZED only for Play-distributed builds; a
+// sideloaded closed-beta APK returns UNRECOGNIZED_VERSION. Turning this off lets
+// the beta run on device integrity alone.
+const isPlayRecognizedRequired = () =>
+  process.env.ATTESTATION_REQUIRE_PLAY_RECOGNIZED !== "false";
+
 // ─── Startup validation ──────────────────────────────────────────────────────
 
 console.log(
@@ -195,6 +242,11 @@ module.exports = {
   DISCRIMINATOR_SEED_COUNT,
   DISCRIMINATOR_MODEL,
   isRiskAutoholdEnabled,
+  isStakedAttestationRequired,
+  getStakedWebMaxBetUsdc,
+  getAttestationProvider,
+  getAttestationMaxAgeMs,
+  isPlayRecognizedRequired,
   isPotMode,
   isSubscriptionMode,
 };

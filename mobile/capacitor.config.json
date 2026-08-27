@@ -1,0 +1,11 @@
+{
+  "appId": "com.proofofsmart.quiz",
+  "appName": "Proof of Smart",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}

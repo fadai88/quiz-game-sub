@@ -1,0 +1,40 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Additions for android/app/build.gradle, applied by
+// mobile/scripts/apply-android-overlay.js.
+//
+// Kept as a fragment rather than a whole file because `cap add android`
+// generates build.gradle and regenerates parts of it on `cap sync`; merging is
+// safer than owning the file outright.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// --- BEGIN quiz-game additions ---
+
+// Build-time config read by the plugins. Values come from mobile/.env.android
+// (gitignored) so no project number, cluster or identity URL is hardcoded in a
+// tracked file.
+//
+// Add inside android { defaultConfig { ... } }:
+//
+//   buildConfigField "long",   "GOOGLE_CLOUD_PROJECT_NUMBER", "${project.properties['GOOGLE_CLOUD_PROJECT_NUMBER'] ?: 0}L"
+//   buildConfigField "String", "APP_IDENTITY_URI",   "\"${project.properties['APP_IDENTITY_URI']  ?: 'https://localhost'}\""
+//   buildConfigField "String", "APP_IDENTITY_NAME",  "\"${project.properties['APP_IDENTITY_NAME'] ?: 'Proof of Smart'}\""
+//   buildConfigField "String", "SOLANA_CLUSTER",     "\"${project.properties['SOLANA_CLUSTER']    ?: 'devnet'}\""
+//
+// And inside android { buildFeatures { ... } }:
+//
+//   buildConfig true
+
+dependencies {
+    // Play Integrity — the attestation verdict. Free tier covers the standard
+    // request used by PlayIntegrityPlugin.
+    implementation "com.google.android.play:integrity:1.4.0"
+
+    // Mobile Wallet Adapter — non-custodial wallet access. `clientlib-ktx` is
+    // the coroutine API MobileWalletAdapterPlugin is written against.
+    implementation "com.solanamobile:mobile-wallet-adapter-clientlib-ktx:2.0.3"
+
+    // MWA's client is coroutine-based.
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3"
+}
+
+// --- END quiz-game additions ---

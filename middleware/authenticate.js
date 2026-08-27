@@ -7,9 +7,25 @@ const logger = require("../logger");
 const context = require("../context");
 const User = require("../models/User");
 
+/**
+ * The session token, from either transport:
+ *   - browsers send it as a signed HttpOnly cookie
+ *   - the native app sends it as `Authorization: Bearer <token>` (no cookie jar)
+ * Both resolve to the same raw token and the same `session:<token>` record, so
+ * there is still exactly one session model.
+ */
+function extractSessionToken(req) {
+  const header = req.headers?.authorization;
+  if (header && header.startsWith("Bearer ")) {
+    const bearer = header.slice(7).trim();
+    if (bearer) return bearer;
+  }
+  return req.signedCookies?.sessionToken || null;
+}
+
 async function authenticate(req, res, next) {
   try {
-    const { sessionToken } = req.signedCookies;
+    const sessionToken = extractSessionToken(req);
     if (!sessionToken)
       return res
         .status(401)
@@ -41,6 +57,10 @@ async function authenticate(req, res, next) {
     );
 
     req.user = { id: user._id, walletAddress: sessionData.walletAddress };
+    // Routes that need to amend the session record itself (e.g. marking it
+    // attested) need the token and the current record, not just the identity.
+    req.sessionToken = sessionToken;
+    req.sessionData = sessionData;
     next();
   } catch (error) {
     logger.error("[AUTH] Middleware error:", { error: error.message });
@@ -61,4 +81,4 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-module.exports = { authenticate, requireAdmin };
+module.exports = { authenticate, requireAdmin, extractSessionToken };

@@ -111,6 +111,10 @@ router.post("/login", async (req, res) => {
       timestamp: Date.now(),
       ip: connectionData.ip,
       userAgent: connectionData.userAgent,
+      // Self-declared and therefore untrusted — kept for telemetry only. The
+      // staked-play gate keys off `attested`, which is server-verified against
+      // the platform attestation service (see services/attestation.js).
+      clientType: req.headers["x-client-type"] === "native" ? "native" : "web",
     };
 
     await redisClient.set(
@@ -128,7 +132,19 @@ router.post("/login", async (req, res) => {
 
     logger.info(`[SESSION] HTTP login successful for ${walletAddress}`);
     res.cookie("sessionToken", sessionToken, COOKIE_OPTIONS);
-    res.json({ success: true, virtualBalance: user.virtualBalance });
+
+    // The native app has no cookie jar, so it needs the token in the body to
+    // send as `Authorization: Bearer` / socket handshake auth. This hands the
+    // caller nothing it isn't already receiving as a cookie; the header gate is
+    // what keeps the token out of browser-visible responses, where HttpOnly is
+    // the defence against XSS reading it.
+    const isNativeClient = req.headers["x-client-type"] === "native";
+
+    res.json({
+      success: true,
+      virtualBalance: user.virtualBalance,
+      ...(isNativeClient ? { sessionToken } : {}),
+    });
   } catch (error) {
     logger.error("[AUTH] HTTP login error:", { error });
     res.status(500).json({ success: false, error: "Server error" });

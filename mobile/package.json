@@ -1,0 +1,22 @@
+{
+  "name": "quiz-game-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Capacitor shell for staked play. Wraps the existing public/ web client and adds Play Integrity attestation + Mobile Wallet Adapter.",
+  "scripts": {
+    "sync:web": "node scripts/sync-web.js",
+    "overlay": "node scripts/apply-android-overlay.js",
+    "add:android": "cap add android && npm run overlay",
+    "build": "npm run sync:web && cap sync android && npm run overlay",
+    "open:android": "cap open android",
+    "run:android": "npm run build && cap run android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.1.2",
+    "@capacitor/app": "^6.0.1",
+    "@capacitor/core": "^6.1.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.1.2"
+  }
+}

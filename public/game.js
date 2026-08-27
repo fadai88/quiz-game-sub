@@ -81,9 +81,7 @@ function generateUUID() {
   });
 }
 
-const socket = io({
-  withCredentials: true,
-});
+const socket = AppNet.connectSocket();
 
 socket.on("error", (error) => {
   logError("socket-error", error); // ✅ Safe logging
@@ -178,11 +176,15 @@ let currentBetAmount = null; // pot mode: the staked amount, in atomic units
 // memberships. Defaults to subscription to match the server-side default.
 let potMode = false;
 let validBetAmountsAtomic = [];
+// Kept so the staking path can ask whether this deployment requires an attested
+// native client (see AppNative.ensureAttestedForStake).
+let serverConfig = {};
 
 async function loadMonetizationConfig() {
   try {
     const res = await fetch("/api/config");
     const cfg = await res.json();
+    serverConfig = cfg;
     potMode = cfg.monetization === "pot";
     validBetAmountsAtomic = cfg.validBetAmounts || [];
 
@@ -652,6 +654,9 @@ async function logout() {
   } catch (error) {
     logError("logout", error);
   }
+  // Native holds the session in a bearer token rather than a cookie, so the
+  // server-side clear is only half the job.
+  AppNet.setSessionToken(null);
   window.location.href = "login.html";
 }
 
@@ -941,7 +946,9 @@ WalletManager.onDisconnect(async () => {
     logError("logout", error);
   }
 
-  // NO localStorage to clear - session is in httpOnly cookie
+  // Web: nothing to clear — the session is in an httpOnly cookie. Native: the
+  // bearer token is ours to drop.
+  AppNet.setSessionToken(null);
   window.location.href = "login.html";
 });
 
@@ -2308,8 +2315,25 @@ async function stakeAndJoinMatchmaking() {
     if (e && e.message && e.message.includes("maintenance")) throw e;
   }
 
+  // Device attestation, for the same reason reCAPTCHA runs here: before any
+  // USDC moves. The server refuses an unattested staked join anyway, but it
+  // does so after the transfer would already have happened, forcing a refund.
+  // Checking first means a player who cannot stake simply never pays.
+  waitingMessage.textContent = "Checking device...";
+  const attestation = await AppNative.ensureAttestedForStake(
+    serverConfig,
+    betAmount
+  );
+  if (!attestation.ok) {
+    throw new Error(attestation.message);
+  }
+
+  // reCAPTCHA cannot run in the app's WebView — the page origin is
+  // https://localhost, which is not a registered reCAPTCHA domain. The server
+  // exempts attested sessions instead: Play Integrity answers the same "real
+  // human on a real device" question far more strongly. See routes/attestation.
   let recaptchaToken = null;
-  if (window.recaptchaEnabled) {
+  if (window.recaptchaEnabled && !AppNet.isNative) {
     waitingMessage.textContent = "Verifying security...";
     recaptchaToken = await getRecaptchaToken("place_bet");
   }
@@ -2341,11 +2365,14 @@ async function stakeAndJoinMatchmaking() {
     betAmount,
     nonce
   );
-  const signedTransaction = await stakeProvider.signTransaction(transaction);
-
   waitingMessage.textContent = "Sending transaction...";
-  const txSignature = await connection.sendRawTransaction(
-    signedTransaction.serialize()
+  // Extensions sign here and let us broadcast; Mobile Wallet Adapter signs and
+  // broadcasts in one step. Either way we end up with an on-chain signature,
+  // which is all the server verifies.
+  const txSignature = await WalletManager.signAndSend(
+    stakeProvider,
+    transaction,
+    connection
   );
 
   currentBetAmount = betAmount;

@@ -168,6 +168,16 @@ const loginSchema = Joi.object({
   clientData: Joi.object().optional(),
 });
 
+// Device attestation (POST /api/attest/verify). The integrity token is opaque
+// and provider-shaped, so it is only bounded, never parsed here.
+const attestVerifySchema = Joi.object({
+  token: Joi.string().min(1).max(20000).required(),
+  nonce: Joi.string().min(1).max(200).required(),
+  // The app's install secret — hashed server-side into a device id.
+  deviceSecret: Joi.string().min(16).max(200).required(),
+  platform: Joi.string().valid("android", "ios", "mock").required(),
+});
+
 const walletParamSchema = Joi.object({ wallet: solanaPublicKey });
 
 const paymentIdParamSchema = Joi.object({
@@ -228,6 +238,7 @@ module.exports = {
   subscribeSchema,
   // HTTP schemas
   loginSchema,
+  attestVerifySchema,
   walletParamSchema,
   paymentIdParamSchema,
   createTournamentSchema,
