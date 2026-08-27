@@ -25,10 +25,17 @@
  * Orphans are NOT repairable — a row stores no question text, so there is no way
  * to re-link it. Those questions must be re-calibrated.
  *
+ * A third, smaller trap: UNPARSED rows (llmAnswer -1). The calibration script
+ * resumes by skipping any question that already has a row, so a row recorded
+ * from an unreadable reply is never retried — it is stuck at -1 forever unless
+ * the whole model is re-run with --force. `--clear-unparsed` deletes just those
+ * rows so the next normal run picks them up.
+ *
  * Usage:
- *   node scripts/check-calibration-integrity.js            # report only
- *   node scripts/check-calibration-integrity.js --repair   # fix drift (free)
- *   node scripts/check-calibration-integrity.js --prune    # delete orphans
+ *   node scripts/check-calibration-integrity.js                  # report only
+ *   node scripts/check-calibration-integrity.js --repair         # fix drift (free)
+ *   node scripts/check-calibration-integrity.js --prune          # delete orphans
+ *   node scripts/check-calibration-integrity.js --clear-unparsed # retry -1 rows
  */
 
 const mongoose = require("mongoose");
@@ -40,6 +47,7 @@ const QuestionCalibration = require("../models/QuestionCalibration");
 
 const REPAIR = process.argv.includes("--repair");
 const PRUNE = process.argv.includes("--prune");
+const CLEAR_UNPARSED = process.argv.includes("--clear-unparsed");
 const BATCH = 1000;
 
 function bankFor(collectionName) {
@@ -193,7 +201,37 @@ async function main() {
     );
   }
 
-  if (!stats.drifted && !stats.orphaned) {
+  // ── Unparsed rows ─────────────────────────────────────────────────────────
+  // Counted separately from drift/orphans: these rows point at a live question
+  // and carry the right key, they just never got a readable answer out of the
+  // model. They are excluded from the discriminator set (which requires
+  // llmAnswer !== -1), so they are not harmful — only wasted coverage.
+  const unparsedByModel = await QuestionCalibration.aggregate([
+    { $match: { llmAnswer: -1 } },
+    { $group: { _id: "$model", n: { $sum: 1 } } },
+    { $sort: { n: -1 } },
+  ]);
+  const unparsedTotal = unparsedByModel.reduce((a, r) => a + r.n, 0);
+
+  if (unparsedTotal) {
+    console.log(`\n   ${unparsedTotal} unparsed rows (llmAnswer -1):`);
+    for (const r of unparsedByModel) console.log(`        ${r._id}: ${r.n}`);
+    if (CLEAR_UNPARSED) {
+      const res = await QuestionCalibration.deleteMany({ llmAnswer: -1 });
+      console.log(
+        `   🔄 Cleared ${res.deletedCount} — re-run the calibration script and\n` +
+          "      those questions will be picked up as pending."
+      );
+    } else {
+      console.log(
+        "   These are never retried on their own: the calibration script resumes by\n" +
+          "   skipping any question that already has a row. Use --clear-unparsed to\n" +
+          "   delete them so a normal re-run retries them."
+      );
+    }
+  }
+
+  if (!stats.drifted && !stats.orphaned && !unparsedTotal) {
     console.log(
       "\n   ✅ Calibration is fully consistent with the question bank."
     );
