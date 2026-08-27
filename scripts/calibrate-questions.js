@@ -122,25 +122,71 @@ async function apiError(res) {
   return err;
 }
 
+// Some models (Sonnet 5) use extended thinking by default. That is wrong for
+// this job in two ways: the thinking is billed and unbounded, and on a question
+// that needs real work it consumes the whole max_tokens budget before any text
+// block is produced — the reply comes back stop_reason:"max_tokens" with a
+// single empty `thinking` block and nothing to parse.
+//
+// That is exactly what stranded 810 questions here: they were the computational
+// ones, so they were deterministically the ones whose thinking overran, and no
+// number of re-runs could ever clear them. Calibration wants a one-line verdict,
+// not deliberation, so thinking is turned off.
+//
+// Not every model accepts the parameter, so a rejection falls back to omitting
+// it rather than failing the run.
+let thinkingSupported = true;
+
+function anthropicBody({ system, content, maxTokens, disableThinking }) {
+  const body = {
+    model: MODEL,
+    max_tokens: maxTokens,
+    system,
+    messages: [{ role: "user", content }],
+  };
+  if (disableThinking) body.thinking = { type: "disabled" };
+  return JSON.stringify(body);
+}
+
 async function callAnthropic({ system, content, maxTokens }) {
-  const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: maxTokens,
-      system,
-      messages: [{ role: "user", content }],
-    }),
-  });
+  const post = (disableThinking) =>
+    fetchWithTimeout("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: anthropicBody({ system, content, maxTokens, disableThinking }),
+    });
+
+  let res = await post(thinkingSupported);
+  if (!res.ok && thinkingSupported && res.status === 400) {
+    // Probably a model that does not know the parameter — stop sending it.
+    const err = await apiError(res);
+    if (/thinking/i.test(err.message || "")) {
+      thinkingSupported = false;
+      console.warn(
+        "[calibrate] model rejected `thinking: disabled` — continuing without it"
+      );
+      res = await post(false);
+    } else {
+      throw err;
+    }
+  }
   if (!res.ok) throw await apiError(res);
+
   const data = await res.json();
+  // Take the TEXT block specifically. Indexing content[0] returns undefined when
+  // the model leads with a thinking block, which silently yielded an empty reply.
+  const text = (data.content || [])
+    .filter((b) => b.type === "text" && b.text)
+    .map((b) => b.text)
+    .join("\n")
+    .trim();
+
   return {
-    text: (data.content?.[0]?.text || "").trim(),
+    text,
     usage: {
       input_tokens: data.usage?.input_tokens || 0,
       output_tokens: data.usage?.output_tokens || 0,
@@ -184,16 +230,28 @@ function callProvider(args) {
   return PROVIDER === "openai" ? callOpenAI(args) : callAnthropic(args);
 }
 
+// Reasoning-capable models work through computational questions ("a regular
+// octagon has interior angles summing to…") before answering. A tight ceiling
+// truncated those replies mid-thought, so the answer never arrived and the
+// question stayed pending forever — deterministically, which is why re-running
+// never cleared the tail. max_tokens is only a CAP, not a charge: a question the
+// model answers tersely still costs a handful of output tokens, so headroom here
+// is free. Sized per question so a big batch cannot be squeezed.
+const TOKENS_PER_QUESTION = 220;
+const TOKEN_SLACK = 400;
+
 async function askModel(question, options) {
   const optionsText = options.map((o, i) => `${i}) ${o}`).join("\n");
   return callProvider({
     system:
-      "You are answering a multiple-choice trivia question. Reply with ONLY " +
-      "the number of the correct option — no words, no punctuation.",
+      "You are answering a multiple-choice trivia question. Work it out silently " +
+      "if you need to, then give your answer.",
     content:
       `Question: ${question}\nOptions:\n${optionsText}\n\n` +
-      `Reply with only the option number (0-${options.length - 1}).`,
-    maxTokens: 16,
+      `End your reply with the line \`ANSWER=<index>\`, where <index> is the ` +
+      `0-based index of the correct option (0-${options.length - 1}). ` +
+      "The ANSWER line must be the last thing you output.",
+    maxTokens: TOKENS_PER_QUESTION + TOKEN_SLACK,
   });
 }
 
@@ -206,22 +264,21 @@ function buildBatchContent(questions) {
     .join("\n\n");
   return (
     `Answer each numbered multiple-choice question below.\n\n${blocks}\n\n` +
-    "Respond with one line per question in the exact format `N=I`, where N is " +
-    "the question number and I is the 0-based index of the correct option " +
-    "(e.g. `1=2`). Output only these lines, one per question."
+    "Work out any that need calculation, then output a final block that starts " +
+    "with a line containing only `ANSWERS:` followed by one line per question in " +
+    "the exact format `N=I`, where N is the question number and I is the 0-based " +
+    "index of the correct option (e.g. `1=2`). Output nothing after that block."
   );
 }
 
 async function askModelBatch(questions) {
   const { text, usage } = await callProvider({
     system:
-      "You are answering multiple-choice trivia questions. For each numbered " +
-      "question output exactly one line `N=I` (question number = 0-based correct " +
-      "option index). No other text.",
+      "You are answering multiple-choice trivia questions. Finish with a block " +
+      "starting `ANSWERS:` containing exactly one line `N=I` per question " +
+      "(question number = 0-based correct option index).",
     content: buildBatchContent(questions),
-    // Generous budget: enough for one `N=I` line per question plus slack, so a
-    // larger batch never truncates (which yields an unparseable reply).
-    maxTokens: questions.length * 20 + 50,
+    maxTokens: questions.length * TOKENS_PER_QUESTION + TOKEN_SLACK,
   });
   return { answers: parseBatch(text, questions), usage };
 }
@@ -255,21 +312,70 @@ async function withRetry(fn, tries = 5) {
 }
 
 // ─── Parsing ──────────────────────────────────────────────────────────────────
+//
+// These decide what gets recorded as the model's answer, and a wrong index here
+// is worse than no answer at all: llmCorrect=false is what defines an
+// "AI-discriminator", which can be seeded into real-money matches. So both
+// parsers anchor on an explicit marker and refuse to guess from loose text.
+//
+// The hazard is concrete. Reasoning output contains numbers ("an octagon has 8
+// sides", "(8-2)*180 = 1080"), and the previous parsers took the FIRST integer
+// anywhere in the reply and matched `N=I` mid-sentence — so working like
+// "= 1080" could be read as an answer for question 8.
+
+/**
+ * The model's chosen option index from a single-question reply.
+ * Returns -1 when it cannot be determined with confidence.
+ */
 function parseIndex(text, n) {
-  const m = String(text).match(/\d+/);
-  if (!m) return -1;
-  const v = parseInt(m[0], 10);
-  return v >= 0 && v < n ? v : -1;
+  const s = String(text);
+
+  // Preferred: the explicit end marker we asked for. Last one wins, so a marker
+  // quoted mid-reasoning cannot beat the final answer.
+  const marked = [...s.matchAll(/ANSWER\s*[:=]\s*(\d+)/gi)];
+  if (marked.length) {
+    const v = parseInt(marked[marked.length - 1][1], 10);
+    return v >= 0 && v < n ? v : -1;
+  }
+
+  // Fallback only for a terse reply that is essentially just the number — the
+  // old bare-integer behaviour, kept for models that ignore the marker. Anything
+  // longer is prose we refuse to guess from.
+  const bare = s.trim();
+  if (bare.length <= 4) {
+    const m = bare.match(/\d+/);
+    if (m) {
+      const v = parseInt(m[0], 10);
+      return v >= 0 && v < n ? v : -1;
+    }
+  }
+  return -1;
 }
 
-// Parse `N=I` lines into an answers array aligned to `questions`. Any question
-// the model didn't answer stays `undefined` (left pending for a future run,
-// rather than being recorded as a wrong -1).
+/**
+ * Parse `N=I` lines into an answers array aligned to `questions`.
+ *
+ * A question the model did not answer stays `undefined`, which leaves it PENDING
+ * for a future run rather than recording a wrong -1 — that distinction is why
+ * the script is resumable.
+ */
 function parseBatch(text, questions) {
   const answers = new Array(questions.length).fill(undefined);
-  const re = /(\d+)\s*=\s*(\d+)/g;
-  let m;
-  while ((m = re.exec(text))) {
+  let s = String(text);
+
+  // Only look at the final ANSWERS: block when the model produced one, so any
+  // preceding working is out of scope.
+  const blocks = [...s.matchAll(/^[ \t]*ANSWERS:[ \t]*$/gim)];
+  if (blocks.length) {
+    const last = blocks[blocks.length - 1];
+    s = s.slice(last.index + last[0].length);
+  }
+
+  // Line-anchored: `N=I` must be the whole line (bar whitespace), so arithmetic
+  // embedded in a sentence cannot masquerade as an answer.
+  for (const line of s.split(/\r?\n/)) {
+    const m = line.match(/^\s*(\d+)\s*=\s*(\d+)\s*$/);
+    if (!m) continue;
     const qi = parseInt(m[1], 10) - 1;
     const opt = parseInt(m[2], 10);
     if (qi >= 0 && qi < questions.length) {
@@ -500,10 +606,16 @@ async function main() {
   await mongoose.connection.close();
 }
 
-main().catch(async (e) => {
-  console.error("Fatal:", e.message);
-  try {
-    await mongoose.connection.close();
-  } catch {}
-  process.exit(1);
-});
+// Only run when invoked directly — the parsers are unit tested, and requiring
+// this file must never start a calibration run against the live database.
+if (require.main === module) {
+  main().catch(async (e) => {
+    console.error("Fatal:", e.message);
+    try {
+      await mongoose.connection.close();
+    } catch {}
+    process.exit(1);
+  });
+}
+
+module.exports = { parseIndex, parseBatch };
