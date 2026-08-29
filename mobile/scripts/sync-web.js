@@ -30,11 +30,29 @@ const ROOT = path.resolve(__dirname, "..");
 const SRC = path.resolve(ROOT, "..", "public");
 const OUT = path.join(ROOT, "www");
 
-const API_BASE = (process.env.API_BASE || "").replace(/\/+$/, "");
+// Where the server lives. Taken from the environment first so a one-off build
+// can override, then from mobile/.env.android — which matters in practice
+// because a dev tunnel (cloudflared/ngrok) hands out a new URL on every restart
+// and this value is baked into the bundle at build time.
+function apiBaseFromEnvFile() {
+  const envPath = path.join(ROOT, ".env.android");
+  if (!fs.existsSync(envPath)) return "";
+  for (const line of fs.readFileSync(envPath, "utf8").split("\n")) {
+    const m = line.match(/^\s*API_BASE\s*=\s*(.*?)\s*$/);
+    if (m) return m[1];
+  }
+  return "";
+}
+
+const API_BASE = (process.env.API_BASE || apiBaseFromEnvFile() || "").replace(
+  /\/+$/,
+  ""
+);
 if (!API_BASE) {
   console.error(
     "❌ API_BASE is required — the app has no same-origin server to fall back on.\n" +
-      "   e.g. API_BASE=https://play.example.com npm run build"
+      "   Set it in mobile/.env.android, or per-build:\n" +
+      "     API_BASE=https://play.example.com npm run build"
   );
   process.exit(1);
 }

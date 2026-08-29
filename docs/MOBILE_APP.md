@@ -58,12 +58,24 @@ makes is fenced with a marker and skipped if already present.
 
 ```bash
 cd mobile
-API_BASE=https://your-server npm run build    # sync + cap sync + overlay
-npm run open:android                          # then Run ▶ in Android Studio
+npm run build            # sync + cap sync + overlay
+npm run open:android     # then Run ▶ in Android Studio
 ```
 
-`API_BASE` is required and has no default — the app has no same-origin server to
-fall back on, so a missing value would produce a build that 404s every request.
+`API_BASE` comes from `mobile/.env.android`, or from the environment for a
+one-off (`API_BASE=https://other npm run build`). It is required and has no
+default — the app has no same-origin server to fall back on, so a missing value
+would produce a build that 404s every request.
+
+It must be **HTTPS and reachable from the phone**. `androidScheme: https` plus
+`allowMixedContent: false` means a plain-HTTP dev server is refused by the
+WebView, and `localhost` is the phone itself. For local development, tunnel
+(`cloudflared tunnel --url http://localhost:3000`) and put that URL in
+`.env.android`; it changes on each tunnel restart, so re-run `npm run sync:web`.
+
+Do not confuse it with `ALLOWED_ORIGINS` on the server, which must contain
+**`https://localhost`** — the origin the app itself reports, not your server's
+address.
 
 ## Server configuration
 
