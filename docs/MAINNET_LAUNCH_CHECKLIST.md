@@ -10,9 +10,9 @@ shape (verified payments, idempotent payouts, restart refund recovery, on-chain
 refunds, drain mode). It is **not** the same as "ready to take uncapped real
 money": it has never run on mainnet, still has **no load/soak testing**, and the
 Android app (`docs/MOBILE_APP.md`) has never been compiled. Coverage has grown to
-10 test files / 120 assertions, but socket auth, matchmaking, transaction
-verification and restart recovery remain uncovered. Prefer a **phased launch**
-(Section I).
+11 test files / 136 assertions (now enforced by CI on every push), but socket auth,
+matchmaking, transaction verification and restart recovery remain uncovered. Prefer
+a **phased launch** (Section I).
 
 ---
 
@@ -124,13 +124,13 @@ regulated **skill-gaming** in many jurisdictions. Code cannot fix this.
 - [ ] **Payment throughput** — queue many payouts/refunds; confirm no double-send, no stuck queue, treasury fee burn is sustainable.
 - [ ] **Soak test** — run for hours; watch for memory leaks, orphaned rooms, timer drift, reconnect storms.
 - [ ] **Kill-test recovery** — hard-kill the server mid-game repeatedly; confirm every stake is refunded on reboot and nothing double-pays.
-- [ ] Expand **automated tests** beyond the current 4 files (socket auth, matchmaking, tx verification, restart recovery are uncovered).
+- [ ] Expand **automated tests** beyond the current 11 files (socket auth, matchmaking, tx verification, restart recovery are uncovered). The forfeit payout path (`handlePlayerLeftWin`) needs a DI refactor before it can be covered — `roomManager` fns are destructured at import, so sinon cannot intercept them.
 
 ---
 
 ## H. Pre-flight verification (immediately before taking traffic)
 
-- [ ] `npm test` → **120/120 green** (10 test files).
+- [ ] `npm test` → **136/136 green** (11 test files). CI runs this on every push; the suite is self-contained (no Mongo/Redis needed).
 - [ ] `node scripts/check-calibration-integrity.js` → no orphaned rows. Orphans
       mean discriminator seeding and the risk score's `aiAlignment` signal are
       silently doing nothing (see `docs/ANTICHEAT_AND_CALIBRATION.md`).

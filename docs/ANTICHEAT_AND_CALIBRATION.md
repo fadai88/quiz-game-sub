@@ -91,14 +91,40 @@ Design notes worth remembering:
 | `GOOGLE_PLAY_INTEGRITY_CREDENTIALS` | — | Service-account JSON, inline or a path |
 | `ANDROID_APP_URL` | — | Shown by the web client when staking needs the app |
 
-## Calibration state (as of 2026-08)
+## Calibration state (verified against the DB 2026-09-12)
 
-Bank: 11,512 questions. Calibrated:
-- **Haiku 4.5** — 100%, ~93.7% correct.
-- **Sonnet 5** — 100%, ~94.0% correct.
-- **gpt-4o-mini** — ~61% (rate-limited by a shared OpenAI account; resumable — re-run when the OpenAI Codex CLI isn't running).
+Bank: **11,512** questions (`Quiz`). 23,012 calibration rows, **0 orphaned, 0 drift,
+0 unparsed** per `check-calibration-integrity.js`.
 
-Disagreement (both Claude models, full coverage): 345 both-wrong (strongest discriminators), 347 only-Sonnet-wrong (data-quality suspects).
+| Model | Coverage | Correct | Discriminators (`llmCorrect:false`) |
+|---|---|---|---|
+| **Haiku 4.5** | 11,512 / 11,512 (100%) | 95.3% | 545 |
+| **Sonnet 5** | 11,500 / 11,512 (99.9%) | 97.5% | 289 |
+| **gpt-4o-mini** | 0 | — | — |
+
+Cross-model disagreement: **119 both-wrong** (strongest discriminators — genuinely
+hard for LLMs) and **170 only-Sonnet-wrong** (weaker; data-quality suspects).
+
+Two notes on why these numbers moved:
+
+- The earlier figures in this section (Haiku 93.7%, 345 both-wrong) predated the
+  2026-08-25 answer-key cleanup. Accuracy rose and the discriminator set *shrank*
+  because roughly 180 old "AI-discriminators" turned out to be **wrong answer
+  keys**, not hard questions. Seeding those into staked matches would have marked
+  correct players wrong for real money.
+- **gpt-4o-mini's rows are gone**, not merely incomplete: its partial coverage was
+  pruned with the 30,075 orphans on 2026-08-27 and never re-run. Cross-*vendor*
+  disagreement is the sharpest discriminator signal there is, so re-running it is
+  worthwhile — it needs OpenAI billing (the account last reported
+  `insufficient_quota`).
+
+**12 Sonnet questions are pending.** 11 were rows stuck at `llmAnswer:-1` from the
+extended-thinking bug (empty replies, `raw:""`); they were cleared on 2026-09-12 so
+a normal re-run picks them up, but the re-run could not complete — the
+`ANTHROPIC_API_KEY` in `.env` now returns **401 invalid key** and needs replacing.
+No correctness impact either way: the discriminator query and the risk score's
+`aiAlignment` both require `llmAnswer !== -1`, so those rows never contributed.
+Finish with `--batch 1` once the key is valid.
 
 ## How to run the calibration script
 
