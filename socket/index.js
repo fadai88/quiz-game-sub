@@ -57,6 +57,7 @@ const {
   deleteGameRoom,
   atomicRoomUpdate,
   addToMatchmakingPool,
+  claimTwoFromMatchmakingPool,
   removeFromMatchmakingPool,
   getMatchmakingPool,
   addWaitingRoom,
@@ -280,6 +281,86 @@ async function validateSocketSession(socket, eventName) {
       code: "AUTH_ERROR",
     });
     return false;
+  }
+}
+
+/**
+ * Claim two players to build a match from, or nothing.
+ *
+ * The claim itself is atomic in Redis (`claimTwoFromMatchmakingPool`), which is
+ * what makes simultaneous joins safe: a pair belongs to exactly one handler, so
+ * no two handlers can build a room for the same players. The original code read
+ * the pool and then removed its picks, which let every racing handler believe it
+ * had won — eight simultaneous joins produced eight rooms for one pair. See
+ * docs/LOAD_TESTING.md.
+ *
+ * What is left for this layer is the part Redis cannot judge: whether a claimed
+ * player is still connected. A dead entry is dropped, and a live player who
+ * loses their partner that way is put back in the queue — never dropped, because
+ * in ranked their stake is already collected and losing them would strand real
+ * money. The loop then tries again for a complete pair.
+ */
+const MAX_CLAIM_ATTEMPTS = 12;
+
+async function claimPairFromPool(betAmount, isEligible) {
+  for (let attempt = 0; attempt < MAX_CLAIM_ATTEMPTS; attempt++) {
+    const claimed = await claimTwoFromMatchmakingPool(betAmount);
+    if (!claimed) return null; // fewer than two queued — nothing to pair
+
+    const [first, second] = claimed;
+    const firstOk = !isEligible || isEligible(first);
+    const secondOk = !isEligible || isEligible(second);
+
+    if (firstOk && secondOk) return [first, second];
+
+    // Keep whichever is still usable and go back for a partner. The other was a
+    // stale entry for a socket that is gone, so it is intentionally not requeued.
+    const survivor = firstOk ? first : secondOk ? second : null;
+    if (survivor) {
+      await addToMatchmakingPool(betAmount, survivor).catch((error) =>
+        logger.error(
+          "[matchmaking] failed to re-queue a player after a stale partner:",
+          error
+        )
+      );
+    }
+  }
+
+  logger.warn(
+    `[matchmaking] gave up claiming a pair for ${betAmount} after ${MAX_CLAIM_ATTEMPTS} attempts`
+  );
+  return null;
+}
+
+/**
+ * Tell a player they are still queued after their handler lost a pairing race.
+ *
+ * When several joins arrive together, only one handler comes away with any given
+ * pair (see `claimTwoFromMatchmakingPool`). The rest have no match to announce —
+ * but they must not go silent either, because one of them is the socket that
+ * just queued and is waiting for a "you are in the queue" it would otherwise
+ * never get.
+ *
+ * Which case this is has one honest answer: whether this socket is still in the
+ * pool. If it is, nobody took it and it is genuinely waiting. If it is not, the
+ * handler that won the race has it and `matchFound` is already on its way — say
+ * nothing, or the client gets a "waiting" after it has been matched.
+ */
+async function reQueueNotice(socket, betAmount, mode) {
+  try {
+    const pool = await getMatchmakingPool(betAmount);
+    const stillQueued = pool.some((p) => p.socketId === socket.id);
+    if (!stillQueued) return;
+
+    socket.matchmakingPool = betAmount;
+    socket.emit(
+      "matchmakingJoined",
+      mode === "practice"
+        ? { waitingRoomId: "matchmaking-practice", mode: "practice" }
+        : { waitingRoomId: "ranked-queue", position: 1, mode: "ranked" }
+    );
+  } catch (error) {
+    logger.error("[matchmaking] reQueueNotice failed:", error);
   }
 }
 
@@ -1164,12 +1245,15 @@ async function handleGameEvent(socket, event, args) {
       });
       socket.matchmakingPool = 0;
 
-      const updatedPool = await getMatchmakingPool(0);
-      if (updatedPool.length >= 2) {
-        const p1 = updatedPool[0];
-        const p2 = updatedPool[1];
-        await removeFromMatchmakingPool(0, p1.socketId);
-        await removeFromMatchmakingPool(0, p2.socketId);
+      // Claiming decides who owns a pairing when joins arrive together; without
+      // it every racing handler believed it had won and built a room of its own.
+      // See docs/LOAD_TESTING.md. Dead sockets are filtered out here too, so a
+      // stale entry from an earlier crash cannot be paired with a live player.
+      const pair = await claimPairFromPool(0, (e) =>
+        Boolean(io.sockets.sockets.get(e.socketId))
+      );
+      if (pair) {
+        const [p1, p2] = pair;
 
         const roomId = generateRoomId();
         const room = await createGameRoom(roomId, 0, "human", {
@@ -1231,10 +1315,11 @@ async function handleGameEvent(socket, event, args) {
         });
         await startGame(roomId);
       } else {
-        socket.emit("matchmakingJoined", {
-          waitingRoomId: "matchmaking-practice",
-          mode: "practice",
-        });
+        // No pair to claim. That usually means this player is simply waiting —
+        // but it also happens when a competing handler claimed THEM a moment
+        // ago, and telling someone they are queued right after they were matched
+        // is worse than saying nothing. reQueueNotice checks before it speaks.
+        await reQueueNotice(socket, 0, "practice");
       }
       await logMatchmakingState();
     } else {
@@ -1997,11 +2082,25 @@ async function handleGameEvent(socket, event, args) {
         }
       }
 
-      if (eligiblePool.length >= 2) {
-        const p1 = eligiblePool[0];
-        const p2 = eligiblePool[1];
-        await removeFromMatchmakingPool(betAmount, p1.socketId);
-        await removeFromMatchmakingPool(betAmount, p2.socketId);
+      // Only players this pass judged eligible may be taken; the claim itself
+      // then decides which handler gets them. This matters more here than on the
+      // practice path — two handlers building a room for one pair of stakes
+      // means two GameSessions and two settlement attempts for a single pot.
+      // A stake is already collected by this point, so a player this loop puts
+      // back must stay in the queue rather than be dropped. See
+      // docs/LOAD_TESTING.md.
+      // Liveness is the only filter applied at claim time, deliberately. The
+      // entitlement sweep above already removed anyone ineligible FROM the pool,
+      // so what is left is either eligible or arrived since — and a player who
+      // joined a moment ago must not be judged against a snapshot taken before
+      // they existed. Treating them as stale would drop them, and in pot mode a
+      // dropped player is a collected stake with no game and no refund.
+      const pair = await claimPairFromPool(betAmount, (e) =>
+        Boolean(io.sockets.sockets.get(e.socketId))
+      );
+
+      if (pair) {
+        const [p1, p2] = pair;
 
         // Re-check liveness after removal — a socket can die in the gap
         const p1Socket = io.sockets.sockets.get(p1.socketId);
@@ -2140,11 +2239,10 @@ async function handleGameEvent(socket, event, args) {
 
         await startGame(roomId);
       } else {
-        socket.emit("matchmakingJoined", {
-          waitingRoomId: "ranked-queue",
-          position: eligiblePool.length,
-          mode: "ranked",
-        });
+        // Same reasoning as the practice path: only report "queued" to a player
+        // who is genuinely still in the queue, never to one another handler has
+        // just matched.
+        await reQueueNotice(socket, betAmount, "ranked");
       }
       await logMatchmakingState();
     } catch (queueError) {

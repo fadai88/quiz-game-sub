@@ -414,6 +414,74 @@ async function addToMatchmakingPool(betAmount, playerData) {
   }
 }
 
+/**
+ * Take the two players at the head of the pool, or take nobody at all.
+ *
+ * Matchmaking needs a pair, so a pair is what has to be claimed atomically. The
+ * obvious cheaper version — pop one, pop another — is wrong in a way that only
+ * shows up under load: with several handlers popping at once they each end up
+ * holding one player, every one of them then sees an empty queue, and they all
+ * put their player back and give up. Forty players, nobody matched, no error
+ * anywhere. Everyone picks up one chopstick and nobody eats.
+ *
+ * A two-line Lua script removes the possibility. Redis runs it as a single
+ * atomic step, so the outcome is either two players (ours alone — no other
+ * caller can see them) or an untouched queue. There is no state in which a
+ * caller holds one player and has to decide what to do about it.
+ *
+ * Returns [first, second] following the existing head-first order, or null when
+ * fewer than two are queued. The caller owns what it gets and must put back
+ * anyone it cannot use.
+ */
+const CLAIM_PAIR_LUA = `
+local first = redis.call('LPOP', KEYS[1])
+if not first then return nil end
+local second = redis.call('LPOP', KEYS[1])
+if not second then
+  redis.call('LPUSH', KEYS[1], first)
+  return nil
+end
+return {first, second}
+`;
+
+async function claimTwoFromMatchmakingPool(betAmount) {
+  try {
+    const claimed = await context.redisClient.eval(
+      CLAIM_PAIR_LUA,
+      1,
+      `matchmaking:human:${betAmount}`
+    );
+    if (!claimed || claimed.length < 2) return null;
+    return [JSON.parse(claimed[0]), JSON.parse(claimed[1])];
+  } catch (error) {
+    logger.error(`Error claiming a pair from pool ${betAmount}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Take a player out of the pool, and report whether THIS caller is the one that
+ * took them.
+ *
+ * That second half is the important half. Matchmaking reads the pool, picks the
+ * first two entries and removes them, which is a read-modify-write with an await
+ * in the middle: several joins arriving together all read the same pool and all
+ * pick the same two players. Something has to decide which handler actually gets
+ * them, and `LREM` already does — it is atomic, and its reply is the number of
+ * elements it removed, so for a given entry exactly one concurrent caller can be
+ * told 1 and the rest are told 0.
+ *
+ * This used to throw that number away and return the player data either way, so
+ * every racing handler believed it had won and built a room. Eight simultaneous
+ * joins produced eight rooms for the same pair; see docs/LOAD_TESTING.md.
+ *
+ * Returns the player data only when this call is the one that removed them, and
+ * null when the entry was already gone — whether because a competing handler
+ * claimed them a moment ago or because they were never queued. Callers must
+ * treat null as "not mine to use" rather than as an error: for the disconnect
+ * path it means the player was already matched and must not be refunded as a
+ * queue-leaver, and for matchmaking it means the pairing belongs to someone else.
+ */
 async function removeFromMatchmakingPool(betAmount, socketId) {
   try {
     const pool =
@@ -437,11 +505,19 @@ async function removeFromMatchmakingPool(betAmount, socketId) {
       return null;
     }
 
-    await context.redisClient.lrem(
+    const removedCount = await context.redisClient.lrem(
       `matchmaking:human:${betAmount}`,
       1,
       pool[playerIndex]
     );
+    if (!removedCount) {
+      // Another handler removed this exact entry between the read above and the
+      // LREM. It owns the player now; we must not also act on them.
+      logger.info(
+        `[matchmaking] Lost the claim on socketId ${socketId} for ${betAmount} — already taken`
+      );
+      return null;
+    }
     const playerData = JSON.parse(pool[playerIndex]);
     logger.info(
       `Removed player with socketId ${socketId} from matchmaking pool for ${betAmount}`
@@ -521,6 +597,7 @@ module.exports = {
   atomicRoomUpdate,
   deleteGameRoom,
   addToMatchmakingPool,
+  claimTwoFromMatchmakingPool,
   removeFromMatchmakingPool,
   getMatchmakingPool,
   logGameRoomsState,
