@@ -210,7 +210,7 @@ const mongooseOptions = {
     serverSelectionTimeoutMS: 5000, socketTimeoutMS: 45000,
     retryWrites: true, w: 'majority',
 };
-mongoose.connect(process.env.MONGODB_URI, mongooseOptions)
+const mongoReady = mongoose.connect(process.env.MONGODB_URI, mongooseOptions)
     .then(() => console.log('✅ MongoDB connected successfully'))
     .catch(err => { console.error('❌ FATAL: MongoDB connection failed:', err.message); process.exit(1); });
 
@@ -270,14 +270,6 @@ mongoose.connection.once('open', async () => {
         context.set('paymentProcessor', paymentProcessor);
         console.log('✅ PaymentProcessor initialized');
 
-        // Refund any stakes the previous instance left in-flight (graceful
-        // restart OR crash). Runs in the background — it only queues on-chain
-        // refunds; the PaymentProcessor above sends them. Idempotent, so a
-        // reboot mid-recovery can't double-refund.
-        require('./services/restartRecovery')
-            .recoverInFlightOnStartup()
-            .catch(err => logger.error('[RESTART-RECOVERY] startup call failed:', { error: err.message }));
-
         // gameService consults this at payout time; share it via context rather
         // than importing socket/index.js, which already requires gameService.
         context.set('botDetector', botDetector);
@@ -310,8 +302,25 @@ async function startServer() {
     try {
         await initializeRedis();
 
-        // Delay adapter init slightly so redisClient is ready
-        setTimeout(() => initializeSocketAdapter().catch(console.error), 1000);
+        // The adapter must be in place before the port opens. io.adapter() gives
+        // every namespace a fresh adapter, discarding the room memberships of any
+        // socket already connected — so a client that reconnected in the moments
+        // after a restart would be matched, see question 1, and then receive
+        // nothing more. It used to be installed on a 1s timer after listen; the
+        // kill test (scripts/loadtest/killtest.js) caught exactly that.
+        await initializeSocketAdapter();
+
+        // Refund whatever the previous instance left in-flight (graceful restart
+        // OR crash) BEFORE the port opens. Recovery treats every room and session
+        // it finds as abandoned, so it must not be able to see a game this
+        // instance started: when it ran after listen, a client reconnecting in
+        // that window got a live game deleted and refunded out from under it
+        // (caught by scripts/loadtest/killtest.js). It needs only Redis and
+        // Mongo, and only queues refunds — the PaymentProcessor, started once
+        // config is up, sends them. Idempotent, so a reboot mid-recovery can't
+        // double-refund.
+        await mongoReady;
+        await require('./services/restartRecovery').recoverInFlightOnStartup();
 
         // Register all Socket.IO handlers
         registerSocketHandlers(io);

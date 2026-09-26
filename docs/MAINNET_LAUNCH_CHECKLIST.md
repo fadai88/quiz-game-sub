@@ -124,6 +124,8 @@ regulated **skill-gaming** in many jurisdictions. Code cannot fix this.
 - [ ] **Payment throughput** — queue many payouts/refunds; confirm no double-send, no stuck queue, treasury fee burn is sustainable.
 - [ ] **Soak test** — run for hours; watch for memory leaks, orphaned rooms, timer drift, reconnect storms.
 - [ ] **Kill-test recovery** — hard-kill the server mid-game repeatedly; confirm every stake is refunded on reboot and nothing double-pays.
+  - [x] Room-recovery half (free): `scripts/loadtest/killtest.js` — passes across two crashes. Found and fixed two restart-window bugs; see `docs/LOAD_TESTING.md`.
+  - [ ] Money half: a staked room must queue exactly one on-chain refund per player. Needs funded devnet wallets.
 - [ ] Expand **automated tests** beyond the current 11 files (socket auth, matchmaking, tx verification, restart recovery are uncovered). The forfeit payout path (`handlePlayerLeftWin`) needs a DI refactor before it can be covered — `roomManager` fns are destructured at import, so sinon cannot intercept them.
 
 ---

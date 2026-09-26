@@ -118,15 +118,59 @@ and a dropped player in pot mode is a collected stake with no game and no
 refund), and any claimed player who loses their partner is put back in the queue
 rather than discarded.
 
+## Kill-test recovery: two bugs in the seconds after a restart
+
+**Found and fixed 2026-09-26. `killtest.js` is the regression test.**
+
+```bash
+node scripts/loadtest/killtest.js --pairs 3    # owns the server; stop npm start first
+```
+
+It starts the server itself, lets `--pairs` practice games get two questions in
+with one more player left waiting in the queue, SIGKILLs it, and boots it again.
+A fresh pair joins the instant the port answers, which is what real clients'
+auto-reconnect does. Then it kills and boots once more to check idempotency. It
+asserts: every killed room is gone from Redis and `active:rooms`, every killed
+session is `refunded` with an `endTime`, no payment is queued for a practice game,
+the waiting player's dead queue entry is cleared, the new pair plays a complete
+game that recovery leaves alone, and the second recovery changes nothing.
+
+This is the **room-recovery half**. The money half (a staked room queues exactly
+one on-chain refund per player) needs funded devnet wallets and is still open.
+
+Both bugs sat in the window between the port opening and startup finishing, and
+neither one logged an error:
+
+1. **Recovery swept up live games.** `recoverInFlightOnStartup` treats every room
+   and `active` session it finds as abandoned, but it ran from the Mongo `open`
+   handler, after the AWS treasury-secret fetch, while the port was already
+   open. A pair that joined in that window had its room deleted and its session
+   marked `refunded` mid-game (`games:4` reported for 3 killed games). In pot mode
+   that is a live staked game torn down under the players. **Fix:** `startServer`
+   now awaits Mongo and recovery before `listen`. Recovery only needs Redis and
+   Mongo, and only *queues* refunds; the PaymentProcessor sends them once config
+   is up.
+2. **Early sockets lost their rooms.** The Redis socket adapter was installed on
+   a 1s timer *after* `listen`. `io.adapter()` gives every namespace a fresh
+   adapter, discarding room memberships, so any socket connected in that first
+   second was matched, received question 1, and then nothing: every later
+   question went to an empty room and timed out. **Fix:** the adapter is awaited
+   before handlers are registered and before `listen`. The timer existed "so
+   redisClient is ready", but Redis had already been awaited and pinged by then.
+
+Recovery also now clears dead entries from the free practice queue (pass 3 used
+to return early outside pot mode). They were never paid, but they sat there until
+two live joins happened to claim them.
+
 ## Still to build
 
 - **Soak** — hours of continuous waves; watch RSS, room counts, orphaned rooms,
   timer drift, handle leaks.
 - **Payment throughput** — many queued payouts/refunds at once; assert no
   double-send and no stuck queue. Needs devnet.
-- **Kill-test recovery** — SIGKILL mid-game, repeatedly; assert every stake is
-  refunded on reboot and nothing double-pays. Needs devnet for the money half;
-  the room-recovery half can run free.
+- **Kill-test recovery, money half** — a staked room killed mid-game must queue
+  exactly one on-chain refund per player, and a game whose payout was already
+  queued must not also be refunded. Needs devnet.
 
 The matchmaking race blocked these: they would have been measuring a baseline in
 which matchmaking did not reliably produce one room per pair. That is fixed, so

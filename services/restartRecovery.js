@@ -19,6 +19,10 @@
  *     (PaymentQueue has an entry with gameId === roomId, which settlePotGame
  *     uses) is treated as settled and is NOT refunded.
  *   - Practice games (betAmount 0) are just cleaned up, never paid.
+ *   - Nothing it sees is live: server.js awaits this BEFORE the port opens, so
+ *     every room, session and queue entry belongs to the previous instance.
+ *     Running it after listen let it delete and refund a game a reconnecting
+ *     client had just started (scripts/loadtest/killtest.js, phase B).
  */
 
 const logger = require("../logger");
@@ -156,14 +160,31 @@ async function recoverGames() {
   return { games, refunds };
 }
 
-// ── Pass 3: stakers still waiting in the matchmaking pools ─────────────────────
-// In pot mode a pool entry means the player already paid on-chain. Only stale
-// entries (no live socket) are refunded; a live socket is a fresh, valid stake.
+// ── Pass 3: players still waiting in the matchmaking pools ─────────────────────
+// In pot mode a staked pool entry means the player already paid on-chain. Only
+// stale entries (no live socket) are refunded; a live socket would be a fresh,
+// valid stake. Recovery runs before the port opens, so in practice every entry
+// here is stale — the liveness check is a guard, not the mechanism.
 async function recoverMatchmakingStakers() {
-  if (!isPotMode()) return { stakers: 0, refunds: 0 };
   const io = context.io;
   let stakers = 0;
   let refunds = 0;
+
+  // The free practice queue holds no money, but its dead entries would sit
+  // there until two live joins happened to claim them — clear them now.
+  try {
+    for (const entry of await getMatchmakingPool(0)) {
+      if (io && entry?.socketId && io.sockets.sockets.get(entry.socketId))
+        continue;
+      await removeFromMatchmakingPool(0, entry?.socketId).catch(() => {});
+    }
+  } catch (e) {
+    logger.warn("[RESTART-RECOVERY] could not clear the practice queue", {
+      error: e.message,
+    });
+  }
+
+  if (!isPotMode()) return { stakers, refunds };
 
   for (const betAmount of VALID_BET_AMOUNTS_ATOMIC) {
     let pool = [];
@@ -198,7 +219,8 @@ async function recoverMatchmakingStakers() {
  * Non-fatal: any failure is logged, never crashes boot.
  */
 async function recoverInFlightOnStartup() {
-  // Redis is initialized concurrently in startServer(); wait briefly for it.
+  // startServer() initializes Redis before calling this; the wait only matters
+  // if a caller ever invokes it earlier.
   for (let i = 0; i < 30 && !context.redisClient; i++) await sleep(500);
   if (!context.redisClient) {
     logger.error(

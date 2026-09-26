@@ -11,7 +11,8 @@
     "install:prod": "npm ci --omit=dev",
     "verify:vendor": "sha256sum -c public/vendor/checksums.sha256",
     "dev": "nodemon server.js",
-    "loadtest": "node scripts/loadtest/concurrency.js"
+    "loadtest": "node scripts/loadtest/concurrency.js",
+    "killtest": "node scripts/loadtest/killtest.js"
   },
   "dependencies": {
     "@aws-sdk/client-secrets-manager": "^3.936.0",
