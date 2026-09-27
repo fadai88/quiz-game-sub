@@ -57,7 +57,7 @@ const {
   deleteGameRoom,
   atomicRoomUpdate,
   addToMatchmakingPool,
-  claimTwoFromMatchmakingPool,
+  claimPairFromPool,
   removeFromMatchmakingPool,
   getMatchmakingPool,
   addWaitingRoom,
@@ -282,54 +282,6 @@ async function validateSocketSession(socket, eventName) {
     });
     return false;
   }
-}
-
-/**
- * Claim two players to build a match from, or nothing.
- *
- * The claim itself is atomic in Redis (`claimTwoFromMatchmakingPool`), which is
- * what makes simultaneous joins safe: a pair belongs to exactly one handler, so
- * no two handlers can build a room for the same players. The original code read
- * the pool and then removed its picks, which let every racing handler believe it
- * had won — eight simultaneous joins produced eight rooms for one pair. See
- * docs/LOAD_TESTING.md.
- *
- * What is left for this layer is the part Redis cannot judge: whether a claimed
- * player is still connected. A dead entry is dropped, and a live player who
- * loses their partner that way is put back in the queue — never dropped, because
- * in ranked their stake is already collected and losing them would strand real
- * money. The loop then tries again for a complete pair.
- */
-const MAX_CLAIM_ATTEMPTS = 12;
-
-async function claimPairFromPool(betAmount, isEligible) {
-  for (let attempt = 0; attempt < MAX_CLAIM_ATTEMPTS; attempt++) {
-    const claimed = await claimTwoFromMatchmakingPool(betAmount);
-    if (!claimed) return null; // fewer than two queued — nothing to pair
-
-    const [first, second] = claimed;
-    const firstOk = !isEligible || isEligible(first);
-    const secondOk = !isEligible || isEligible(second);
-
-    if (firstOk && secondOk) return [first, second];
-
-    // Keep whichever is still usable and go back for a partner. The other was a
-    // stale entry for a socket that is gone, so it is intentionally not requeued.
-    const survivor = firstOk ? first : secondOk ? second : null;
-    if (survivor) {
-      await addToMatchmakingPool(betAmount, survivor).catch((error) =>
-        logger.error(
-          "[matchmaking] failed to re-queue a player after a stale partner:",
-          error
-        )
-      );
-    }
-  }
-
-  logger.warn(
-    `[matchmaking] gave up claiming a pair for ${betAmount} after ${MAX_CLAIM_ATTEMPTS} attempts`
-  );
-  return null;
 }
 
 /**

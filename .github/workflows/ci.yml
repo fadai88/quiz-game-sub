@@ -53,3 +53,31 @@ jobs:
       # (sinon) or vm-evaluated, so no service containers are needed. Keep it that
       # way — a test that needs a live service belongs behind its own job.
       - run: npm test
+
+  test-redis:
+    name: Tests (real Redis)
+    runs-on: ubuntu-latest
+    # The one suite that needs a live service: the matchmaking claim's Lua
+    # script, run against a real Redis across many connections. The main suite's
+    # fake imitates the script; this proves the script itself.
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      REDIS_URL: redis://127.0.0.1:6379
+      REQUIRE_REDIS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run test:redis

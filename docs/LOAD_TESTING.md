@@ -39,7 +39,11 @@ everything exercised here is shared code.
 
 ## Fixed: simultaneous joins paired the same players many times
 
-**Found 2026-09-14, fixed the same day. `concurrency.js` is the regression test.**
+**Found 2026-09-14, fixed the same day. `concurrency.js` is the end-to-end
+regression test; since 2026-09-26 it is also caught in CI by
+`tests/roomManager.claimPair.js` (a fake Redis that interleaves commands, so the
+old read-then-remove claim fails it) and `tests-redis/matchmakingClaim.js` (the
+real Lua script against a real Redis, in its own CI job).**
 
 `concurrency.js` checks invariants, not just latency — a throughput test would
 have passed this server while it was quietly pairing people two to eight times.
