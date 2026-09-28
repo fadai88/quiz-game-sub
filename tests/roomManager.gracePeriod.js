@@ -22,7 +22,9 @@ const roomManager = require("../services/roomManager");
 
 // ── In-memory fake Redis client ────────────────────────────────────────────────
 // Implements only the surface roomManager touches: hash storage via multi()
-// (hset/expire/exec), and hgetall. Field values are strings, like real Redis.
+// (hset/expire/exec), hgetall, and eval for the two room-write scripts (write
+// only if the room exists, bump its version). Field values are strings, like
+// real Redis. `seed` creates a room hash, as createGameRoom would.
 function makeFakeRedis() {
   const store = new Map(); // key -> { field: stringValue }
 
@@ -52,6 +54,21 @@ function makeFakeRedis() {
     },
     async hgetall(key) {
       return store.get(key) || {};
+    },
+    async eval(script, numKeys, key, ...argv) {
+      if (!store.has(key)) return -1;
+      const cas = script.includes("ARGV[1] then return 0");
+      const hash = store.get(key);
+      if (cas && (hash.version || "0") !== String(argv[0])) return 0;
+      const pairs = argv.slice(cas ? 2 : 1);
+      const fields = {};
+      for (let i = 0; i < pairs.length; i += 2) fields[pairs[i]] = pairs[i + 1];
+      hsetInto(key, fields);
+      hash.version = String(Number(hash.version || 0) + 1);
+      return 1;
+    },
+    seed(roomId) {
+      store.set(`room:${roomId}`, {});
     },
   };
 }
@@ -84,10 +101,13 @@ function makeRoom(overrides = {}) {
 
 describe("roomManager — disconnectGracePeriod Redis round-trip", () => {
   let prevRedis;
+  let redis;
 
   beforeEach(() => {
     prevRedis = context.get("redisClient");
-    context.set("redisClient", makeFakeRedis());
+    redis = makeFakeRedis();
+    for (const id of ["room-1", "room-2", "room-3"]) redis.seed(id);
+    context.set("redisClient", redis);
   });
 
   afterEach(() => {

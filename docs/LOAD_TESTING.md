@@ -166,10 +166,72 @@ Recovery also now clears dead entries from the free practice queue (pass 3 used
 to return early outside pot mode). They were never paid, but they sat there until
 two live joins happened to claim them.
 
+## Soak: concurrent room writes were overwriting each other
+
+**Found and fixed 2026-09-28. `soak.js` found it; `tests-redis/roomWrites.js`
+is the regression test.**
+
+```bash
+node scripts/loadtest/soak.js --minutes 10               # smoke run
+node scripts/loadtest/soak.js --minutes 240 --pairs 8    # the real thing
+```
+
+`soak.js` owns the server (it reads `/proc/<pid>` for memory and open file
+descriptors) and plays wave after wave of practice games with fresh sockets each
+wave. Players skip about one question in seven (`--skip`), so the 10s question
+timeout fires and its lateness can be read from the server's `[QTIMING]` lines.
+Every wave is checked for the same invariants as `concurrency.js`, and samples are
+written to `logs/soak-<run>.json` as the run goes. At the end it fails on:
+rooms or queue entries left behind, sessions not `completed`, file descriptors
+not back to their warmed-up level, steady RSS growth (trend **and** total, so GC
+noise on a short run cannot trip it), and question timeouts firing late or
+getting later with uptime.
+
+Its first run failed on leftovers: about one room per wave came back after the
+game had ended and sat in Redis for an hour, outside `active:rooms`.
+
+### What was wrong
+
+`atomicRoomUpdate` protected its read-modify-write with `WATCH`/`MULTI`/`EXEC`.
+`WATCH` state belongs to the **connection**, and the server has one shared Redis
+connection. Any caller's `EXEC` or `UNWATCH` cleared every other caller's watches,
+so concurrent updates committed blindly over each other. At the end of a wave,
+every player disconnects at once, after `gameOver` is emitted and before
+`deleteGameRoom` runs (it waits on a Mongo write in between). Each disconnect
+handler updates the room, and one of those writes landed after the delete.
+
+The leftover room was the visible symptom. The worse one does not show in any
+log. Measured against a real Redis on one connection, before the fix:
+
+| | Result |
+|---|---|
+| Two simultaneous updates to one room | **one lost, 200 of 200 trials** |
+| An update racing a delete | **room recreated, 148 of 200** |
+
+In a game, two simultaneous updates to one room are two players answering the
+same question within a few milliseconds of each other. One answer, and its
+point, could vanish: in a staked game, the wrong winner. The window widens with
+a hosted Redis's round-trip time.
+
+### The fix
+
+Every room hash now carries a `version` field. `atomicRoomUpdate` reads the room
+and its version in one `HGETALL`, applies the change, and writes it back with a
+Lua compare-and-set that succeeds only if the room still exists and the version
+is unchanged. Otherwise it retries from a fresh read, or throws `not found` if
+the room is gone. `updateGameRoom`'s plain writes use a script that also bumps
+the version, so a concurrent atomic update re-reads rather than overwriting
+them, and it refuses to recreate a room that no longer exists. Every caller
+writes back a room it has just read or created, so no caller relied on that.
+The interfaces and the game's behavior are unchanged.
+
+After the fix: 0 of 200 lost, 0 of 200 recreated.
+
 ## Still to build
 
-- **Soak** — hours of continuous waves; watch RSS, room counts, orphaned rooms,
-  timer drift, handle leaks.
+- **Soak, long run** — the scenario is built and passes short runs; it still
+  needs a multi-hour run (`--minutes 240`) for the memory and drift trends to
+  mean much.
 - **Payment throughput** — many queued payouts/refunds at once; assert no
   double-send and no stuck queue. Needs devnet.
 - **Kill-test recovery, money half** — a staked room killed mid-game must queue

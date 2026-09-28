@@ -123,6 +123,8 @@ regulated **skill-gaming** in many jurisdictions. Code cannot fix this.
 - [ ] **Concurrency test** matchmaking + full game loop under N simultaneous games (races, Redis contention, socket churn).
 - [ ] **Payment throughput** — queue many payouts/refunds; confirm no double-send, no stuck queue, treasury fee burn is sustainable.
 - [ ] **Soak test** — run for hours; watch for memory leaks, orphaned rooms, timer drift, reconnect storms.
+  - [x] Built: `scripts/loadtest/soak.js`. Short runs pass. It found concurrent room writes overwriting each other (lost answers, resurrected rooms); fixed, see `docs/LOAD_TESTING.md`.
+  - [ ] Multi-hour run (`--minutes 240`).
 - [ ] **Kill-test recovery** — hard-kill the server mid-game repeatedly; confirm every stake is refunded on reboot and nothing double-pays.
   - [x] Room-recovery half (free): `scripts/loadtest/killtest.js` — passes across two crashes. Found and fixed two restart-window bugs; see `docs/LOAD_TESTING.md`.
   - [ ] Money half: a staked room must queue exactly one on-chain refund per player. Needs funded devnet wallets.

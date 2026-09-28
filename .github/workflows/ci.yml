@@ -57,9 +57,9 @@ jobs:
   test-redis:
     name: Tests (real Redis)
     runs-on: ubuntu-latest
-    # The one suite that needs a live service: the matchmaking claim's Lua
-    # script, run against a real Redis across many connections. The main suite's
-    # fake imitates the script; this proves the script itself.
+    # The one suite that needs a live service: the Lua scripts behind the
+    # matchmaking claim and the versioned room writes, run against a real Redis.
+    # The main suite's fakes imitate the scripts; this proves the scripts.
     services:
       redis:
         image: redis:7

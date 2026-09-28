@@ -142,6 +142,9 @@ class VirtualPlayer {
     this.ip = loopbackFor(index);
     this.answerDelayMs = opts.answerDelayMs ?? 300;
     this.accuracy = opts.accuracy ?? 0.6;
+    // Chance of letting a question run out instead of answering. Real players
+    // do, and it is the only way a question's 10s timeout ever fires.
+    this.skipRate = opts.skipRate ?? 0;
     this.events = [];
     this.errors = [];
     this.answersSent = 0;
@@ -237,6 +240,7 @@ class VirtualPlayer {
   }
 
   #answer(q) {
+    if (Math.random() < this.skipRate) return;
     const wrong = Math.random() > this.accuracy;
     const choice = wrong ? Math.floor(Math.random() * 4) : 0;
     // A human does not answer instantly; a uniform delay would also make every
@@ -306,6 +310,101 @@ function ping(url) {
   });
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitFor(check, timeoutMs, label) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await sleep(100);
+  }
+  throw new Error(`timed out after ${timeoutMs}ms waiting for ${label}`);
+}
+
+const RECOVERY_DONE = /\[RESTART-RECOVERY\] done[^\n]*/;
+const OUTPUT_CAP = 1 << 20; // keep the last 1MB — soak runs go on for hours
+
+/**
+ * A server this script starts, and can kill. Scenarios that need to crash the
+ * server or read its process stats own it this way; concurrency.js just talks
+ * to whatever is already running.
+ *
+ * Output is kept as a capped tail for failure reports; `onLine` sees every line
+ * as it arrives, for scenarios that mine the log (timer drift, recovery).
+ */
+class ServerProcess {
+  constructor(label, { port, cwd, nodeArgs = [] }) {
+    this.label = label;
+    this.port = port;
+    this.url = `http://127.0.0.1:${port}`;
+    this.cwd = cwd;
+    this.nodeArgs = nodeArgs;
+    this.output = "";
+    this.recoveryLine = null;
+    this.lineHandlers = [];
+    this.child = null;
+    this.exited = null;
+  }
+
+  onLine(fn) {
+    this.lineHandlers.push(fn);
+  }
+
+  start() {
+    const { spawn } = require("child_process");
+    this.child = spawn(process.execPath, [...this.nodeArgs, "server.js"], {
+      cwd: this.cwd,
+      env: { ...process.env, PORT: String(this.port) },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let partial = "";
+    const collect = (buf) => {
+      const text = buf.toString();
+      this.output = (this.output + text).slice(-OUTPUT_CAP);
+      const lines = (partial + text).split("\n");
+      partial = lines.pop();
+      for (const raw of lines) {
+        const line = raw.replace(/\x1b\[[0-9;]*m/g, "");
+        if (!this.recoveryLine) {
+          const m = line.match(RECOVERY_DONE);
+          if (m) this.recoveryLine = m[0];
+        }
+        for (const fn of this.lineHandlers) fn(line);
+      }
+    };
+    this.child.stdout.on("data", collect);
+    this.child.stderr.on("data", collect);
+    this.exited = new Promise((r) => this.child.once("exit", r));
+  }
+
+  get pid() {
+    return this.child && this.child.pid;
+  }
+
+  async waitListening() {
+    await waitFor(() => ping(this.url), 60000, `${this.label} to listen`);
+  }
+
+  async waitRecovery() {
+    await waitFor(
+      () => this.recoveryLine !== null,
+      90000,
+      `${this.label} restart recovery to finish`
+    );
+    return this.recoveryLine;
+  }
+
+  async kill(signal = "SIGKILL") {
+    if (!this.child || this.child.exitCode !== null) return;
+    this.child.kill(signal);
+    await this.exited;
+  }
+
+  tail(lines = 40) {
+    return this.output.split("\n").slice(-lines).join("\n");
+  }
+}
+
 // ─── metrics ─────────────────────────────────────────────────────────────────
 
 function percentile(values, p) {
@@ -336,7 +435,10 @@ module.exports = {
   seedSession,
   clearSession,
   VirtualPlayer,
+  ServerProcess,
   ping,
+  sleep,
+  waitFor,
   percentile,
   summarize,
 };

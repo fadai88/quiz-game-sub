@@ -178,74 +178,77 @@ async function getGameRoom(roomId) {
   return await criticalRedisOp(async () => {
     const roomData = await context.redisClient.hgetall(`room:${roomId}`);
     if (!roomData || Object.keys(roomData).length === 0) return null;
+    return _hydrateRoom(roomId, roomData);
+  }, `Get game room ${roomId}`);
+}
 
-    const questions = JSON.parse(roomData.questions || "[]").map((q) => ({
-      ...q,
-      _id: q._id ? new mongoose.Types.ObjectId(q._id) : null,
-      shuffledOptions: q.shuffledOptions || [],
-      shuffledCorrectAnswer: q.shuffledCorrectAnswer ?? -1,
-    }));
+function _hydrateRoom(roomId, roomData) {
+  const questions = JSON.parse(roomData.questions || "[]").map((q) => ({
+    ...q,
+    _id: q._id ? new mongoose.Types.ObjectId(q._id) : null,
+    shuffledOptions: q.shuffledOptions || [],
+    shuffledCorrectAnswer: q.shuffledCorrectAnswer ?? -1,
+  }));
 
-    let questionIdMap = new Map();
-    try {
-      const mapData = JSON.parse(roomData.questionIdMap || "[]");
-      const hydrateEntry = (val) => ({
-        ...val,
-        _id: val._id ? new mongoose.Types.ObjectId(val._id) : null,
-        shuffledOptions: val.shuffledOptions || [],
-        shuffledCorrectAnswer: val.shuffledCorrectAnswer ?? -1,
-      });
+  let questionIdMap = new Map();
+  try {
+    const mapData = JSON.parse(roomData.questionIdMap || "[]");
+    const hydrateEntry = (val) => ({
+      ...val,
+      _id: val._id ? new mongoose.Types.ObjectId(val._id) : null,
+      shuffledOptions: val.shuffledOptions || [],
+      shuffledCorrectAnswer: val.shuffledCorrectAnswer ?? -1,
+    });
 
-      if (Array.isArray(mapData)) {
-        questionIdMap = new Map(
-          mapData.map((item) => [item.key, hydrateEntry(item.value)])
-        );
-      } else if (typeof mapData === "object" && mapData !== null) {
-        logger.warn(
-          `Room ${roomId} using legacy questionIdMap format - converting`
-        );
-        questionIdMap = new Map(
-          Object.entries(mapData).map(([k, v]) => [k, hydrateEntry(v)])
-        );
-      }
-    } catch (parseError) {
-      console.error(
-        `Error parsing questionIdMap for room ${roomId}:`,
-        parseError
+    if (Array.isArray(mapData)) {
+      questionIdMap = new Map(
+        mapData.map((item) => [item.key, hydrateEntry(item.value)])
+      );
+    } else if (typeof mapData === "object" && mapData !== null) {
+      logger.warn(
+        `Room ${roomId} using legacy questionIdMap format - converting`
+      );
+      questionIdMap = new Map(
+        Object.entries(mapData).map(([k, v]) => [k, hydrateEntry(v)])
       );
     }
+  } catch (parseError) {
+    console.error(
+      `Error parsing questionIdMap for room ${roomId}:`,
+      parseError
+    );
+  }
 
-    return {
-      players: JSON.parse(roomData.players || "[]"),
-      betAmount: parseInt(roomData.betAmount) || 0,
-      questions,
-      questionIdMap,
-      currentQuestionIndex:
-        roomData.currentQuestionIndex !== undefined
-          ? parseInt(roomData.currentQuestionIndex)
-          : -1,
-      answersReceived: parseInt(roomData.answersReceived) || 0,
-      suddenDeathRounds: parseInt(roomData.suddenDeathRounds) || 0,
-      gameStarted: roomData.gameStarted === "true",
-      roomMode: roomData.roomMode || null,
-      hasBot: roomData.hasBot === "true",
-      playerLeft: roomData.playerLeft === "true",
-      questionStartTime: roomData.questionStartTime
-        ? parseInt(roomData.questionStartTime)
-        : null,
-      roundStartTime: roomData.roundStartTime
-        ? parseInt(roomData.roundStartTime)
-        : null,
-      questionTimeout: null,
-      waitingTimeout: null,
-      disconnectGracePeriod: roomData.disconnectGracePeriod === "true",
-      isDeleted: roomData.isDeleted === "true",
-      gameMode: roomData.gameMode || "practice",
-      tournamentId: roomData.tournamentId || "",
-      matchId: roomData.matchId || "",
-      isPractice: roomData.isPractice !== "false",
-    };
-  }, `Get game room ${roomId}`);
+  return {
+    players: JSON.parse(roomData.players || "[]"),
+    betAmount: parseInt(roomData.betAmount) || 0,
+    questions,
+    questionIdMap,
+    currentQuestionIndex:
+      roomData.currentQuestionIndex !== undefined
+        ? parseInt(roomData.currentQuestionIndex)
+        : -1,
+    answersReceived: parseInt(roomData.answersReceived) || 0,
+    suddenDeathRounds: parseInt(roomData.suddenDeathRounds) || 0,
+    gameStarted: roomData.gameStarted === "true",
+    roomMode: roomData.roomMode || null,
+    hasBot: roomData.hasBot === "true",
+    playerLeft: roomData.playerLeft === "true",
+    questionStartTime: roomData.questionStartTime
+      ? parseInt(roomData.questionStartTime)
+      : null,
+    roundStartTime: roomData.roundStartTime
+      ? parseInt(roomData.roundStartTime)
+      : null,
+    questionTimeout: null,
+    waitingTimeout: null,
+    disconnectGracePeriod: roomData.disconnectGracePeriod === "true",
+    isDeleted: roomData.isDeleted === "true",
+    gameMode: roomData.gameMode || "practice",
+    tournamentId: roomData.tournamentId || "",
+    matchId: roomData.matchId || "",
+    isPractice: roomData.isPractice !== "false",
+  };
 }
 
 function _serializeRoom(room) {
@@ -302,16 +305,67 @@ function _serializeRoom(room) {
   };
 }
 
+// ─── Room writes ──────────────────────────────────────────────────────────────
+//
+// Every room hash carries a `version` field, bumped by each write. It is what
+// makes concurrent updates safe.
+//
+// This used to be done with WATCH/MULTI/EXEC, which cannot work here: WATCH
+// state belongs to the Redis CONNECTION, and the whole server shares one. Any
+// caller's EXEC or UNWATCH cleared every other caller's watches, so concurrent
+// updates wrote blindly over each other. Against a real Redis, two simultaneous
+// updates to one room lost one of them 200 times in 200, and an update racing a
+// delete brought the room back 148 times in 200. In play that is two players
+// answering together and one answer (and its point) vanishing, and finished
+// rooms reappearing for an hour. Found by scripts/loadtest/soak.js.
+//
+// Both scripts refuse to write a room that no longer exists: a deleted room
+// stays deleted, whoever writes to it afterwards.
+
+// ARGV: expected version, ttl, then field/value pairs.
+// Returns 1 written, 0 version moved on (retry), -1 room gone.
+const CAS_WRITE_ROOM_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+local current = redis.call('HGET', KEYS[1], 'version') or '0'
+if current ~= ARGV[1] then return 0 end
+redis.call('HSET', KEYS[1], unpack(ARGV, 3))
+redis.call('HINCRBY', KEYS[1], 'version', 1)
+redis.call('EXPIRE', KEYS[1], ARGV[2])
+return 1
+`;
+
+// ARGV: ttl, then field/value pairs. Returns 1 written, -1 room gone.
+const WRITE_EXISTING_ROOM_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+redis.call('HSET', KEYS[1], unpack(ARGV, 2))
+redis.call('HINCRBY', KEYS[1], 'version', 1)
+redis.call('EXPIRE', KEYS[1], ARGV[1])
+return 1
+`;
+
+const ROOM_TTL_SECONDS = 3600;
+
+function _fieldArgs(room) {
+  return Object.entries(_serializeRoom(room)).flat();
+}
+
 async function updateGameRoom(roomId, room) {
   try {
     if (room.isDeleted) {
       logger.info(`Room ${roomId} is marked as deleted, skipping update`);
       return;
     }
-    const multi = context.redisClient.multi();
-    multi.hset(`room:${roomId}`, _serializeRoom(room));
-    multi.expire(`room:${roomId}`, 3600);
-    await multi.exec();
+    const written = await context.redisClient.eval(
+      WRITE_EXISTING_ROOM_LUA,
+      1,
+      `room:${roomId}`,
+      ROOM_TTL_SECONDS,
+      ..._fieldArgs(room)
+    );
+    if (written === -1) {
+      logger.info(`Room ${roomId} no longer exists, skipping update`);
+      return;
+    }
     logger.info(`Updated room ${roomId} in Redis`);
   } catch (error) {
     console.error(`Error updating room ${roomId} in Redis:`, error);
@@ -325,20 +379,25 @@ async function atomicRoomUpdate(roomId, updateFn, maxRetries = 5) {
 
   while (retries < maxRetries) {
     try {
-      await context.redisClient.watch(`room:${roomId}`);
-      const room = await getGameRoom(roomId);
-      if (!room) {
-        await context.redisClient.unwatch();
+      const roomData = await context.redisClient.hgetall(`room:${roomId}`);
+      if (!roomData || Object.keys(roomData).length === 0) {
         throw new Error(`Room ${roomId} not found`);
       }
+      const version = roomData.version || "0";
+      const room = _hydrateRoom(roomId, roomData);
 
       const updatedRoom = await updateFn(room);
-      const multi = context.redisClient.multi();
-      multi.hset(`room:${roomId}`, _serializeRoom(updatedRoom));
-      multi.expire(`room:${roomId}`, 3600);
-      const results = await multi.exec();
+      const written = await context.redisClient.eval(
+        CAS_WRITE_ROOM_LUA,
+        1,
+        `room:${roomId}`,
+        version,
+        ROOM_TTL_SECONDS,
+        ..._fieldArgs(updatedRoom)
+      );
 
-      if (results === null) {
+      if (written === -1) throw new Error(`Room ${roomId} not found`);
+      if (written === 0) {
         retries++;
         raceConditionMetrics.totalRetries++;
         logger.warn(
@@ -356,7 +415,6 @@ async function atomicRoomUpdate(roomId, updateFn, maxRetries = 5) {
         );
       return updatedRoom;
     } catch (error) {
-      await context.redisClient.unwatch();
       if (error.message.includes("not found")) {
         logger.info(
           `atomicRoomUpdate: room ${roomId} already deleted, skipping`

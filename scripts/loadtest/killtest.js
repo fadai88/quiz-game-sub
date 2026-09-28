@@ -33,9 +33,15 @@
  *      everything B already settled: idempotency across repeated crashes.
  */
 
-const { spawn } = require("child_process");
 const path = require("path");
-const { redis, mongo, VirtualPlayer, ping } = require("./lib/harness");
+const {
+  redis,
+  mongo,
+  VirtualPlayer,
+  ServerProcess,
+  ping,
+  waitFor,
+} = require("./lib/harness");
 
 function arg(name, fallback) {
   const i = process.argv.indexOf(`--${name}`);
@@ -48,64 +54,8 @@ const PORT = Number(arg("port", process.env.PORT || 5000));
 const URL = `http://127.0.0.1:${PORT}`;
 const ROOT = path.resolve(__dirname, "../..");
 const POOL_KEY = "matchmaking:human:0";
-const RECOVERY_DONE = /\[RESTART-RECOVERY\] done/;
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function waitFor(check, timeoutMs, label) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await sleep(100);
-  }
-  throw new Error(`timed out after ${timeoutMs}ms waiting for ${label}`);
-}
-
-// ─── the server under test ───────────────────────────────────────────────────
-
-class ServerProcess {
-  constructor(label) {
-    this.label = label;
-    this.output = "";
-    this.child = null;
-    this.exited = null;
-  }
-
-  start() {
-    this.child = spawn(process.execPath, ["server.js"], {
-      cwd: ROOT,
-      env: { ...process.env, PORT: String(PORT) },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const collect = (buf) => (this.output += buf.toString());
-    this.child.stdout.on("data", collect);
-    this.child.stderr.on("data", collect);
-    this.exited = new Promise((r) => this.child.once("exit", r));
-  }
-
-  async waitListening() {
-    await waitFor(() => ping(URL), 60000, `${this.label} to listen`);
-  }
-
-  async waitRecovery() {
-    await waitFor(
-      () => RECOVERY_DONE.test(this.output),
-      90000,
-      `${this.label} restart recovery to finish`
-    );
-    return this.output.match(/\[RESTART-RECOVERY\] done[^\n]*/)[0];
-  }
-
-  async kill(signal = "SIGKILL") {
-    if (!this.child || this.child.exitCode !== null) return;
-    this.child.kill(signal);
-    await this.exited;
-  }
-
-  tail(lines = 40) {
-    return this.output.split("\n").slice(-lines).join("\n");
-  }
-}
+const server = (label) => new ServerProcess(label, { port: PORT, cwd: ROOT });
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -169,7 +119,7 @@ async function main() {
     console.log(
       `\nA  ${PAIRS} practice games + 1 lone queued player; SIGKILL at question ${KILL_AT_QUESTION}`
     );
-    const a = new ServerProcess("server A");
+    const a = server("server A");
     servers.push(a);
     a.start();
     await a.waitListening();
@@ -229,14 +179,14 @@ async function main() {
 
     // ── Phase B: reboot, with a fresh pair racing recovery ──────────────────
     console.log(`\nB  reboot; a fresh pair joins the instant the port answers`);
-    const b = new ServerProcess("server B");
+    const b = server("server B");
     servers.push(b);
     b.start();
 
     const early = [newPlayer(PAIRS * 2 + 1), newPlayer(PAIRS * 2 + 2)];
     await b.waitListening();
     const listeningAt = Date.now();
-    const recoveredBeforeJoin = RECOVERY_DONE.test(b.output);
+    const recoveredBeforeJoin = b.recoveryLine !== null;
     await Promise.all(early.map((p) => p.connect(URL, r)));
     const earlyGames = early.map((p) => p.playToCompletion(240000));
     for (const p of early) p.joinPracticeHuman();
@@ -335,7 +285,7 @@ async function main() {
     await Promise.all(early.map((p) => p.close(r)));
     await b.kill("SIGKILL");
 
-    const c = new ServerProcess("server C");
+    const c = server("server C");
     servers.push(c);
     c.start();
     await c.waitListening();
