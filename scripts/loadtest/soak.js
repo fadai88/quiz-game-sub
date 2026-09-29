@@ -32,6 +32,13 @@
  *     trip it alone)
  *   - timer drift: any question timeout firing more than --max-drift-ms late,
  *     or the late-run p95 drift exceeding the early-run p95 by more than that
+ *
+ * Host pauses are detected, not judged. If the machine sleeps, the server and
+ * this script freeze together, and a question timer due during the pause fires
+ * on wake, as late as the pause was long. A 1s heartbeat here notices the jump
+ * (a tick later than --pause-threshold-ms); timeouts whose wait overlaps a pause
+ * are left out of the drift checks and reported separately, along with each
+ * pause. The first 4h run failed on a single 32-minute "late" timeout this way.
  */
 
 const fs = require("fs");
@@ -61,6 +68,8 @@ const RSS_MB_PER_HOUR = Number(arg("rss-mb-per-hour", 30));
 const RSS_GROWTH_MB = Number(arg("rss-growth-mb", 64));
 const FD_SLACK = Number(arg("fd-slack", 16));
 const MAX_DRIFT_MS = Number(arg("max-drift-ms", 250));
+const PAUSE_THRESHOLD_MS = Number(arg("pause-threshold-ms", 5000));
+const HEARTBEAT_MS = 1000;
 const PORT = Number(arg("port", process.env.PORT || 5000));
 const URL = `http://127.0.0.1:${PORT}`;
 const ROOT = path.resolve(__dirname, "../..");
@@ -190,8 +199,38 @@ async function main() {
     if (m) drift.push({ at: Date.now(), ms: Number(m[1]) - QUESTION_MS });
   });
 
+  // Host-pause detector. A tick that arrives far later than scheduled means the
+  // whole machine stopped; this process is otherwise idle enough that it never
+  // misses a 1s tick by seconds on its own.
+  const pauses = []; // { start, end } in epoch ms
+  let lastTick = Date.now();
+  const heartbeat = setInterval(() => {
+    const now = Date.now();
+    if (now - lastTick > HEARTBEAT_MS + PAUSE_THRESHOLD_MS) {
+      pauses.push({ start: lastTick, end: now });
+      console.log(
+        `  ⏸ host paused ~${Math.round((now - lastTick) / 1000)}s ` +
+          `(${new Date(lastTick).toLocaleTimeString()} → ${new Date(
+            now
+          ).toLocaleTimeString()})`
+      );
+    }
+    lastTick = now;
+  }, HEARTBEAT_MS);
+
+  // Did this timeout's wait — from question start to the log line reaching us
+  // — overlap a pause? `ms` is how late it fired, so the wait began
+  // QUESTION_MS + ms before the line arrived.
+  const duringPause = (d) =>
+    pauses.some(
+      (p) =>
+        p.start < d.at + HEARTBEAT_MS &&
+        p.end > d.at - d.ms - QUESTION_MS - HEARTBEAT_MS
+    );
+
   const samples = [];
   const waveFailures = [];
+  const pausedWaveProblems = [];
   const allRooms = [];
   let aborted = null;
   const stopAt = Date.now() + MINUTES * 60000;
@@ -218,7 +257,11 @@ async function main() {
     samples.push(s);
     fs.writeFileSync(
       outFile,
-      JSON.stringify({ runId, args: process.argv.slice(2), samples }, null, 1)
+      JSON.stringify(
+        { runId, args: process.argv.slice(2), pauses, samples },
+        null,
+        1
+      )
     );
     return s;
   };
@@ -247,18 +290,31 @@ async function main() {
     let wave = 0;
     while (Date.now() < stopAt && !aborted) {
       wave++;
+      const waveStart = Date.now();
       const { rooms, problems } = await playWave(r, runId, wave);
       allRooms.push(...rooms);
-      if (problems.length) waveFailures.push({ wave, problems });
+      // A wave the host paused in is reported, not failed: answers queued in a
+      // frozen client land after the deadline on wake, and the server rightly
+      // rejects them. Leftover, session and fd checks still cover these waves.
+      const paused = pauses.some(
+        (p) => p.end > waveStart && p.start < Date.now()
+      );
+      if (problems.length)
+        (paused ? pausedWaveProblems : waveFailures).push({ wave, problems });
       await sleep(GAP_MS);
       const s = await sample(wave);
-      const recent = drift.slice(-PAIRS * 10).map((d) => d.ms);
+      const recent = drift
+        .slice(-PAIRS * 10)
+        .filter((d) => !duringPause(d))
+        .map((d) => d.ms);
       console.log(
         `  wave ${String(wave).padStart(4)}  t=${s.minutes.toFixed(1)}m ` +
           `rss=${fmt(s.rssMb, "MB")} fds=${s.fds} rooms=${s.activeRooms} ` +
           `queued=${s.queued} http=${fmt(s.httpP50)} ` +
           `drift p95=${fmt(percentile(recent, 95))}` +
-          (problems.length ? `  ✗ ${problems.join("; ")}` : "")
+          (problems.length
+            ? `  ${paused ? "⏸" : "✗"} ${problems.join("; ")}`
+            : "")
       );
       if (server.child.exitCode !== null) {
         aborted = `server exited (code ${server.child.exitCode})`;
@@ -290,6 +346,14 @@ async function main() {
           : "") +
         ")"
     );
+    if (pausedWaveProblems.length)
+      console.log(
+        `  ⏸ ${pausedWaveProblems.length} wave(s) the host paused in had ` +
+          `problems, reported not failed: ` +
+          pausedWaveProblems
+            .map((w) => `wave ${w.wave} — ${w.problems.join("; ")}`)
+            .join(" | ")
+      );
 
     check(
       end.roomKeys === base.roomKeys && end.activeRooms === base.activeRooms,
@@ -330,13 +394,28 @@ async function main() {
         `fails only if > ${RSS_MB_PER_HOUR} MB/h AND > ${RSS_GROWTH_MB} MB)`
     );
 
-    const d = drift.map((x) => x.ms);
+    const excused = drift.filter(duringPause);
+    const d = drift.filter((x) => !duringPause(x)).map((x) => x.ms);
+    if (pauses.length) {
+      const pausedMin =
+        pauses.reduce((a, p) => a + (p.end - p.start), 0) / 60000;
+      console.log(
+        `  ⏸ host paused ${pauses.length}× (${pausedMin.toFixed(1)} min in ` +
+          `total); ${excused.length} timeout(s) overlapping a pause left out of ` +
+          `the drift checks (latest fired ${Math.max(
+            0,
+            ...excused.map((x) => x.ms)
+          )}ms late) — not a server fault, but that stretch was not tested`
+      );
+    }
     const q = Math.max(1, Math.floor(d.length / 4));
     const earlyP95 = percentile(d.slice(0, q), 95);
     const lateP95 = percentile(d.slice(-q), 95);
     check(
       d.length > 0,
-      `question timeouts observed (${d.length}) — drift is measurable`
+      `question timeouts observed (${d.length}` +
+        (excused.length ? ` outside host pauses` : ``) +
+        `) — drift is measurable`
     );
     if (d.length) {
       check(
@@ -383,6 +462,7 @@ async function main() {
     console.error(`\n── server output (tail) ──\n${server.tail()}`);
     process.exitCode = 2;
   } finally {
+    clearInterval(heartbeat);
     await server.kill("SIGTERM").catch(() => {});
     await r.del(POOL_KEY).catch(() => {});
     await r.quit();

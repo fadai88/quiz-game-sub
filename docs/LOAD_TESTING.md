@@ -227,11 +227,37 @@ The interfaces and the game's behavior are unchanged.
 
 After the fix: 0 of 200 lost, 0 of 200 recreated.
 
-## Still to build
+### The 4-hour run (2026-09-28)
 
-- **Soak, long run** — the scenario is built and passes short runs; it still
-  needs a multi-hour run (`--minutes 240`) for the memory and drift trends to
-  mean much.
+`--minutes 240 --pairs 8`, after the fix: **157 waves, 1,256 games.**
+
+| Check | Result |
+|---|---|
+| Wave invariants | 0 failures |
+| Leftover rooms / queue entries | none; 1,256 of 1,256 sessions `completed` |
+| Open file descriptors | 42 at start, 42 at end |
+| RSS | trend ~4 MB/h; 125–150MB in the first hour, then a 155–160MB plateau with one-wave GC spikes to 180MB |
+| Question-timeout drift | p50 3ms, p95 5ms; p95 6ms in the first quarter, 5ms in the last |
+| HTTP latency | 4ms early, 4ms late |
+
+The run failed exactly one check: one timeout fired **1,919,907ms** (32 minutes)
+late. The machine slept for 32 minutes between waves 92 and 93, freezing the
+server and the harness together, and a question timer due during the sleep
+fired on wake. That is the host, not the server, but the script could not tell
+them apart. It now can: a 1s heartbeat in the harness notices a host pause (a
+tick more than `--pause-threshold-ms`, default 5s, late). Timeouts whose wait
+overlaps a pause are left out of the drift checks, and waves the host paused in
+report their problems without failing. Both are listed in the verdict, and
+pauses are saved in the samples file. Leftover, session and fd checks are never
+excused. Verified by freezing the harness and server together with
+`SIGSTOP`/`SIGCONT` for 30s mid-run. Frozen between questions, the overlapping
+timeouts are set aside and the run passes. Frozen mid-game, the players' sockets
+time out on wake and that wave's 8 players never see `gameOver`. The wave is
+reported, not failed. The abandoned games still ran to completion on the server,
+and every session ended `completed` with no leftover rooms, which is itself a
+useful result for the continue-on-disconnect model.
+
+## Still to build
 - **Payment throughput** — many queued payouts/refunds at once; assert no
   double-send and no stuck queue. Needs devnet.
 - **Kill-test recovery, money half** — a staked room killed mid-game must queue
