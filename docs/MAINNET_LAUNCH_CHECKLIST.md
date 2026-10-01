@@ -26,6 +26,15 @@ regulated **skill-gaming** in many jurisdictions. Code cannot fix this.
       skill-gaming-permitted regions.
 - [ ] **Geo-block** prohibited jurisdictions (IP + wallet-level if required).
 - [ ] **Terms of Service**, privacy policy, responsible-gaming disclosures.
+  - The ToS/rules must include this skill-predominance disclosure (true in code:
+    questions and their option order are drawn once per match room, and both
+    players receive the same broadcast; see `startGame` in
+    `services/gameService.js`): *"In a head-to-head match, both players receive
+    the identical set of questions, in the same order and with the answer
+    options in the same order."* Already shown in the game on the "Play vs
+    Human" choice (`public/game.html`). If `TIEBREAK_MODE=sudden_death` is
+    adopted, the tie-break question is shared the same way, and the rules
+    should say how ties are decided.
 - [ ] **Age verification** if required.
 - [ ] **KYC/AML** if stakes/volumes cross reporting thresholds.
 - [ ] Tax/withholding obligations on winnings.
