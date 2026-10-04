@@ -9,15 +9,15 @@ const User = require("../models/User");
 const PrizeCycle = require("../models/PrizeCycle");
 const CycleStat = require("../models/CycleStat");
 const { fromAtomicUnits, formatUSDC } = require("../utils/usdcUtils");
-const {
-  getCleanActiveRooms,
-  getGameRoom,
-  deleteGameRoom,
-  logGameRoomsState,
-} = require("./roomManager");
+// roomManager and constants are called through their module objects, not
+// destructured, so tests can stub them (handlePlayerLeftWin's forfeit payout is
+// covered in tests/playerService.forfeit.js). Destructured imports are bound at
+// load time and cannot be intercepted.
+const roomManager = require("./roomManager");
 const { acquireIdempotencyLock } = require("../utils/idempotency");
 const { trackRefundFailed } = require("../config/alerts");
-const { GAME_MODES, isPotMode } = require("../config/constants");
+const constants = require("../config/constants");
+const { GAME_MODES } = constants;
 
 // ─── Virtual balance refund ───────────────────────────────────────────────────
 
@@ -123,12 +123,12 @@ async function updatePlayerStats(players, roomData) {
 
 async function findPlayerActiveRoom(walletAddress) {
   try {
-    const roomIds = await getCleanActiveRooms();
+    const roomIds = await roomManager.getCleanActiveRooms();
     logger.info(
       `[ROOM_SEARCH] Checking ${roomIds.length} active rooms for ${walletAddress}`
     );
     for (const roomId of roomIds) {
-      const room = await getGameRoom(roomId);
+      const room = await roomManager.getGameRoom(roomId);
       if (!room || room.isDeleted) continue;
       const player = room.players.find((p) => p.username === walletAddress);
       if (player) {
@@ -161,7 +161,7 @@ async function handlePlayerLeftWin(
 ) {
   const io = context.io;
   try {
-    const room = await getGameRoom(roomId);
+    const room = await roomManager.getGameRoom(roomId);
 
     // Pot-mode forfeit payout. settlePotGame is otherwise only reached from
     // gameService.handleGameOver, which every forfeit path bypasses — without
@@ -172,7 +172,7 @@ async function handlePlayerLeftWin(
     // lazily to avoid a circular import (gameService already requires this file).
     let forfeitPayout = { paymentId: null, withheld: false };
     if (
-      isPotMode() &&
+      constants.isPotMode() &&
       !botOpponent &&
       betAmount > 0 &&
       room &&
@@ -279,16 +279,16 @@ async function handlePlayerLeftWin(
       }
     }
 
-    await deleteGameRoom(roomId);
-    await logGameRoomsState();
+    await roomManager.deleteGameRoom(roomId);
+    await roomManager.logGameRoomsState();
   } catch (error) {
     logger.error("Error processing player left win:", { error });
     io.to(roomId).emit(
       "gameError",
       "Error processing win after player left. Please contact support."
     );
-    await deleteGameRoom(roomId);
-    await logGameRoomsState();
+    await roomManager.deleteGameRoom(roomId);
+    await roomManager.logGameRoomsState();
   }
 }
 

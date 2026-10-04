@@ -149,7 +149,7 @@ stake to the wrong wallet.
 - [ ] **Kill-test recovery** — hard-kill the server mid-game repeatedly; confirm every stake is refunded on reboot and nothing double-pays.
   - [x] Room-recovery half (free): `scripts/loadtest/killtest.js` — passes across two crashes. Found and fixed two restart-window bugs; see `docs/LOAD_TESTING.md`.
   - [ ] Money half: a staked room must queue exactly one on-chain refund per player. Needs funded devnet wallets.
-- [ ] Expand **automated tests** beyond the current 12 files (socket auth, tx verification, restart recovery are uncovered; the matchmaking claim is covered by `tests/roomManager.claimPair.js` + `tests-redis/`, though the join handlers around it are not). The forfeit payout path (`handlePlayerLeftWin`) needs a DI refactor before it can be covered — `roomManager` fns are destructured at import, so sinon cannot intercept them.
+- [x] Expand **automated tests** — done 2026-10-03. The main suite is 196 tests; `tests-integration/` (real Redis + Mongo, its own CI job) is 22. Now covered: socket auth (`tests/socketAuth.js`), stake verification (`tests/transactionVerifier.js`), restart recovery's refund decisions (`tests-integration/restartRecovery.js`), and the forfeit payout (`tests/playerService.forfeit.js`, after making playerService's dependencies stubbable). Still uncovered: the matchmaking *join handlers* in `socket/index.js` (the atomic claim beneath them is covered).
 
 ---
 

@@ -81,23 +81,26 @@ function useContext({ withBotDetector = true, withProcessor = true } = {}) {
     .get(() => (withProcessor ? paymentProcessor : null));
 }
 
-beforeEach(() => {
-  sandbox = sinon.createSandbox();
-
-  queuePayment = sandbox.stub().resolves({ _id: "payment-1" });
-  getSuspicionScore = sandbox.stub().returns(0); // clean by default
-  getBotAnalysis = sandbox.stub().returns({ found: true, flags: [] });
-
-  // Never touch the database in these tests.
-  sandbox.stub(User, "findOneAndUpdate").resolves({});
-  sandbox.stub(WithheldPayout, "findOneAndUpdate").resolves(null);
-});
-
-afterEach(() => sandbox.restore());
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe("gameService — pot settlement", () => {
+  // Scoped to this suite. These hooks used to sit at the top level of the file,
+  // which in mocha makes them ROOT hooks: they stubbed User.findOneAndUpdate
+  // around every test in the whole run, not just these.
+  beforeEach(() => {
+    sandbox = sinon.createSandbox();
+
+    queuePayment = sandbox.stub().resolves({ _id: "payment-1" });
+    getSuspicionScore = sandbox.stub().returns(0); // clean by default
+    getBotAnalysis = sandbox.stub().returns({ found: true, flags: [] });
+
+    // Never touch the database in these tests.
+    sandbox.stub(User, "findOneAndUpdate").resolves({});
+    sandbox.stub(WithheldPayout, "findOneAndUpdate").resolves(null);
+  });
+
+  afterEach(() => sandbox.restore());
+
   it("pays a human winner 1.8× their stake against a human opponent", async () => {
     useContext();
 
