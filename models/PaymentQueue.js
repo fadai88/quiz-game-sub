@@ -133,7 +133,11 @@ PaymentQueueSchema.statics.getPendingPayments = async function (limit = 10) {
   // If you need performance, consider using .select() to limit fields instead
 };
 
-// NEW: Static method to cleanup old pending payments (call in cron)
+// ⚠️ DO NOT SCHEDULE. A 'pending' row is money owed — a winner's payout or a
+// player's refund that has not been sent yet (e.g. the treasury ran dry). This
+// deletes such rows after 24h with no record, silently cancelling the debt.
+// Not called anywhere; kept only so nobody re-adds it believing it is safe.
+// Stuck payments are handled by docs/RUNBOOKS.md §1 instead.
 PaymentQueueSchema.statics.cleanupOldPendings = async function (hours = 24) {
   const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000);
   const result = await this.deleteMany({

@@ -125,7 +125,7 @@ stake to the wrong wallet.
 - [ ] **Wire alerts** — set `SLACK_WEBHOOK_URL` or `DISCORD_WEBHOOK_URL`; without one, alerts only hit the console. Confirm they fire to a channel you watch.
 - [ ] Watch especially: `FAILED_PAYOUTS`, `REFUND_FAILED`, `PAYOUT_BLOCKED`, low-treasury (SOL/USDC), stuck payments, Mongo/Redis reconnects.
 - [ ] **Treasury balance dashboard/alert** (SOL + USDC), tuned via `MIN_TREASURY_SOL` / `MIN_TREASURY_USDC`.
-- [ ] **Runbooks** (write these before launch):
+- [x] **Runbooks** — written 2026-10-03: `docs/RUNBOOKS.md` (alert → runbook table, then each of the below, tied to the code). Writing them found and fixed a monitoring gap: an on-chain refund that failed to even *queue* raised no alert; `REFUND_FAILED` now fires for it (`services/refunds.js`).
   - Stuck/failed payouts (inspect `PaymentQueue`, retry, manual send).
   - Treasury refill (SOL and USDC) procedure.
   - **Withheld payouts** — resolve via `GET/POST /api/admin/withheld-payouts` (refund / release / deny).

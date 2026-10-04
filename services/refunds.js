@@ -23,6 +23,7 @@
 const logger = require("../logger");
 const PaymentQueue = require("../models/PaymentQueue");
 const { formatUSDC } = require("../utils/usdcUtils");
+const { trackRefundFailed } = require("../config/alerts");
 
 async function queueOnChainRefund(wallet, amountAtomic, refundKey, reason) {
   if (!wallet || !amountAtomic || Number(amountAtomic) <= 0) return false;
@@ -47,6 +48,19 @@ async function queueOnChainRefund(wallet, amountAtomic, refundKey, reason) {
       return true;
     }
     logger.error(`[REFUND] failed for ${refundKey}`, { error: err.message });
+    // A refund that never reaches the queue is invisible to the payment-health
+    // monitor (it only sees rows that exist), so alert here. Never let the
+    // alert itself break the caller's error handling.
+    await trackRefundFailed(wallet, {
+      message: `URGENT: could not queue on-chain refund of ${formatUSDC(
+        amountAtomic
+      )} to ${wallet}`,
+      walletAddress: wallet,
+      amount: Number(amountAtomic),
+      refundKey,
+      reason,
+      error: err.message,
+    }).catch(() => {});
     return false;
   }
 }
