@@ -8,7 +8,7 @@
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
     "start": "node server.js",
     "test": "mocha",
-    "test:redis": "mocha --no-config --exit --timeout 20000 tests-redis",
+    "test:integration": "mocha --no-config --exit --timeout 30000 tests-integration",
     "install:prod": "npm ci --omit=dev",
     "verify:vendor": "sha256sum -c public/vendor/checksums.sha256",
     "dev": "nodemon server.js",

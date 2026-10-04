@@ -60,7 +60,8 @@ async function settleRoom(roomId, betAmount, players, sessionId) {
 
   // Don't refund a game that already queued a winner payout — that would pay
   // stake + winnings and drain the treasury.
-  if (betAmount > 0 && !(await alreadySettled(roomId))) {
+  const settled = betAmount > 0 && (await alreadySettled(roomId));
+  if (betAmount > 0 && !settled) {
     for (const wallet of players) {
       const ok = await queueRefund(
         wallet,
@@ -72,15 +73,18 @@ async function settleRoom(roomId, betAmount, players, sessionId) {
     }
   }
 
-  // Mark the session done and clear the room either way.
+  // Mark the session done and clear the room either way. A game that already
+  // paid its winner finished; recording it as "refunded" would be false.
   if (sessionId) {
     await GameSession.updateOne(
       { _id: sessionId },
-      {
-        status: "refunded",
-        endTime: new Date(),
-        refundReason: "Server restart — in-flight game refunded",
-      }
+      settled
+        ? { status: "completed", endTime: new Date() }
+        : {
+            status: "refunded",
+            endTime: new Date(),
+            refundReason: "Server restart — in-flight game refunded",
+          }
     ).catch(() => {});
   }
   await deleteGameRoom(roomId).catch(() => {});

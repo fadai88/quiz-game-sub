@@ -19,7 +19,7 @@
  * enough" test proves that — while the atomic claim cannot.
  *
  * The fake implements the claim script's semantics rather than running its Lua.
- * The real script against a real Redis is covered by tests-redis/, which runs in
+ * The real script against a real Redis is covered by tests-integration/, which runs in
  * its own CI job with a Redis service.
  */
 

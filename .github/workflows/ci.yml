@@ -54,12 +54,13 @@ jobs:
       # way — a test that needs a live service belongs behind its own job.
       - run: npm test
 
-  test-redis:
-    name: Tests (real Redis)
+  test-integration:
+    name: Tests (real Redis + Mongo)
     runs-on: ubuntu-latest
-    # The one suite that needs a live service: the Lua scripts behind the
-    # matchmaking claim and the versioned room writes, run against a real Redis.
-    # The main suite's fakes imitate the scripts; this proves the scripts.
+    # The suites that need live services: the Lua scripts behind the matchmaking
+    # claim and the versioned room writes (real Redis), and restart recovery's
+    # refund decisions, whose no-double-refund guarantee rests on Mongo's unique
+    # index (real Mongo). The main suite's fakes imitate these; this proves them.
     services:
       redis:
         image: redis:7
@@ -70,9 +71,20 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     env:
       REDIS_URL: redis://127.0.0.1:6379
+      MONGODB_URI: mongodb://127.0.0.1:27017/ci
       REQUIRE_REDIS: "1"
+      REQUIRE_MONGO: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -80,4 +92,4 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npm run test:redis
+      - run: npm run test:integration

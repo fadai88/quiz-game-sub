@@ -9,7 +9,7 @@
  * concurrent connections. It needs a live server, so it lives outside tests/
  * (the main suite stays self-contained) and runs in its own CI job:
  *
- *   npm run test:redis
+ *   npm run test:integration
  *
  * Connection comes from REDIS_URL, or REDIS_HOST / REDIS_PORT / REDIS_PASSWORD
  * (read from .env locally). Without a reachable Redis the suite skips, unless
