@@ -25,6 +25,7 @@ test-ledger
 # Backups of question DBs — `*.db` does not match these, and the bank must
 # never be committed.
 *.db.bak
+*.db.bak-*
 *.db.backup
 
 # Question data — private; questions must never be committed
@@ -65,3 +66,6 @@ yarn-debug.log*
 yarn-error.log*
 logs/
 scripts/treasury-keypair.json
+
+# Python bytecode cache (scripts/*.py)
+__pycache__/
