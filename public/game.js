@@ -188,11 +188,10 @@ async function loadMonetizationConfig() {
     potMode = cfg.monetization === "pot";
     validBetAmountsAtomic = cfg.validBetAmounts || [];
 
-    // The USDC mint and treasury depend on the deployment's network (devnet vs
-    // mainnet). Take them from the server so the client can never drift from the
-    // configured network — a mismatch makes every stake transfer fail simulation
-    // with "invalid account data for instruction". Fall back to the built-in
-    // defaults only when the server omits them.
+    // The USDC mint, treasury and RPC endpoint depend on the deployment's
+    // network (devnet vs mainnet). They come only from the server, so the client
+    // can never drift from the configured network; there are no built-in
+    // fallbacks (see game-init.js). If any is missing, staking stays unavailable.
     if (cfg.usdcMint) {
       config.USDC_MINT = new solanaWeb3.PublicKey(cfg.usdcMint);
       if (typeof usdcManager !== "undefined") {
@@ -211,6 +210,11 @@ async function loadMonetizationConfig() {
       if (typeof usdcManager !== "undefined") {
         usdcManager.connection = connection;
       }
+    }
+    if (potMode && !(cfg.usdcMint && cfg.treasuryWallet && cfg.rpcUrl)) {
+      console.error(
+        "Server config is missing usdcMint, treasuryWallet or rpcUrl — staking is unavailable."
+      );
     }
   } catch (e) {
     console.error("Config load failed, assuming subscription mode:", e);
@@ -511,6 +515,13 @@ class USDCManager {
 
   async createTransferTransaction(walletAddress, betAmount, nonce) {
     try {
+      // Never guess the network: build a transfer only with the mint, treasury
+      // and RPC endpoint the server supplied.
+      if (!this.connection || !this.usdcMint || !config.TREASURY_WALLET) {
+        throw new Error(
+          "Staking is unavailable right now: network settings could not be loaded. Please refresh the page."
+        );
+      }
       // betAmount is now in atomic units (e.g., 3000000 for 3 USDC)
       // Validate against atomic unit values
       if (!VALID_BET_AMOUNTS_ATOMIC.includes(betAmount)) {
@@ -603,12 +614,12 @@ class USDCManager {
   }
 }
 
-// RPC endpoint comes from the server (/api/config → rpcUrl) so no RPC key is
-// baked into this file. Start with a keyless public devnet endpoint; loadMonetizationConfig()
-// swaps in the configured endpoint (and re-points usdcManager) before any stake
-// transaction is built.
-let RPC_URL = "https://api.devnet.solana.com";
-let connection = new solanaWeb3.Connection(RPC_URL, "confirmed");
+// RPC endpoint comes only from the server (/api/config → rpcUrl): no RPC key and
+// no network is baked into this file. loadMonetizationConfig() creates the
+// connection (and points usdcManager at it); until then there is none, and no
+// stake transaction can be built.
+let RPC_URL = null;
+let connection = null;
 
 const usdcManager = new USDCManager(connection);
 

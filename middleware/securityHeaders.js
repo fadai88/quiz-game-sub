@@ -7,6 +7,22 @@ const crypto = require("crypto");
 const { ENVIRONMENT } = require("../config/constants");
 const { TRUSTED_PROXY_IPS } = require("./trustedProxy");
 
+// The browser talks to exactly one Solana RPC endpoint: the one /api/config
+// hands it (CLIENT_RPC_URL). Allow that origin rather than a hardcoded list of
+// devnet/mainnet hosts, so switching networks is an env change and the policy
+// can never drift from the endpoint the client actually uses. RPC websockets
+// (wss://) are already covered by `wss:` below.
+function clientRpcOrigin() {
+  try {
+    return process.env.CLIENT_RPC_URL
+      ? new URL(process.env.CLIENT_RPC_URL).origin
+      : "";
+  } catch {
+    return "";
+  }
+}
+const CLIENT_RPC_ORIGIN = clientRpcOrigin();
+
 function securityHeaders(req, res, next) {
   const nonce = crypto.randomBytes(16).toString("base64");
   res.locals.cspNonce = nonce;
@@ -38,7 +54,9 @@ function securityHeaders(req, res, next) {
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: https:",
     "font-src 'self' data:",
-    "connect-src 'self' wss: ws: https://courtnay-0wegdq-fast-mainnet.helius-rpc.com https://devnet.helius-rpc.com https://mainnet.helius-rpc.com https://api.devnet.solana.com https://api.mainnet-beta.solana.com https://api.anthropic.com https://www.google.com https://www.gstatic.com",
+    `connect-src 'self' wss: ws:${
+      CLIENT_RPC_ORIGIN ? " " + CLIENT_RPC_ORIGIN : ""
+    } https://api.anthropic.com https://www.google.com https://www.gstatic.com`,
     "frame-src 'self' https://www.google.com https://recaptcha.google.com https://www.recaptcha.net",
     "child-src 'self' https://www.google.com https://recaptcha.google.com",
     "frame-ancestors 'none'",

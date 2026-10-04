@@ -32,11 +32,13 @@ function fromAtomicUnits(atomicAmount) {
   return atomicAmount / USDC_MULTIPLIER;
 }
 
+// The USDC mint and treasury come ONLY from the server (/api/config), which
+// reads them from the deployment's env. There is deliberately no built-in
+// fallback: the old one paired the MAINNET mint with the DEVNET treasury, so a
+// failed config fetch on mainnet would have built a real-USDC stake transfer to
+// the wrong wallet. Until the server supplies them, staking is unavailable
+// (USDCManager.createTransferTransaction refuses to build a transfer).
 const config = {
-  USDC_MINT: new solanaWeb3.PublicKey(
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-  ),
-  TREASURY_WALLET: new solanaWeb3.PublicKey(
-    "NoyR3nErDpw4fWDyHQ3CCURAe4TjTf9TkHZ7vhuDTp4"
-  ),
+  USDC_MINT: null,
+  TREASURY_WALLET: null,
 };

@@ -229,12 +229,18 @@ async function initializeConfig() {
     console.log('🔐 Initializing config with AWS Secrets Manager...');
     if (!process.env.TREASURY_WALLET_ADDRESS) throw new Error('TREASURY_WALLET_ADDRESS not set');
     if (!process.env.SOLANA_RPC_URL)          throw new Error('SOLANA_RPC_URL not set');
+    // No defaults for network-specific values: a mainnet fallback on a devnet
+    // deploy (or the reverse) mismatches every transfer. Fail at boot instead.
+    if (!process.env.USDC_MINT_ADDRESS)       throw new Error('USDC_MINT_ADDRESS not set');
+    // Pot mode: the browser builds stake transfers against CLIENT_RPC_URL (served
+    // by /api/config). Without it no one could stake.
+    if (isPotMode() && !process.env.CLIENT_RPC_URL) throw new Error('CLIENT_RPC_URL not set (required in pot mode)');
 
     const secretString = await getCachedTreasurySecretKey();
     const secretKey    = JSON.parse(secretString);
 
     const cfg = {
-        USDC_MINT:        new PublicKey(process.env.USDC_MINT_ADDRESS || 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'),
+        USDC_MINT:        new PublicKey(process.env.USDC_MINT_ADDRESS),
         TREASURY_WALLET:  new PublicKey(process.env.TREASURY_WALLET_ADDRESS),
         TREASURY_KEYPAIR: Keypair.fromSecretKey(Buffer.from(secretKey)),
         connection:       new Connection(process.env.SOLANA_RPC_URL, 'confirmed'),

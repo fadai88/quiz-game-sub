@@ -71,11 +71,23 @@ regulated **skill-gaming** in many jurisdictions. Code cannot fix this.
 
 ## B. Hardcoded client values (change in source, not just env)
 
-- [ ] **`public/game-init.js`** — `TREASURY_WALLET` hardcoded fallback (`NoyR3n…`) → mainnet treasury. (`USDC_MINT` there is already mainnet.) Used during the pre-`/api/config` load gap and if config fetch fails.
-- [ ] **`public/game.js`** — RPC fallback default `https://api.devnet.solana.com` → `https://api.mainnet-beta.solana.com`.
-- [ ] **`public/subscription.js`** — devnet RPC + hardcoded devnet mint/treasury. **No-op for pot mode** (not served); fix only if you run subscription mode.
-- [ ] **`middleware/securityHeaders.js`** — CSP `connect-src` already whitelists mainnet Helius + `api.mainnet-beta.solana.com`. Add your mainnet RPC host if it differs, or the browser blocks it.
-- [ ] Re-grep for stragglers (command at the bottom).
+**Done 2026-10-03 — the network is now env-only.** The client has no built-in
+mint, treasury or RPC endpoint; it uses only what `/api/config` serves from the
+server's env (`USDC_MINT_ADDRESS`, `TREASURY_WALLET_ADDRESS`, `CLIENT_RPC_URL`).
+If any is missing, the stake-transfer builder refuses to run rather than guess.
+The old fallback paired the **mainnet** USDC mint with the **devnet** treasury
+(`NoyR3n…`): on mainnet, a failed config fetch would have built a real-USDC
+stake to the wrong wallet.
+
+- [x] **`public/game-init.js`** — hardcoded mint/treasury fallback removed.
+- [x] **`public/game.js`** — devnet RPC default removed; no connection exists until the server supplies `rpcUrl`, and `createTransferTransaction` refuses to build a transfer without mint, treasury and connection.
+- [x] **Server** — `USDC_MINT_ADDRESS` no longer defaults to the mainnet mint (`server.js`, `/api/config`); it is required at boot, and so is `CLIENT_RPC_URL` in pot mode. The server refuses to start without them.
+- [x] **`middleware/securityHeaders.js`** — CSP `connect-src` now allows the origin of `CLIENT_RPC_URL` instead of a hardcoded host list, so switching RPC needs no source change.
+- [ ] **`public/subscription.js`** — still has devnet RPC + mint/treasury. **No-op for pot mode** (not served); fix only if you run subscription mode.
+- [x] Re-grep for stragglers: none outside comments and `subscription.js`.
+
+**Cutover is therefore env-only:** set the three variables above (plus
+`SOLANA_RPC_URL`) to mainnet values; see §A.
 
 ---
 

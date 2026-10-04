@@ -357,7 +357,7 @@ router.get(
 
 // POST /api/admin/withheld-payouts/:id/resolve
 // Body: { action: "refund" | "release" | "deny", note?: string }
-//   refund  — return the winner's own stake to their virtual balance
+//   refund  — return the winner's own stake on-chain (treasury → winner)
 //   release — queue the full withheld payout on-chain (treasury → winner)
 //   deny    — close the hold with no money movement (confirmed abuse)
 router.post(
@@ -584,10 +584,10 @@ router.get("/config", (req, res) => {
       treasuryWallet: isPotMode()
         ? process.env.TREASURY_WALLET_ADDRESS || ""
         : "",
-      usdcMint: isPotMode()
-        ? process.env.USDC_MINT_ADDRESS ||
-          "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-        : "",
+      // No default: server.js refuses to start without USDC_MINT_ADDRESS. A
+      // mainnet-mint fallback here once meant a devnet deploy missing the var
+      // would hand clients the wrong mint.
+      usdcMint: isPotMode() ? process.env.USDC_MINT_ADDRESS || "" : "",
       // Anti-cheat: when staking requires an attested native client, the web UI
       // should cap or hide its stake controls and point at the app rather than
       // letting a player build a stake transaction the server will refuse.
