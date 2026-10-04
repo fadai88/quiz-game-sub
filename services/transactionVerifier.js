@@ -74,6 +74,13 @@ async function verifyAndValidateTransaction(
   const cfg = context.config;
   const redisClient = context.redisClient;
 
+  // Checked first, before anything is claimed or logged. It used to sit next to
+  // the amount comparison, but formatUSDC() in the log line below throws on a
+  // non-integer first, so the check never ran and the rejection depended on a
+  // log statement.
+  if (!Number.isInteger(expectedAmount))
+    throw new Error("Bet amount must be in atomic units (integer)");
+
   logger.info(`🔐 SECURE VERIFICATION: ${signature}`);
   logger.info(
     `   Expected: ${formatUSDC(
@@ -261,9 +268,6 @@ async function verifyAndValidateTransaction(
   const actualTransferAmount =
     BigInt(treasuryPost.uiTokenAmount.amount || "0") -
     BigInt(treasuryPre.uiTokenAmount.amount || "0");
-  if (!Number.isInteger(expectedAmount))
-    throw new Error("Bet amount must be in atomic units (integer)");
-
   if (actualTransferAmount !== BigInt(expectedAmount)) {
     await TransactionLog.findOneAndUpdate(
       { signature },

@@ -2588,4 +2588,9 @@ function registerSocketHandlers(io) {
   registerConnectionHandler(io);
 }
 
-module.exports = { registerSocketHandlers, botDetector };
+module.exports = {
+  registerSocketHandlers,
+  botDetector,
+  // exposed for tests
+  _internal: { registerSocketAuthMiddleware, validateSocketSession },
+};
