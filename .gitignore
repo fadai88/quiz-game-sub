@@ -69,3 +69,6 @@ scripts/treasury-keypair.json
 
 # Python bytecode cache (scripts/*.py)
 __pycache__/
+
+# Legal working documents (briefing packs, drafts for counsel) — private
+legal/

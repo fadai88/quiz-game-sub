@@ -165,11 +165,59 @@ Ranked by my confidence, lowest first:
    that does not match the Play Console app; the server then cannot decode the
    token and reports `VERIFICATION_ERROR`.
 
-## Store policy — start this early
+## Distribution — choosing where the app is installed from
 
-Apple and Google both treat real-money gaming as a restricted category requiring
-licensed-entity status and per-region approval, and crypto-stake apps are
-routinely rejected. Android-first with closed-track or direct APK distribution
-keeps a compliant beta possible without full store review, but distribution
-approval sits alongside the legal gate in `docs/MAINNET_LAUNCH_CHECKLIST.md` and
-is slow enough to block launch on its own.
+**Researched 2026-10-07.** Store policies change often; recheck the sources
+below before acting on any of this. None of these routes replaces the legal
+sign-off in `docs/MAINNET_LAUNCH_CHECKLIST.md` §0: they only decide whether a
+*store* will carry the app, not whether staking is lawful where players are.
+
+| | Google Play | Own website (APK download) | Solana dApp Store |
+|---|---|---|---|
+| Reach | Almost every Android phone | Any Android phone, but players must allow installs from your site | Solana Mobile phones only (Saga, Seeker: about 150,000 Seekers shipped) |
+| Real-money staking | **Prohibited by default.** Allowed only as licensed gambling: an approved Google application, a licence per country, selected countries, Adults Only rating, age and geo-blocking | No store rules; only the law applies | **Not addressed** in the publisher policy or developer agreement. Apps that facilitate illegal activity are banned, and Solana Mobile can remove any app at any time without cause |
+| Account / identity | Personal or organization. Licensed gambling realistically needs an **organization account** (registered company + D-U-N-S number) | Android developer verification (below) | Publisher portal account + **KYC/KYB** verification |
+| Getting live | Personal accounts created after 13 Nov 2023: closed test with **12 testers for 14 days**, then a production review (about 7 days) | Immediate | Review in **3–5 business days**, live on approval |
+| Cost | One-time registration fee | Hosting | **0% commission**; about 0.2 SOL for transaction and storage fees per submission |
+| Updates | Automatic | **None automatic**: the app needs its own "new version" prompt | Through the store |
+| Device check (Play Integrity) | Passes as Play-recognized | Fails "Play recognized" | Fails "Play recognized" |
+
+**Android developer verification applies to every route.** Google now requires
+apps installed on certified Android devices to come from a developer who has
+registered their identity, whether the app comes from Google Play, another
+store or a website. Registration opened in March 2026; enforcement began on
+30 September 2026 in Brazil, Indonesia, Singapore and Thailand, and is planned
+worldwide in 2027. Unverified apps can then only be installed through an
+"advanced" flow or adb. Register before distributing by any route. (The Seeker
+ships with Google Play, so dApp Store installs are very likely covered too.)
+
+**Device-check setting for non-Play installs.** A copy installed from the
+website or the dApp Store reports `UNRECOGNIZED_VERSION`. If staked play
+requires attestation (`STAKED_REQUIRES_ATTESTATION=true`), those players could
+not stake unless `ATTESTATION_REQUIRE_PLAY_RECOGNIZED=false` (see Server
+configuration). That keeps the genuine-device check but drops the guarantee
+that the app itself is unmodified, so pair it with a signed APK, a published
+checksum, and the server-side cheating checks.
+
+**Why the dApp Store fits this app.** Its users already hold Solana wallets, and
+the Seeker's built-in wallet works through Mobile Wallet Adapter, which the app
+already uses. It takes no commission and has no real-money-gaming ban. The
+trade-offs: a small audience (Seeker owners only), removal at Solana Mobile's
+discretion, and the publisher wallet must never be lost, because it is needed
+for every future update of the app.
+
+**A sensible order:** register for Android developer verification; publish to
+the dApp Store and/or the website once legal sign-off covers the target
+markets; treat Google Play as a free-play-only listing unless a gambling licence
+and Google's approval are obtained.
+
+Sources:
+[Google Play account types](https://support.google.com/googleplay/android-developer/answer/13634885) ·
+[Google Play gambling and real-money games policy](https://support.google.com/googleplay/android-developer/answer/9877032) ·
+[Play testing requirements for new personal accounts](https://support.google.com/googleplay/android-developer/answer/14151465) ·
+[Android developer verification timeline (Help Net Security)](https://www.helpnetsecurity.com/2026/06/19/android-developer-verification-rollout-markets/) ·
+[Solana Mobile publisher policy](https://legal.solanamobile.com/publisher-policy-web) ·
+[Solana dApp Store developer agreement](https://legal.solanamobile.com/developer-agreement-web) ·
+[dApp Store: submit a new app](https://docs.solanamobile.com/dapp-store/submit-new-app) ·
+[Seeker shipments (Cointelegraph)](https://cointelegraph.com/news/solana-mobile-device-seeker-ships-50-countries) ·
+[dApp Store zero fees (Solana Compass)](https://solanacompass.com/news/solana-mobile-dapp-store-surpasses-1561-apps-as-catalog-more-than-doubles-in-three-months)

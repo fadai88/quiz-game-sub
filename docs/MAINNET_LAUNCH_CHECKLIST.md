@@ -38,6 +38,12 @@ regulated **skill-gaming** in many jurisdictions. Code cannot fix this.
 - [ ] **Age verification** if required.
 - [ ] **KYC/AML** if stakes/volumes cross reporting thresholds.
 - [ ] Tax/withholding obligations on winnings.
+- [ ] **App distribution** — see the Distribution section of `docs/MOBILE_APP.md` (researched 2026-10-07):
+  - [ ] **Register for Android developer verification.** Required for installs on certified Android devices by *any* route, store or website (enforced from 30 Sep 2026 in BR/ID/SG/TH, worldwide in 2027).
+  - [ ] **Google Play** prohibits real-money staking unless it is licensed gambling: organization account (company + D-U-N-S), Google's gambling application, a licence per country, Adults Only rating, age and geo-blocking. Otherwise list it as free play only, or not at all.
+  - [ ] **Solana dApp Store** (preferred): publisher KYC/KYB, about 0.2 SOL per submission, 3–5 business-day review, 0% commission. There is no real-money-gaming ban, but illegal apps are banned and removal is at Solana Mobile's discretion, so it still depends on this section's sign-off. **Never lose the publisher wallet**: it is needed for every update.
+  - [ ] **Own website APK**: add an in-app "new version" prompt, publish a checksum, and protect the signing key.
+  - [ ] For any non-Play install, decide on `ATTESTATION_REQUIRE_PLAY_RECOGNIZED=false`: non-Play copies otherwise cannot stake when attestation is required.
 
 > Do not process a single real-money game until this section has legal sign-off.
 
